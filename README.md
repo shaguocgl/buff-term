@@ -8,8 +8,11 @@
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)
 ![Rust](https://img.shields.io/badge/Rust-1.97-orange.svg)
 ![React](https://img.shields.io/badge/React-19-blue.svg)
+![Agent](https://img.shields.io/badge/Agent-自研编排%20%7C%20无框架依赖-8b5cf6.svg)
 
-KeyWisp Agent 是一款桌面端 SSH 管理工具，内置 AI Agent 能力：你可以自行配置大模型平台（DeepSeek、OpenAI、通义千问、Kimi、本地 Ollama 等），让 AI 通过自然语言帮你查询和运维远程服务器。所有配置、密钥和审计数据默认只保存在本机。
+KeyWisp Agent 是一款桌面端 SSH 管理工具，内置**自研的 AI Agent 编排层**：你可以自行配置大模型平台（DeepSeek、OpenAI、通义千问、Kimi、本地 Ollama 等），让 AI 通过自然语言帮你查询和运维远程服务器。所有配置、密钥和审计数据默认只保存在本机。
+
+> 🤖 **Agent 编排层完全自研**：核心工具调用循环（SSE 流式解析 → 工具执行 → 结果回填）由本项目手写实现，**不依赖 LangChain / OpenAI Agents SDK / Vercel AI SDK 等框架**——审批拦截、安全策略、审计留痕全部自己掌控。详细设计见 [实现细节](docs/实现细节.md)。
 
 ## ✨ 功能特性
 
@@ -23,6 +26,7 @@ KeyWisp Agent 是一款桌面端 SSH 管理工具，内置 AI Agent 能力：你
 
 ### AI Agent
 
+- **自研 Agent 编排层**：SSE 流式解析、工具调用循环、审批与审计均为手写实现，无框架依赖，行为完全可控
 - 多平台配置：DeepSeek / OpenAI / 通义千问 / Kimi / Ollama（OpenAI 兼容协议）
 - 单个厂商支持配置多个模型，聊天窗口底部可随时切换
 - 流式回复，Markdown 渲染（代码块 / 表格 / 列表）
