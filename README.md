@@ -101,7 +101,6 @@ npm run tauri build
 
 ## 📚 文档
 
-- [技术方案](docs/技术方案.md)：产品规划、技术选型与实施计划
 - [实现细节](docs/实现细节.md)：代码结构、核心实现与踩坑记录
 
 ## 📁 项目结构
@@ -118,7 +117,7 @@ src-tauri/src/         Rust 后端
   credentials.rs       系统钥匙串凭据 + 内存缓存
   audit.rs             审计日志查询
   db.rs                SQLite（主机、AI 配置、规则、审计）
-docs/                  技术方案
+docs/                  实现细节
 ```
 
 ## 🗺 路线图
