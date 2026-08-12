@@ -1723,6 +1723,16 @@ input::placeholder {
   padding-bottom: 12px;
 }
 
+.alert-smtp {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+
 .alert-settings-title {
   font-weight: 650;
   font-size: 13px;
