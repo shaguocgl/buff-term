@@ -5,7 +5,6 @@ mod audit;
 mod credentials;
 mod db;
 mod hosts;
-mod inspection;
 mod mcp;
 mod models;
 mod monitor;
@@ -55,8 +54,6 @@ pub fn run() {
                     eprintln!("[mcp] 启动 MCP 服务失败: {e}");
                 }
             }
-            alert::spawn_alert_loop(app.handle().clone());
-            inspection::spawn_inspection_loop(app.handle().clone());
             Ok(())
         })
         .manage(SessionManager::default())
@@ -84,18 +81,9 @@ pub fn run() {
             sftp::sftp_mkdir,
             sftp::sftp_rename,
             monitor::monitor_snapshot,
-            alert::list_alerts,
-            alert::save_alert,
-            alert::delete_alert,
             alert::get_alert_settings,
             alert::save_alert_settings,
             alert::test_alert_settings,
-            alert::test_alert_channel,
-            inspection::list_inspections,
-            inspection::save_inspection,
-            inspection::delete_inspection,
-            inspection::list_inspection_runs,
-            inspection::inspection_respond,
             mcp::get_mcp_service,
             mcp::save_mcp_service,
             mcp::rotate_mcp_token,

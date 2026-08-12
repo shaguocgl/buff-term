@@ -117,30 +117,6 @@ export interface MonitorSnapshot {
   top: TopProc[];
 }
 
-export interface AlertRule {
-  id: string;
-  metric: string;
-  operator: string;
-  threshold: number;
-  channel: string;
-  target?: string | null;
-  secret?: string | null;
-  cooldown_min: number;
-  enabled: boolean;
-  created_at: number;
-}
-
-export interface AlertInput {
-  metric: string;
-  operator: string;
-  threshold: number;
-  channel: string;
-  target?: string;
-  secret?: string;
-  cooldown_min?: number;
-  enabled?: boolean;
-}
-
 export interface AlertSettings {
   smtp_host?: string | null;
   smtp_port?: number | null;
@@ -149,34 +125,6 @@ export interface AlertSettings {
   smtp_from?: string | null;
   smtp_to?: string | null;
   smtp_tls?: string | null;
-}
-
-export interface Inspection {
-  id: string;
-  host_id: string;
-  interval_min: number;
-  enabled: boolean;
-  last_run_at?: number | null;
-  created_at: number;
-}
-
-export interface InspectionInput {
-  host_id: string;
-  interval_min?: number;
-  enabled?: boolean;
-}
-
-export interface InspectionRun {
-  id: string;
-  inspection_id: string;
-  host_id: string;
-  host_label: string;
-  started_at: number;
-  finished_at?: number | null;
-  status: string;
-  risk_level: string;
-  summary?: string | null;
-  respond_text?: string | null;
 }
 
 export interface McpService {

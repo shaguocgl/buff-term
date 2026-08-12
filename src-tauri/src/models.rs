@@ -88,23 +88,6 @@ pub struct AuditLog {
     pub duration_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AlertRule {
-    pub id: String,
-    pub metric: String,
-    pub operator: String,
-    pub threshold: f64,
-    pub channel: String,
-    #[serde(default)]
-    pub target: Option<String>,
-    #[serde(default)]
-    pub secret: Option<String>,
-    #[serde(default = "default_cooldown")]
-    pub cooldown_min: u64,
-    pub enabled: bool,
-    pub created_at: u64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AlertSettings {
     pub smtp_host: Option<String>,
@@ -115,33 +98,6 @@ pub struct AlertSettings {
     pub smtp_to: Option<String>,
     /// starttls / ssl / none
     pub smtp_tls: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Inspection {
-    pub id: String,
-    pub host_id: String,
-    pub interval_min: u64,
-    pub enabled: bool,
-    #[serde(default)]
-    pub last_run_at: Option<u64>,
-    pub created_at: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InspectionRun {
-    pub id: String,
-    pub inspection_id: String,
-    pub host_id: String,
-    pub host_label: String,
-    pub started_at: u64,
-    pub finished_at: Option<u64>,
-    pub status: String,
-    pub risk_level: String,
-    #[serde(default)]
-    pub summary: Option<String>,
-    #[serde(default)]
-    pub respond_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,10 +118,6 @@ pub struct McpService {
 
 fn default_mcp_permission() -> String {
     "confirm".to_string()
-}
-
-fn default_cooldown() -> u64 {
-    10
 }
 
 impl Host {

@@ -15,7 +15,6 @@ import AlertModal from './components/AlertModal';
 import AuditLogModal from './components/AuditLogModal';
 import ChatPanel from './components/ChatPanel';
 import HostForm from './components/HostForm';
-import InspectionModal from './components/InspectionModal';
 import McpApprovalModal from './components/McpApprovalModal';
 import McpServiceModal from './components/McpServiceModal';
 import MonitorPanel from './components/MonitorPanel';
@@ -29,7 +28,6 @@ import {
   ChevronRightIcon,
   ListIcon,
   PencilIcon,
-  RadarIcon,
   ServerIcon,
   SparklesIcon,
   TerminalIcon,
@@ -51,7 +49,6 @@ function App() {
   const [showAi, setShowAi] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [showAlerts, setShowAlerts] = useState(false);
-  const [showInspection, setShowInspection] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
   const [mcpApproval, setMcpApproval] = useState<McpApprovalRequest | null>(null);
   const [chatOpen, setChatOpen] = useState(true);
@@ -310,11 +307,8 @@ function App() {
           <button className="log-entry" onClick={() => setShowMcp(true)}>
             <WrenchIcon size={15} /> MCP 服务
           </button>
-          <button className="log-entry" onClick={() => setShowInspection(true)}>
-            <RadarIcon size={15} /> AI 定时巡检
-          </button>
           <button className="log-entry" onClick={() => setShowAlerts(true)}>
-            <BellIcon size={15} /> 告警通知
+            <BellIcon size={15} /> 告警渠道
           </button>
           <button className="log-entry" onClick={() => setShowLogs(true)}>
             <ListIcon size={15} /> 操作日志
@@ -514,10 +508,6 @@ function App() {
       {showLogs && <AuditLogModal onClose={() => setShowLogs(false)} />}
 
       {showAlerts && <AlertModal onClose={() => setShowAlerts(false)} />}
-
-      {showInspection && (
-        <InspectionModal hosts={hosts} onClose={() => setShowInspection(false)} />
-      )}
 
       {showMcp && (
         <McpServiceModal hosts={hosts} onClose={() => setShowMcp(false)} />

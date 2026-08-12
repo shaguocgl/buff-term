@@ -1,8 +1,6 @@
 use crate::models::Host;
 use crate::remote;
-use crate::russh::RusshManager;
 use serde::Serialize;
-use std::time::Duration;
 
 #[derive(Serialize, Default)]
 pub struct DiskInfo {
@@ -54,12 +52,6 @@ pub fn monitor_snapshot(host: Host) -> Result<MonitorSnapshot, String> {
 
 pub fn collect(host: &Host) -> Result<MonitorSnapshot, String> {
     let out = remote::run(host, MONITOR_SCRIPT, 25)?;
-    parse(&out.text, host)
-}
-
-/// 通过 russh 连接池采集（支持未连接主机按需连接）
-pub async fn collect_russh(host: &Host, russh: &RusshManager) -> Result<MonitorSnapshot, String> {
-    let out = russh.exec(host, MONITOR_SCRIPT, Duration::from_secs(25)).await?;
     parse(&out.text, host)
 }
 

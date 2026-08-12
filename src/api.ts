@@ -4,15 +4,10 @@ import type {
   AiProvider,
   AiProviderInput,
   AiRule,
-  AlertInput,
-  AlertRule,
   AlertSettings,
   AuditLog,
   Host,
   HostInput,
-  Inspection,
-  InspectionInput,
-  InspectionRun,
   ImportResult,
   McpApprovalRequest,
   McpRule,
@@ -70,34 +65,12 @@ export const sftpRename = (host: Host, from: string, to: string) =>
 export const monitorSnapshot = (host: Host) =>
   invoke<MonitorSnapshot>('monitor_snapshot', { host });
 
-export const listAlerts = () => invoke<AlertRule[]>('list_alerts');
-export const saveAlert = (input: AlertInput, id?: string) =>
-  invoke<AlertRule>('save_alert', { input, id });
-export const deleteAlert = (id: string) =>
-  invoke<void>('delete_alert', { id });
 export const getAlertSettings = () =>
   invoke<AlertSettings>('get_alert_settings');
 export const saveAlertSettings = (settings: AlertSettings) =>
   invoke<void>('save_alert_settings', { settings });
 export const testAlertSettings = (settings: AlertSettings) =>
   invoke<TestResult>('test_alert_settings', { settings });
-export const testAlertChannel = (
-  channel: string,
-  target?: string,
-  secret?: string,
-) =>
-  invoke<TestResult>('test_alert_channel', { channel, target, secret });
-
-export const listInspections = () => invoke<Inspection[]>('list_inspections');
-export const saveInspection = (input: InspectionInput, id?: string) =>
-  invoke<Inspection>('save_inspection', { input, id });
-export const deleteInspection = (id: string) =>
-  invoke<void>('delete_inspection', { id });
-export const listInspectionRuns = (limit?: number) =>
-  invoke<InspectionRun[]>('list_inspection_runs', { limit });
-export const inspectionRespond = (runId: string) =>
-  invoke<string>('inspection_respond', { runId });
-
 export const getMcpService = () => invoke<McpService>('get_mcp_service');
 export const saveMcpService = (input: McpServiceInput) =>
   invoke<McpService>('save_mcp_service', { input });

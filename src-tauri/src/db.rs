@@ -1,6 +1,5 @@
 use crate::models::{
-    AiModel, AiProvider, AiRule, AlertRule, AlertSettings, AuditLog, Host, Inspection,
-    InspectionRun, McpRule, McpService,
+    AiModel, AiProvider, AiRule, AlertSettings, AuditLog, Host, McpRule, McpService,
 };
 use rusqlite::{params, Connection, Row};
 use rusqlite::OptionalExtension;
@@ -66,42 +65,13 @@ impl Db {
                  result         TEXT,
                  duration_ms    INTEGER
              );
-             CREATE TABLE IF NOT EXISTS alerts (
-                 id             TEXT PRIMARY KEY,
-                 metric         TEXT NOT NULL,
-                 operator       TEXT NOT NULL,
-                 threshold      REAL NOT NULL,
-                 channel        TEXT NOT NULL,
-                 target         TEXT,
-                 secret         TEXT,
-                 cooldown_min   INTEGER NOT NULL DEFAULT 10,
-                 enabled        INTEGER NOT NULL DEFAULT 1,
-                 created_at     INTEGER NOT NULL
-             );
+             DROP TABLE IF EXISTS alerts;
              CREATE TABLE IF NOT EXISTS settings (
                  key   TEXT PRIMARY KEY,
                  value TEXT NOT NULL
              );
-             CREATE TABLE IF NOT EXISTS inspections (
-                 id             TEXT PRIMARY KEY,
-                 host_id        TEXT NOT NULL,
-                 interval_min   INTEGER NOT NULL DEFAULT 60,
-                 enabled        INTEGER NOT NULL DEFAULT 1,
-                 last_run_at    INTEGER,
-                 created_at     INTEGER NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS inspection_runs (
-                 id             TEXT PRIMARY KEY,
-                 inspection_id  TEXT NOT NULL,
-                 host_id        TEXT NOT NULL,
-                 host_label     TEXT NOT NULL,
-                 started_at     INTEGER NOT NULL,
-                 finished_at    INTEGER,
-                 status         TEXT NOT NULL,
-                 risk_level     TEXT NOT NULL DEFAULT 'low',
-                 summary        TEXT,
-                 respond_text   TEXT
-             );
+             DROP TABLE IF EXISTS inspections;
+             DROP TABLE IF EXISTS inspection_runs;
              DROP TABLE IF EXISTS mcp_servers;
              CREATE TABLE IF NOT EXISTS mcp_service (
                  id             INTEGER PRIMARY KEY CHECK (id = 1),
@@ -120,7 +90,6 @@ impl Db {
              );",
         )?;
         migrate_ai_models(&conn)?;
-        migrate_alerts_secret(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -367,68 +336,6 @@ impl Db {
         rows.collect()
     }
 
-    pub fn list_alerts(&self, enabled_only: bool) -> rusqlite::Result<Vec<AlertRule>> {
-        let conn = self.conn.lock().unwrap();
-        let sql = if enabled_only {
-            "SELECT id, metric, operator, threshold, channel, target, secret, cooldown_min, enabled, created_at
-             FROM alerts WHERE enabled=1 ORDER BY created_at DESC"
-        } else {
-            "SELECT id, metric, operator, threshold, channel, target, secret, cooldown_min, enabled, created_at
-             FROM alerts ORDER BY created_at DESC"
-        };
-        let mut stmt = conn.prepare(sql)?;
-        let rows = stmt.query_map([], row_to_alert)?;
-        rows.collect()
-    }
-
-    pub fn insert_alert(&self, rule: &AlertRule) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO alerts (id, metric, operator, threshold, channel, target, secret, cooldown_min, enabled, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                rule.id,
-                rule.metric,
-                rule.operator,
-                rule.threshold,
-                rule.channel,
-                rule.target,
-                rule.secret,
-                rule.cooldown_min as i64,
-                rule.enabled as i64,
-                rule.created_at as i64,
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_alert(&self, rule: &AlertRule) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE alerts SET metric=?2, operator=?3, threshold=?4, channel=?5,
-                    target=?6, secret=?7, cooldown_min=?8, enabled=?9
-             WHERE id=?1",
-            params![
-                rule.id,
-                rule.metric,
-                rule.operator,
-                rule.threshold,
-                rule.channel,
-                rule.target,
-                rule.secret,
-                rule.cooldown_min as i64,
-                rule.enabled as i64,
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn delete_alert(&self, id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM alerts WHERE id=?1", params![id])?;
-        Ok(())
-    }
-
     pub fn get_alert_settings(&self) -> rusqlite::Result<AlertSettings> {
         let conn = self.conn.lock().unwrap();
         let value: Option<String> = conn
@@ -460,137 +367,6 @@ impl Db {
             params![key, value],
         )?;
         Ok(())
-    }
-
-    pub fn get_host(&self, id: &str) -> rusqlite::Result<Option<Host>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, name, address, port, username, auth_type, key_path, proxy_jump, notes, created_at
-             FROM hosts WHERE id=?1",
-        )?;
-        let mut rows = stmt.query_map(params![id], row_to_host)?;
-        match rows.next() {
-            Some(Ok(host)) => Ok(Some(host)),
-            Some(Err(e)) => Err(e),
-            None => Ok(None),
-        }
-    }
-
-    pub fn list_inspections(&self) -> rusqlite::Result<Vec<Inspection>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, host_id, interval_min, enabled, last_run_at, created_at
-             FROM inspections ORDER BY created_at DESC",
-        )?;
-        let rows = stmt.query_map([], row_to_inspection)?;
-        rows.collect()
-    }
-
-    pub fn insert_inspection(&self, i: &Inspection) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO inspections (id, host_id, interval_min, enabled, last_run_at, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                i.id,
-                i.host_id,
-                i.interval_min as i64,
-                i.enabled as i64,
-                i.last_run_at.map(|v| v as i64),
-                i.created_at as i64,
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_inspection(&self, i: &Inspection) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE inspections SET interval_min=?2, enabled=?3 WHERE id=?1",
-            params![i.id, i.interval_min as i64, i.enabled as i64],
-        )?;
-        Ok(())
-    }
-
-    pub fn delete_inspection(&self, id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM inspections WHERE id=?1", params![id])?;
-        Ok(())
-    }
-
-    pub fn set_inspection_last_run(&self, id: &str, ts: u64) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE inspections SET last_run_at=?2 WHERE id=?1",
-            params![id, ts as i64],
-        )?;
-        Ok(())
-    }
-
-    pub fn insert_inspection_run(&self, r: &InspectionRun) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO inspection_runs (id, inspection_id, host_id, host_label, started_at,
-                                          finished_at, status, risk_level, summary, respond_text)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                r.id,
-                r.inspection_id,
-                r.host_id,
-                r.host_label,
-                r.started_at as i64,
-                r.finished_at.map(|v| v as i64),
-                r.status,
-                r.risk_level,
-                r.summary,
-                r.respond_text,
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_inspection_run(&self, r: &InspectionRun) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE inspection_runs SET finished_at=?2, status=?3, risk_level=?4,
-                    summary=?5, respond_text=?6
-             WHERE id=?1",
-            params![
-                r.id,
-                r.finished_at.map(|v| v as i64),
-                r.status,
-                r.risk_level,
-                r.summary,
-                r.respond_text,
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn list_inspection_runs(&self, limit: u32) -> rusqlite::Result<Vec<InspectionRun>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, inspection_id, host_id, host_label, started_at, finished_at,
-                    status, risk_level, summary, respond_text
-             FROM inspection_runs ORDER BY started_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit as i64], row_to_inspection_run)?;
-        rows.collect()
-    }
-
-    pub fn get_inspection_run(&self, id: &str) -> rusqlite::Result<Option<InspectionRun>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, inspection_id, host_id, host_label, started_at, finished_at,
-                    status, risk_level, summary, respond_text
-             FROM inspection_runs WHERE id=?1",
-        )?;
-        let mut rows = stmt.query_map(params![id], row_to_inspection_run)?;
-        match rows.next() {
-            Some(Ok(r)) => Ok(Some(r)),
-            Some(Err(e)) => Err(e),
-            None => Ok(None),
-        }
     }
 
     pub fn get_mcp_service(&self) -> rusqlite::Result<McpService> {
@@ -766,66 +542,5 @@ fn row_to_audit(row: &Row<'_>) -> rusqlite::Result<AuditLog> {
         status: row.get(9)?,
         result: row.get(10)?,
         duration_ms: row.get::<_, Option<i64>>(11)?.map(|v| v as u64),
-    })
-}
-
-fn row_to_alert(row: &Row<'_>) -> rusqlite::Result<AlertRule> {
-    Ok(AlertRule {
-        id: row.get(0)?,
-        metric: row.get(1)?,
-        operator: row.get(2)?,
-        threshold: row.get(3)?,
-        channel: row.get(4)?,
-        target: row.get(5)?,
-        secret: row.get(6)?,
-        cooldown_min: row.get::<_, i64>(7)? as u64,
-        enabled: row.get::<_, i64>(8)? != 0,
-        created_at: row.get::<_, i64>(9)? as u64,
-    })
-}
-
-/// 旧版 alerts 表没有 secret 列，这里做增量迁移
-fn migrate_alerts_secret(conn: &Connection) -> rusqlite::Result<()> {
-    let has_secret: bool = {
-        let mut stmt = conn.prepare("PRAGMA table_info(alerts)")?;
-        let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
-        let mut found = false;
-        for col in cols {
-            if col? == "secret" {
-                found = true;
-            }
-        }
-        found
-    };
-    if !has_secret {
-        conn.execute_batch("ALTER TABLE alerts ADD COLUMN secret TEXT;")?;
-    }
-    Ok(())
-}
-
-
-fn row_to_inspection(row: &Row<'_>) -> rusqlite::Result<Inspection> {
-    Ok(Inspection {
-        id: row.get(0)?,
-        host_id: row.get(1)?,
-        interval_min: row.get::<_, i64>(2)? as u64,
-        enabled: row.get::<_, i64>(3)? != 0,
-        last_run_at: row.get::<_, Option<i64>>(4)?.map(|v| v as u64),
-        created_at: row.get::<_, i64>(5)? as u64,
-    })
-}
-
-fn row_to_inspection_run(row: &Row<'_>) -> rusqlite::Result<InspectionRun> {
-    Ok(InspectionRun {
-        id: row.get(0)?,
-        inspection_id: row.get(1)?,
-        host_id: row.get(2)?,
-        host_label: row.get(3)?,
-        started_at: row.get::<_, i64>(4)? as u64,
-        finished_at: row.get::<_, Option<i64>>(5)?.map(|v| v as u64),
-        status: row.get(6)?,
-        risk_level: row.get(7)?,
-        summary: row.get(8)?,
-        respond_text: row.get(9)?,
     })
 }
