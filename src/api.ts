@@ -33,6 +33,24 @@ export const deleteAiRule = (id: string) =>
   invoke<void>('delete_ai_rule', { id });
 export const listAuditLogs = (limit?: number) =>
   invoke<AuditLog[]>('list_audit_logs', { limit });
+
+export interface SftpResult {
+  ok: boolean;
+  text: string;
+}
+
+export const sftpList = (host: Host, path: string) =>
+  invoke<SftpResult>('sftp_list', { host, path });
+export const sftpDownload = (host: Host, remote: string, local: string) =>
+  invoke<SftpResult>('sftp_download', { host, remote, local });
+export const sftpUpload = (host: Host, local: string, remote: string) =>
+  invoke<SftpResult>('sftp_upload', { host, local, remote });
+export const sftpDelete = (host: Host, path: string) =>
+  invoke<SftpResult>('sftp_delete', { host, path });
+export const sftpMkdir = (host: Host, path: string) =>
+  invoke<SftpResult>('sftp_mkdir', { host, path });
+export const sftpRename = (host: Host, from: string, to: string) =>
+  invoke<SftpResult>('sftp_rename', { host, from, to });
 export const testAiProvider = (p: {
   base_url: string;
   model: string;

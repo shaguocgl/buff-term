@@ -11,6 +11,7 @@ import AIConfigModal from './components/AIConfigModal';
 import AuditLogModal from './components/AuditLogModal';
 import ChatPanel from './components/ChatPanel';
 import HostForm from './components/HostForm';
+import SftpPanel from './components/SftpPanel';
 import TerminalView from './components/TerminalView';
 import ToastContainer, { type ToastItem } from './components/Toast';
 import {
@@ -25,10 +26,12 @@ import {
   TrashIcon,
 } from './components/Icons';
 
-interface ActiveSession {
-  id: number;
+interface Tab {
+  key: number;
+  host: Host;
+  sessionId: number | null;
+  status: 'connecting' | 'connected' | 'exited';
   title: string;
-  hostId: string;
 }
 
 function App() {
@@ -37,13 +40,15 @@ function App() {
   const [showAi, setShowAi] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [chatOpen, setChatOpen] = useState(true);
+  const [sftpOpen, setSftpOpen] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingHost, setEditingHost] = useState<Host | null>(null);
-  const [session, setSession] = useState<ActiveSession | null>(null);
-  const [activeHost, setActiveHost] = useState<Host | null>(null);
+  const [tabs, setTabs] = useState<Tab[]>([]);
+  const [activeKey, setActiveKey] = useState<number | null>(null);
   const [loadingHostId, setLoadingHostId] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const toastSeq = useRef(0);
+  const tabSeq = useRef(0);
 
   const dismissToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -77,11 +82,36 @@ function App() {
     activeProvider?.models[0]?.label ??
     '';
 
+  const activeTab = tabs.find((t) => t.key === activeKey) ?? null;
+
   const handleConnect = (host: Host) => {
+    const existing = tabs.find(
+      (t) => t.host.id === host.id && t.status === 'connected',
+    );
+    if (existing) {
+      setActiveKey(existing.key);
+      setChatOpen(true);
+      return;
+    }
+    const key = ++tabSeq.current;
+    setTabs((prev) => [
+      ...prev,
+      { key, host, sessionId: null, status: 'connecting', title: host.name },
+    ]);
+    setActiveKey(key);
     setLoadingHostId(host.id);
-    setSession(null);
-    setActiveHost(host);
     setChatOpen(true);
+    setSftpOpen(false);
+  };
+
+  const closeTab = (key: number) => {
+    const idx = tabs.findIndex((t) => t.key === key);
+    setTabs((prev) => prev.filter((t) => t.key !== key));
+    if (activeKey === key) {
+      const remaining = tabs.filter((t) => t.key !== key);
+      const neighbor = remaining[Math.min(idx, remaining.length - 1)];
+      setActiveKey(neighbor?.key ?? null);
+    }
   };
 
   const handleDelete = async (host: Host) => {
@@ -158,7 +188,9 @@ function App() {
           )}
 
           {hosts.map((host) => {
-            const active = session?.hostId === host.id;
+            const active = tabs.some(
+              (t) => t.host.id === host.id && t.status === 'connected',
+            );
             return (
               <div
                 key={host.id}
@@ -241,43 +273,118 @@ function App() {
       </aside>
 
       <main className="main">
-        {activeHost ? (
+        {tabs.length > 0 ? (
           <div className="workbench">
-            <TerminalView
-              host={activeHost}
-              chatOpen={chatOpen}
-              onToggleChat={() => setChatOpen((v) => !v)}
-              onOpened={(id) => {
-                setSession({ id, title: activeHost.name, hostId: activeHost.id });
-                setLoadingHostId(null);
-                setChatOpen(true);
-              }}
-              onFailed={() => setLoadingHostId(null)}
-              onExit={() => {
-                setActiveHost(null);
-                setSession(null);
-                setLoadingHostId(null);
-              }}
-            />
-            {session && chatOpen && (
-              <ChatPanel
-                sessionId={session.id}
-                hostName={session.title}
-                providerLabel={
-                  activeProvider
-                    ? `${activeProvider.name} · ${activeModelLabel}`
-                    : ''
-                }
-                providerConfigured={!!activeProvider}
-                models={activeProvider?.models ?? []}
-                providerId={activeProvider?.id ?? null}
-                onOpenConfig={() => setShowAi(true)}
-                onModelSwitched={() => {
-                  refreshAi().catch(() => {});
+            <div className="tab-bar">
+              {tabs.map((tab) => (
+                <div
+                  key={tab.key}
+                  className={`tab${tab.key === activeKey ? ' active' : ''}${
+                    tab.status === 'exited' ? ' exited' : ''
+                  }`}
+                  onClick={() => setActiveKey(tab.key)}
+                >
+                  <span className="tab-dot" />
+                  <span className="tab-title">{tab.title}</span>
+                  {tab.status === 'exited' && (
+                    <span className="tab-alert" title="连接已断开">
+                      !
+                    </span>
+                  )}
+                  <button
+                    className="tab-close"
+                    title="关闭标签"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      closeTab(tab.key);
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+              <button
+                className="tab-new"
+                title="新建连接"
+                onClick={() => {
+                  setEditingHost(null);
+                  setShowForm(true);
                 }}
-                onClose={() => setChatOpen(false)}
-              />
-            )}
+              >
+                <PlusIcon size={13} />
+              </button>
+            </div>
+
+            <div className="workbench-body">
+              {tabs.map((tab) => (
+                <div
+                  key={tab.key}
+                  className={`tab-pane${tab.key === activeKey ? ' active' : ''}`}
+                >
+                  <TerminalView
+                    host={tab.host}
+                    tabKey={tab.key}
+                    chatOpen={chatOpen}
+                    sftpOpen={sftpOpen}
+                    onToggleChat={() => setChatOpen((v) => !v)}
+                    onToggleSftp={() => {
+                      setSftpOpen((v) => !v);
+                      setChatOpen(false);
+                    }}
+                    onOpened={(key, id) => {
+                      setTabs((prev) =>
+                        prev.map((t) =>
+                          t.key === key ? { ...t, sessionId: id, status: 'connected' } : t,
+                        ),
+                      );
+                      setLoadingHostId(null);
+                      setChatOpen(true);
+                    }}
+                    onFailed={(key) => {
+                      setTabs((prev) =>
+                        prev.map((t) => (t.key === key ? { ...t, status: 'exited' } : t)),
+                      );
+                      setLoadingHostId(null);
+                    }}
+                    onExited={(key) => {
+                      setTabs((prev) =>
+                        prev.map((t) => (t.key === key ? { ...t, status: 'exited' } : t)),
+                      );
+                    }}
+                    onDisconnect={(key) => closeTab(key)}
+                  />
+                </div>
+              ))}
+
+              {activeTab && activeTab.sessionId !== null && chatOpen && (
+                <ChatPanel
+                  key={activeTab.sessionId}
+                  sessionId={activeTab.sessionId}
+                  hostName={activeTab.title}
+                  providerLabel={
+                    activeProvider
+                      ? `${activeProvider.name} · ${activeModelLabel}`
+                      : ''
+                  }
+                  providerConfigured={!!activeProvider}
+                  models={activeProvider?.models ?? []}
+                  providerId={activeProvider?.id ?? null}
+                  onOpenConfig={() => setShowAi(true)}
+                  onModelSwitched={() => {
+                    refreshAi().catch(() => {});
+                  }}
+                  onClose={() => setChatOpen(false)}
+                />
+              )}
+
+              {activeTab && activeTab.sessionId !== null && sftpOpen && (
+                <SftpPanel
+                  key={`sftp-${activeTab.sessionId}`}
+                  host={activeTab.host}
+                  onClose={() => setSftpOpen(false)}
+                />
+              )}
+            </div>
           </div>
         ) : (
           <div className="welcome">
@@ -286,14 +393,14 @@ function App() {
             </div>
             <h2>选择左侧主机开始连接</h2>
             <p>
-              支持密钥 / 密码认证与 ProxyJump 跳板
+              支持密钥 / 密码认证与 ProxyJump 跳板，多标签并行连接
               <br />
               首次连接请按终端提示确认主机指纹
             </p>
             <div className="welcome-hints">
-              <span>⌘ 新建主机</span>
-              <span>⇥ 终端会话</span>
+              <span>⇥ 多标签会话</span>
               <span>⛨ 凭据入钥匙串</span>
+              <span>⛨ AI 自动审批</span>
             </div>
           </div>
         )}

@@ -7,6 +7,7 @@ mod hosts;
 mod models;
 mod remote;
 mod session;
+mod sftp;
 mod sshconfig;
 
 use db::Db;
@@ -18,6 +19,7 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let dir = app
                 .path()
@@ -49,6 +51,12 @@ pub fn run() {
             agent::agent_cancel,
             agent::agent_reset,
             audit::list_audit_logs,
+            sftp::sftp_list,
+            sftp::sftp_download,
+            sftp::sftp_upload,
+            sftp::sftp_delete,
+            sftp::sftp_mkdir,
+            sftp::sftp_rename,
             hosts::list_hosts,
             hosts::create_host,
             hosts::update_host,

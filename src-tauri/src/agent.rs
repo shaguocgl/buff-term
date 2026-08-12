@@ -4,10 +4,12 @@ use crate::models::{AiProvider, AuditLog, Host};
 use crate::remote;
 use crate::session::SessionManager;
 use futures_util::StreamExt;
+use regex::Regex;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 
@@ -605,7 +607,7 @@ fn execute_tool(host: &Host, name: &str, args: &serde_json::Value) -> Result<Str
                 .ok_or_else(|| "缺少 command 参数".to_string())?;
             let timeout = args.get("timeout_secs").and_then(|t| t.as_u64()).unwrap_or(30);
             let out = remote::run(host, command, timeout)?;
-            Ok(format_output(&out))
+            Ok(sanitize(&format_output(&out)))
         }
         "read_file" => {
             let path = args
@@ -613,20 +615,79 @@ fn execute_tool(host: &Host, name: &str, args: &serde_json::Value) -> Result<Str
                 .and_then(|p| p.as_str())
                 .ok_or_else(|| "缺少 path 参数".to_string())?;
             let out = remote::run(host, &format!("cat {}", shq(path)), 15)?;
-            Ok(format_output(&out))
+            Ok(sanitize(&format_output(&out)))
         }
         "list_dir" => {
             let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
             let out = remote::run(host, &format!("ls -lah {}", shq(path)), 15)?;
-            Ok(format_output(&out))
+            Ok(sanitize(&format_output(&out)))
         }
         "resource_usage" => {
             let script = "echo '-- 磁盘 --'; df -h; echo; echo '-- 内存 --'; (free -h 2>/dev/null || vm_stat); echo; echo '-- 负载 --'; uptime; echo; echo '-- TOP 进程 --'; (ps aux --sort=-%mem 2>/dev/null || ps aux) | head -8";
             let out = remote::run(host, script, 25)?;
-            Ok(format_output(&out))
+            Ok(sanitize(&format_output(&out)))
         }
         _ => Err(format!("未知工具: {name}")),
     }
+}
+
+/// 命令输出进入模型上下文前过滤敏感信息
+fn sanitize(text: &str) -> String {
+    struct Rule {
+        re: Regex,
+        keep_key: bool,
+    }
+    static RE: OnceLock<Vec<Rule>> = OnceLock::new();
+    let res = RE.get_or_init(|| {
+        vec![
+            // 常见密钥/口令键值对：password=xxx / token: "xxx"
+            Rule {
+                re: Regex::new(
+                    r#"(?i)(password|passwd|pwd|secret|token|api[_-]?key)(\s*[:=]\s*["']?)[^\s"',;]{6,}"#,
+                )
+                .unwrap(),
+                keep_key: true,
+            },
+            // AWS Access Key
+            Rule { re: Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(), keep_key: false },
+            // OpenAI / DeepSeek 风格 sk- 密钥
+            Rule { re: Regex::new(r"sk-[A-Za-z0-9_\-]{16,}").unwrap(), keep_key: false },
+            // PEM 私钥块
+            Rule {
+                re: Regex::new(
+                    r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+                )
+                .unwrap(),
+                keep_key: false,
+            },
+            // Bearer / Basic 认证头
+            Rule {
+                re: Regex::new(r"(?i)authorization:\s*(basic|bearer)\s+[^\r\n]+").unwrap(),
+                keep_key: false,
+            },
+            Rule {
+                re: Regex::new(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{20,}").unwrap(),
+                keep_key: false,
+            },
+            // 常见云厂商密钥片段
+            Rule {
+                re: Regex::new(
+                    r#"(?i)(access[_-]?key[_-]?id|secret[_-]?access[_-]?key)(\s*[:=]\s*["']?)[^\s"',;]{10,}"#,
+                )
+                .unwrap(),
+                keep_key: true,
+            },
+        ]
+    });
+    let mut out = text.to_string();
+    for rule in res {
+        out = if rule.keep_key {
+            rule.re.replace_all(&out, "${1}${2}***").to_string()
+        } else {
+            rule.re.replace_all(&out, "***").to_string()
+        };
+    }
+    out
 }
 
 /// 智能审核模式下判断命令是否有风险
