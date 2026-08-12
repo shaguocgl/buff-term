@@ -100,7 +100,6 @@ export default function Select<T extends string>({
                 setOpen(false);
                 buttonRef.current?.focus();
               }}
-              onClickCapture={(e) => e.stopPropagation()}
               onMouseDown={(e) => e.preventDefault()}
               onKeyDown={handleKeyDown}
             >
