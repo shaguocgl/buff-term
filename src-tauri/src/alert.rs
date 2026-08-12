@@ -174,10 +174,19 @@ async fn evaluate_once(
         return Ok(());
     }
     let now = now();
-    for host in sessions.hosts() {
+    let hosts = sessions.hosts();
+    eprintln!(
+        "[alert] 评估周期: 规则 {} 条, 已连接主机 {} 台",
+        rules.len(),
+        hosts.len()
+    );
+    for host in hosts {
         let snap = match monitor::collect(&host) {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!("[alert] 采集 {} 失败: {}", host.name, e);
+                continue;
+            }
         };
         let mut metrics = HashMap::new();
         metrics.insert("cpu".to_string(), snap.cpu_percent);
@@ -213,6 +222,10 @@ async fn evaluate_once(
                 continue;
             }
             last_fired.insert(key, now);
+            eprintln!(
+                "[alert] 触发: {} {} {} {} → {}",
+                host.name, rule.metric, rule.operator, rule.threshold, rule.channel
+            );
             let channel = NotifyChannel {
                 channel: rule.channel.clone(),
                 target: rule.target.clone(),
@@ -251,17 +264,25 @@ pub async fn notify(app: &AppHandle, title: &str, body: &str, channel: Option<&N
             "email" => {
                 let db = app.state::<Db>();
                 if let Ok(settings) = db.get_alert_settings() {
-                    let _ = send_email(&settings, title, body).await;
+                    if let Err(e) = send_email(&settings, title, body).await {
+                        eprintln!("[alert] 邮件发送失败: {e}");
+                    }
                 }
             }
             "dingtalk" => {
-                let _ = send_dingtalk(c, title, body).await;
+                if let Err(e) = send_dingtalk(c, title, body).await {
+                    eprintln!("[alert] 钉钉发送失败: {e}");
+                }
             }
             "feishu" => {
-                let _ = send_feishu(c, title, body).await;
+                if let Err(e) = send_feishu(c, title, body).await {
+                    eprintln!("[alert] 飞书发送失败: {e}");
+                }
             }
             "webhook" => {
-                let _ = send_webhook(c, title, body).await;
+                if let Err(e) = send_webhook(c, title, body).await {
+                    eprintln!("[alert] Webhook 发送失败: {e}");
+                }
             }
             _ => desktop(app, title, body),
         },
