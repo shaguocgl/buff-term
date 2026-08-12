@@ -190,8 +190,7 @@ async fn run_inspection(app: &AppHandle, ins: &Inspection, host: Host) -> Result
             let _ = db.update_inspection_run(&updated);
             if risk != "low" {
                 let body = format!("{}：{}", host.name, truncate(&summary, 300));
-                let webhook = webhook_target(&db).ok().flatten();
-                alert::notify(app, "KeyWisp 巡检告警", &body, webhook.as_deref()).await;
+                alert::notify_channel_for_inspection(app, "KeyWisp 巡检告警", &body).await;
             }
         }
         Err(e) => {
@@ -539,14 +538,6 @@ fn truncate(s: &str, max: usize) -> String {
         let head: String = chars[..max].iter().collect();
         format!("{head}…")
     }
-}
-
-fn webhook_target(db: &Db) -> Result<Option<String>, String> {
-    let rules = db.list_alerts(true).map_err(|e| format!("读取告警规则失败: {e}"))?;
-    Ok(rules
-        .iter()
-        .find(|r| r.channel == "webhook")
-        .and_then(|r| r.target.clone()))
 }
 
 async fn model_chat(app: &AppHandle, user: &str) -> Result<String, String> {

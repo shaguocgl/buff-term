@@ -1,7 +1,9 @@
 use crate::models::{
-    AiModel, AiProvider, AiRule, AlertRule, AuditLog, Host, Inspection, InspectionRun, McpServer,
+    AiModel, AiProvider, AiRule, AlertRule, AlertSettings, AuditLog, Host, Inspection,
+    InspectionRun, McpServer,
 };
 use rusqlite::{params, Connection, Row};
+use rusqlite::OptionalExtension;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -71,9 +73,14 @@ impl Db {
                  threshold      REAL NOT NULL,
                  channel        TEXT NOT NULL,
                  target         TEXT,
+                 secret         TEXT,
                  cooldown_min   INTEGER NOT NULL DEFAULT 10,
                  enabled        INTEGER NOT NULL DEFAULT 1,
                  created_at     INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS settings (
+                 key   TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
              );
              CREATE TABLE IF NOT EXISTS inspections (
                  id             TEXT PRIMARY KEY,
@@ -105,6 +112,7 @@ impl Db {
              );",
         )?;
         migrate_ai_models(&conn)?;
+        migrate_alerts_secret(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -354,10 +362,10 @@ impl Db {
     pub fn list_alerts(&self, enabled_only: bool) -> rusqlite::Result<Vec<AlertRule>> {
         let conn = self.conn.lock().unwrap();
         let sql = if enabled_only {
-            "SELECT id, metric, operator, threshold, channel, target, cooldown_min, enabled, created_at
+            "SELECT id, metric, operator, threshold, channel, target, secret, cooldown_min, enabled, created_at
              FROM alerts WHERE enabled=1 ORDER BY created_at DESC"
         } else {
-            "SELECT id, metric, operator, threshold, channel, target, cooldown_min, enabled, created_at
+            "SELECT id, metric, operator, threshold, channel, target, secret, cooldown_min, enabled, created_at
              FROM alerts ORDER BY created_at DESC"
         };
         let mut stmt = conn.prepare(sql)?;
@@ -368,8 +376,8 @@ impl Db {
     pub fn insert_alert(&self, rule: &AlertRule) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO alerts (id, metric, operator, threshold, channel, target, cooldown_min, enabled, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO alerts (id, metric, operator, threshold, channel, target, secret, cooldown_min, enabled, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 rule.id,
                 rule.metric,
@@ -377,6 +385,7 @@ impl Db {
                 rule.threshold,
                 rule.channel,
                 rule.target,
+                rule.secret,
                 rule.cooldown_min as i64,
                 rule.enabled as i64,
                 rule.created_at as i64,
@@ -389,7 +398,7 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE alerts SET metric=?2, operator=?3, threshold=?4, channel=?5,
-                    target=?6, cooldown_min=?7, enabled=?8
+                    target=?6, secret=?7, cooldown_min=?8, enabled=?9
              WHERE id=?1",
             params![
                 rule.id,
@@ -398,6 +407,7 @@ impl Db {
                 rule.threshold,
                 rule.channel,
                 rule.target,
+                rule.secret,
                 rule.cooldown_min as i64,
                 rule.enabled as i64,
             ],
@@ -408,6 +418,39 @@ impl Db {
     pub fn delete_alert(&self, id: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM alerts WHERE id=?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn get_alert_settings(&self) -> rusqlite::Result<AlertSettings> {
+        let conn = self.conn.lock().unwrap();
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='alert_settings'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match value {
+            Some(v) => serde_json::from_str(&v).map_err(|e| {
+                rusqlite::Error::ToSqlConversionFailure(Box::new(e))
+            }),
+            None => Ok(AlertSettings::default()),
+        }
+    }
+
+    pub fn save_alert_settings(&self, settings: &AlertSettings) -> rusqlite::Result<()> {
+        let value = serde_json::to_string(settings)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        self.set_setting("alert_settings", &value)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value=?2",
+            params![key, value],
+        )?;
         Ok(())
     }
 
@@ -690,11 +733,32 @@ fn row_to_alert(row: &Row<'_>) -> rusqlite::Result<AlertRule> {
         threshold: row.get(3)?,
         channel: row.get(4)?,
         target: row.get(5)?,
-        cooldown_min: row.get::<_, i64>(6)? as u64,
-        enabled: row.get::<_, i64>(7)? != 0,
-        created_at: row.get::<_, i64>(8)? as u64,
+        secret: row.get(6)?,
+        cooldown_min: row.get::<_, i64>(7)? as u64,
+        enabled: row.get::<_, i64>(8)? != 0,
+        created_at: row.get::<_, i64>(9)? as u64,
     })
 }
+
+/// 旧版 alerts 表没有 secret 列，这里做增量迁移
+fn migrate_alerts_secret(conn: &Connection) -> rusqlite::Result<()> {
+    let has_secret: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(alerts)")?;
+        let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut found = false;
+        for col in cols {
+            if col? == "secret" {
+                found = true;
+            }
+        }
+        found
+    };
+    if !has_secret {
+        conn.execute_batch("ALTER TABLE alerts ADD COLUMN secret TEXT;")?;
+    }
+    Ok(())
+}
+
 
 fn row_to_inspection(row: &Row<'_>) -> rusqlite::Result<Inspection> {
     Ok(Inspection {

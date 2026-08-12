@@ -1716,6 +1716,23 @@ input::placeholder {
   margin-bottom: 12px;
 }
 
+.alert-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 12px;
+}
+
+.alert-settings-title {
+  font-weight: 650;
+  font-size: 13px;
+}
+
+.alert-divider {
+  border-top: 1px solid var(--border);
+  margin: 4px 0 12px;
+}
+
 .alert-form-row {
   display: flex;
   gap: 10px;
@@ -1791,6 +1808,30 @@ input::placeholder {
 }
 
 .alert-channel.alert-webhook {
+  color: var(--accent-2);
+  background: rgba(56, 200, 232, 0.1);
+  border-color: rgba(56, 200, 232, 0.3);
+}
+
+.alert-channel.alert-notification {
+  color: var(--accent);
+  background: rgba(109, 141, 255, 0.1);
+  border-color: rgba(109, 141, 255, 0.3);
+}
+
+.alert-channel.alert-email {
+  color: var(--success);
+  background: rgba(52, 211, 153, 0.1);
+  border-color: rgba(52, 211, 153, 0.3);
+}
+
+.alert-channel.alert-dingtalk {
+  color: var(--warn);
+  background: rgba(251, 191, 36, 0.1);
+  border-color: rgba(251, 191, 36, 0.3);
+}
+
+.alert-channel.alert-feishu {
   color: var(--accent-2);
   background: rgba(56, 200, 232, 0.1);
   border-color: rgba(56, 200, 232, 0.3);

@@ -124,6 +124,7 @@ export interface AlertRule {
   threshold: number;
   channel: string;
   target?: string | null;
+  secret?: string | null;
   cooldown_min: number;
   enabled: boolean;
   created_at: number;
@@ -135,8 +136,19 @@ export interface AlertInput {
   threshold: number;
   channel: string;
   target?: string;
+  secret?: string;
   cooldown_min?: number;
   enabled?: boolean;
+}
+
+export interface AlertSettings {
+  smtp_host?: string | null;
+  smtp_port?: number | null;
+  smtp_username?: string | null;
+  smtp_password?: string | null;
+  smtp_from?: string | null;
+  smtp_to?: string | null;
+  smtp_tls?: string | null;
 }
 
 export interface Inspection {

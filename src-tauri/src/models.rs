@@ -89,10 +89,24 @@ pub struct AlertRule {
     pub channel: String,
     #[serde(default)]
     pub target: Option<String>,
+    #[serde(default)]
+    pub secret: Option<String>,
     #[serde(default = "default_cooldown")]
     pub cooldown_min: u64,
     pub enabled: bool,
     pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AlertSettings {
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<u16>,
+    pub smtp_username: Option<String>,
+    pub smtp_password: Option<String>,
+    pub smtp_from: Option<String>,
+    pub smtp_to: Option<String>,
+    /// starttls / ssl / none
+    pub smtp_tls: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

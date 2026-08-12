@@ -6,6 +6,7 @@ import type {
   AiRule,
   AlertInput,
   AlertRule,
+  AlertSettings,
   AuditLog,
   Host,
   HostInput,
@@ -73,6 +74,18 @@ export const saveAlert = (input: AlertInput, id?: string) =>
   invoke<AlertRule>('save_alert', { input, id });
 export const deleteAlert = (id: string) =>
   invoke<void>('delete_alert', { id });
+export const getAlertSettings = () =>
+  invoke<AlertSettings>('get_alert_settings');
+export const saveAlertSettings = (settings: AlertSettings) =>
+  invoke<void>('save_alert_settings', { settings });
+export const testAlertSettings = (settings: AlertSettings) =>
+  invoke<TestResult>('test_alert_settings', { settings });
+export const testAlertChannel = (
+  channel: string,
+  target?: string,
+  secret?: string,
+) =>
+  invoke<TestResult>('test_alert_channel', { channel, target, secret });
 
 export const listInspections = () => invoke<Inspection[]>('list_inspections');
 export const saveInspection = (input: InspectionInput, id?: string) =>

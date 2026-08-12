@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { deleteAlert, listAlerts, saveAlert } from '../api';
-import type { AlertRule } from '../types';
+import {
+  deleteAlert,
+  getAlertSettings,
+  listAlerts,
+  saveAlert,
+  saveAlertSettings,
+  testAlertChannel,
+  testAlertSettings,
+} from '../api';
+import type { AlertRule, AlertSettings } from '../types';
 import Modal from './Modal';
 import { BellIcon, PlusIcon, TrashIcon } from './Icons';
 import Select from './Select';
@@ -17,24 +25,76 @@ const METRIC_LABEL: Record<string, string> = {
   load: '负载（1 分钟）',
 };
 
+const CHANNEL_LABEL: Record<string, string> = {
+  notification: '桌面通知',
+  email: '邮件',
+  dingtalk: '钉钉',
+  feishu: '飞书',
+  webhook: 'Webhook',
+};
+
+const EMPTY_SETTINGS: AlertSettings = {
+  smtp_host: '',
+  smtp_port: 587,
+  smtp_username: '',
+  smtp_password: '',
+  smtp_from: '',
+  smtp_to: '',
+  smtp_tls: 'starttls',
+};
+
 export default function AlertModal({ onClose }: Props) {
   const [rules, setRules] = useState<AlertRule[]>([]);
+  const [settings, setSettings] = useState<AlertSettings>(EMPTY_SETTINGS);
   const [metric, setMetric] = useState('cpu');
   const [operator, setOperator] = useState('>');
   const [threshold, setThreshold] = useState('90');
   const [channel, setChannel] = useState('notification');
   const [target, setTarget] = useState('');
+  const [secret, setSecret] = useState('');
   const [cooldown, setCooldown] = useState('10');
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    setRules(await listAlerts());
+    const [rs, st] = await Promise.all([listAlerts(), getAlertSettings()]);
+    setRules(rs);
+    setSettings({ ...EMPTY_SETTINGS, ...st });
   }, []);
 
   useEffect(() => {
     load().catch((e) => setError(String(e)));
   }, [load]);
+
+  const handleSaveSettings = async () => {
+    setError(null);
+    setSavingSettings(true);
+    try {
+      await saveAlertSettings(settings);
+      setTestResult('SMTP 设置已保存');
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const handleTestSettings = async () => {
+    setError(null);
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await testAlertSettings(settings);
+      setTestResult(`${res.ok ? '✓' : '!'} ${res.message}`);
+    } catch (e) {
+      setTestResult(`! ${e}`);
+    } finally {
+      setTesting(false);
+    }
+  };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -49,8 +109,11 @@ export default function AlertModal({ onClose }: Props) {
       setError('冷却时间必须大于 0 分钟');
       return;
     }
-    if (channel === 'webhook' && !target.trim()) {
-      setError('Webhook 渠道需要填写 URL');
+    if (
+      (channel === 'dingtalk' || channel === 'feishu' || channel === 'webhook') &&
+      !target.trim()
+    ) {
+      setError('该渠道需要填写 Webhook 地址');
       return;
     }
     setSaving(true);
@@ -62,10 +125,12 @@ export default function AlertModal({ onClose }: Props) {
         channel,
         cooldown_min: cooldownNum,
         enabled: true,
-        ...(channel === 'webhook' ? { target: target.trim() } : {}),
+        ...(target.trim() ? { target: target.trim() } : {}),
+        ...(secret.trim() ? { secret: secret.trim() } : {}),
       });
       setThreshold('90');
       setTarget('');
+      setSecret('');
       await load();
     } catch (err) {
       setError(String(err));
@@ -74,8 +139,26 @@ export default function AlertModal({ onClose }: Props) {
     }
   };
 
+  const handleTestChannel = async () => {
+    setError(null);
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await testAlertChannel(
+        channel,
+        target.trim() || undefined,
+        secret.trim() || undefined,
+      );
+      setTestResult(`${res.ok ? '✓' : '!'} ${res.message}`);
+    } catch (e) {
+      setTestResult(`! ${e}`);
+    } finally {
+      setTesting(false);
+    }
+  };
+
   const handleDelete = async (rule: AlertRule) => {
-    if (!window.confirm(`删除这条告警规则？`)) return;
+    if (!window.confirm('删除这条告警规则？')) return;
     try {
       await deleteAlert(rule.id);
       await load();
@@ -83,6 +166,9 @@ export default function AlertModal({ onClose }: Props) {
       setError(String(err));
     }
   };
+
+  const needTarget = channel === 'dingtalk' || channel === 'feishu' || channel === 'webhook';
+  const needSecret = channel === 'dingtalk' || channel === 'feishu';
 
   return (
     <Modal
@@ -92,6 +178,98 @@ export default function AlertModal({ onClose }: Props) {
       onClose={onClose}
     >
       <div className="ai-modal">
+        <div className="alert-settings">
+          <div className="alert-settings-title">邮件（SMTP）设置</div>
+          <div className="alert-form-row">
+            <label>
+              SMTP 服务器
+              <input
+                value={settings.smtp_host ?? ''}
+                onChange={(e) => setSettings({ ...settings, smtp_host: e.target.value })}
+                placeholder="smtp.example.com"
+              />
+            </label>
+            <label>
+              端口
+              <input
+                value={settings.smtp_port ?? ''}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    smtp_port: Number.parseInt(e.target.value, 10) || 587,
+                  })
+                }
+                className="input-port"
+              />
+            </label>
+            <label>
+              加密
+              <Select
+                value={settings.smtp_tls ?? 'starttls'}
+                options={[
+                  { value: 'starttls', label: 'STARTTLS（587）' },
+                  { value: 'ssl', label: 'SSL（465）' },
+                  { value: 'none', label: '无' },
+                ]}
+                onChange={(v) => setSettings({ ...settings, smtp_tls: v })}
+                ariaLabel="加密方式"
+              />
+            </label>
+          </div>
+          <div className="alert-form-row">
+            <label>
+              用户名
+              <input
+                value={settings.smtp_username ?? ''}
+                onChange={(e) => setSettings({ ...settings, smtp_username: e.target.value })}
+                placeholder="user@example.com"
+              />
+            </label>
+            <label>
+              密码 / 授权码
+              <input
+                type="password"
+                value={settings.smtp_password ?? ''}
+                onChange={(e) => setSettings({ ...settings, smtp_password: e.target.value })}
+                placeholder="SMTP 密码或邮箱授权码"
+              />
+            </label>
+          </div>
+          <div className="alert-form-row">
+            <label>
+              发件人
+              <input
+                value={settings.smtp_from ?? ''}
+                onChange={(e) => setSettings({ ...settings, smtp_from: e.target.value })}
+                placeholder="KeyWisp <alert@example.com>"
+              />
+            </label>
+            <label className="alert-target">
+              收件人（多个用逗号分隔）
+              <input
+                value={settings.smtp_to ?? ''}
+                onChange={(e) => setSettings({ ...settings, smtp_to: e.target.value })}
+                placeholder="me@example.com, ops@example.com"
+              />
+            </label>
+          </div>
+          <div className="form-actions">
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={handleTestSettings}
+              disabled={testing || savingSettings}
+            >
+              {testing ? '测试中…' : '测试邮件'}
+            </button>
+            <button type="button" className="btn primary" onClick={handleSaveSettings} disabled={savingSettings}>
+              {savingSettings ? '保存中…' : '保存 SMTP 设置'}
+            </button>
+          </div>
+        </div>
+
+        <div className="alert-divider" />
+
         <form className="alert-form" onSubmit={handleSubmit}>
           <div className="alert-form-row">
             <label>
@@ -146,19 +324,42 @@ export default function AlertModal({ onClose }: Props) {
                 value={channel}
                 options={[
                   { value: 'notification', label: '桌面通知' },
+                  { value: 'email', label: '邮件' },
+                  { value: 'dingtalk', label: '钉钉' },
+                  { value: 'feishu', label: '飞书' },
                   { value: 'webhook', label: 'Webhook' },
                 ]}
                 onChange={setChannel}
                 ariaLabel="通知渠道"
               />
             </label>
-            {channel === 'webhook' && (
+            {needTarget && (
               <label className="alert-target">
-                Webhook URL
+                {channel === 'dingtalk'
+                  ? '钉钉机器人 Webhook 地址'
+                  : channel === 'feishu'
+                    ? '飞书机器人 Webhook 地址'
+                    : 'Webhook 地址'}
                 <input
                   value={target}
                   onChange={(e) => setTarget(e.target.value)}
-                  placeholder="https://example.com/hook"
+                  placeholder={
+                    channel === 'dingtalk'
+                      ? 'https://oapi.dingtalk.com/robot/send?access_token=…'
+                      : channel === 'feishu'
+                        ? 'https://open.feishu.cn/open-apis/bot/v2/hook/…'
+                        : 'https://example.com/hook'
+                  }
+                />
+              </label>
+            )}
+            {needSecret && (
+              <label className="alert-target">
+                加签密钥（可选）
+                <input
+                  value={secret}
+                  onChange={(e) => setSecret(e.target.value)}
+                  placeholder="机器人安全设置里的签名密钥"
                 />
               </label>
             )}
@@ -166,7 +367,18 @@ export default function AlertModal({ onClose }: Props) {
               <PlusIcon size={14} /> {saving ? '保存中…' : '添加规则'}
             </button>
           </div>
+          {needTarget && (
+            <button
+              type="button"
+              className="btn secondary small"
+              onClick={handleTestChannel}
+              disabled={testing}
+            >
+              {testing ? '测试中…' : '测试当前渠道'}
+            </button>
+          )}
           {error && <p className="error">{error}</p>}
+          {testResult && <div className={`test-result ${testResult.startsWith('✓') ? 'ok' : 'err'}`}>{testResult}</div>}
         </form>
 
         <div className="alert-list">
@@ -187,7 +399,7 @@ export default function AlertModal({ onClose }: Props) {
                   : ''}
               </span>
               <span className={`badge alert-channel alert-${rule.channel}`}>
-                {rule.channel === 'webhook' ? 'Webhook' : '桌面通知'}
+                {CHANNEL_LABEL[rule.channel] ?? rule.channel}
               </span>
               <span className="alert-cooldown">冷却 {rule.cooldown_min} 分钟</span>
               <button
