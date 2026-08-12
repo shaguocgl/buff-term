@@ -356,10 +356,16 @@ async fn parse_stream(
                             acc.id = id.to_string();
                         }
                     }
-                    if let Some(name) = call["function"]["name"].as_str() {
+                    let name = call["function"]["name"]
+                        .as_str()
+                        .or_else(|| call["name"].as_str());
+                    if let Some(name) = name {
                         acc.name = name.to_string();
                     }
-                    if let Some(args) = call["function"]["arguments"].as_str() {
+                    let args = call["function"]["arguments"]
+                        .as_str()
+                        .or_else(|| call["arguments"].as_str());
+                    if let Some(args) = args {
                         acc.args.push_str(args);
                     }
                 }
@@ -419,7 +425,20 @@ async fn execute_tool_inspect(
             Ok(format_tool_output(&out))
         }
         _ => {
-            let normalized = normalize_tool(name);
+            let mut effective = name;
+            if effective.trim().is_empty() {
+                if args
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+                {
+                    effective = "exec_command";
+                } else if args.get("path").and_then(|p| p.as_str()).is_some() {
+                    effective = "read_file";
+                }
+            }
+            let normalized = normalize_tool(effective);
             if normalized != name {
                 return Box::pin(execute_tool_inspect(russh, host, normalized, args)).await;
             }

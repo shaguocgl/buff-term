@@ -603,10 +603,17 @@ fn apply_delta(
                     acc.id = id.to_string();
                 }
             }
-            if let Some(name) = call["function"]["name"].as_str() {
+            // 兼容两种流式格式：function 嵌套（OpenAI 风格）与顶层 name/arguments（部分模型）
+            let name = call["function"]["name"]
+                .as_str()
+                .or_else(|| call["name"].as_str());
+            if let Some(name) = name {
                 acc.name = name.to_string();
             }
-            if let Some(args) = call["function"]["arguments"].as_str() {
+            let args = call["function"]["arguments"]
+                .as_str()
+                .or_else(|| call["arguments"].as_str());
+            if let Some(args) = args {
                 acc.args.push_str(args);
             }
         }
@@ -674,7 +681,21 @@ async fn execute_tool(
             Ok(sanitize(&output))
         }
         _ => {
-            let normalized = normalize_tool(name);
+            let mut effective = name;
+            // 模型漏填工具名时，根据参数推断（command → exec_command，path → read_file）
+            if effective.trim().is_empty() {
+                if args
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+                {
+                    effective = "exec_command";
+                } else if args.get("path").and_then(|p| p.as_str()).is_some() {
+                    effective = "read_file";
+                }
+            }
+            let normalized = normalize_tool(effective);
             if normalized != name {
                 return Box::pin(execute_tool(russh, host, normalized, args, mcp_servers)).await;
             }
