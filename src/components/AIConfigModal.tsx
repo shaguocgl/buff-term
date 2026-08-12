@@ -332,6 +332,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
     <Modal
       title="AI 配置"
       subtitle="配置大模型平台与多个模型，供 AI Agent 管理服务器使用"
+      className="modal-wide"
       onClose={onClose}
     >
       <div className="ai-modal">
