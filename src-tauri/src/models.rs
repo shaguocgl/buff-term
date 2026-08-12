@@ -112,6 +112,17 @@ pub struct InspectionRun {
     pub respond_text: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServer {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: String,
+    pub enabled: bool,
+    pub created_at: u64,
+}
+
 fn default_cooldown() -> u64 {
     10
 }

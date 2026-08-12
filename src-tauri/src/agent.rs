@@ -1,6 +1,6 @@
 use crate::credentials;
 use crate::db::Db;
-use crate::models::{AiProvider, AuditLog, Host};
+use crate::models::{AiProvider, AuditLog, Host, McpServer};
 use crate::remote;
 use crate::russh::RusshManager;
 use crate::session::SessionManager;
@@ -129,6 +129,9 @@ pub async fn agent_chat(
         .map(|r| r.pattern)
         .collect();
     let russh = app.state::<RusshManager>();
+    let mcp_servers: Vec<McpServer> = db
+        .list_mcp_servers(true)
+        .map_err(|e| format!("读取 MCP 服务器失败: {e}"))?;
 
     let (tx, rx) = mpsc::channel::<Control>();
     agents.set_control(session_id, tx);
@@ -160,6 +163,7 @@ pub async fn agent_chat(
         &danger_rules,
         &db,
         &russh,
+        &mcp_servers,
         rx,
         &mut history,
     )
@@ -217,6 +221,7 @@ async fn run_agent_loop(
     danger_rules: &[String],
     db: &Db,
     russh: &RusshManager,
+    mcp_servers: &[McpServer],
     rx: mpsc::Receiver<Control>,
     history: &mut Vec<serde_json::Value>,
 ) -> Result<(), String> {
@@ -236,7 +241,7 @@ async fn run_agent_loop(
             "model": model,
             "messages": history,
             "stream": true,
-            "tools": tools_schema(),
+            "tools": tools_schema(&mcp_servers.iter().map(|s| s.name.clone()).collect::<Vec<_>>()),
         });
         let resp = client
             .post(url)
@@ -446,7 +451,7 @@ async fn run_agent_loop(
                 },
             );
 
-            let result = execute_tool(russh, host, &acc.name, &args).await;
+            let result = execute_tool(russh, host, &acc.name, &args, mcp_servers).await;
             match result {
                 Ok(output) => {
                     let _ = insert_audit(
@@ -607,6 +612,7 @@ async fn execute_tool(
     host: &Host,
     name: &str,
     args: &serde_json::Value,
+    mcp_servers: &[McpServer],
 ) -> Result<String, String> {
     match name {
         "exec_command" => {
@@ -643,6 +649,23 @@ async fn execute_tool(
                 .exec(host, script, std::time::Duration::from_secs(25))
                 .await?;
             Ok(sanitize(&format_exec(&out)))
+        }
+        "use_mcp_tool" => {
+            let server_name = args
+                .get("server")
+                .and_then(|s| s.as_str())
+                .ok_or_else(|| "缺少 server 参数".to_string())?;
+            let tool = args
+                .get("tool")
+                .and_then(|t| t.as_str())
+                .ok_or_else(|| "缺少 tool 参数".to_string())?;
+            let arguments = args.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+            let server = mcp_servers
+                .iter()
+                .find(|s| s.name == server_name)
+                .ok_or_else(|| format!("MCP 服务器 {server_name} 未配置或未启用"))?;
+            let output = crate::mcp::call_tool(server, tool, arguments).await?;
+            Ok(sanitize(&output))
         }
         _ => Err(format!("未知工具: {name}")),
     }
@@ -814,7 +837,7 @@ fn system_prompt(host: &Host, provider: &AiProvider, model: &str) -> String {
     )
 }
 
-fn tools_schema() -> serde_json::Value {
+fn tools_schema(server_names: &[String]) -> serde_json::Value {
     serde_json::json!([
         {
             "type": "function",
@@ -865,6 +888,29 @@ fn tools_schema() -> serde_json::Value {
                 "name": "resource_usage",
                 "description": "查看服务器磁盘、内存、负载和 CPU/内存占用最高的进程",
                 "parameters": { "type": "object", "properties": {} }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "use_mcp_tool",
+                "description": format!(
+                    "调用已配置的外部 MCP 服务器工具，扩展能力（如数据库查询、云平台操作等）。可用的 MCP 服务器：{}",
+                    if server_names.is_empty() {
+                        "（无，请先在 MCP 配置中添加）".to_string()
+                    } else {
+                        server_names.join("、")
+                    }
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "server": { "type": "string", "description": "MCP 服务器名称，必须来自上面的列表" },
+                        "tool": { "type": "string", "description": "要调用的工具名" },
+                        "arguments": { "type": "object", "description": "传给工具的参数对象" }
+                    },
+                    "required": ["server", "tool", "arguments"]
+                }
             }
         }
     ])

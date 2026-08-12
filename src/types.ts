@@ -166,3 +166,24 @@ export interface InspectionRun {
   summary?: string | null;
   respond_text?: string | null;
 }
+
+export interface McpServer {
+  id: string;
+  name: string;
+  command: string;
+  args: string;
+  enabled: boolean;
+  created_at: number;
+}
+
+export interface McpServerInput {
+  name: string;
+  command: string;
+  args?: string;
+  enabled?: boolean;
+}
+
+export interface McpToolInfo {
+  name: string;
+  description: string;
+}

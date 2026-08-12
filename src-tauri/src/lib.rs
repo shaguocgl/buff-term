@@ -6,6 +6,7 @@ mod credentials;
 mod db;
 mod hosts;
 mod inspection;
+mod mcp;
 mod models;
 mod monitor;
 mod remote;
@@ -75,6 +76,10 @@ pub fn run() {
             inspection::delete_inspection,
             inspection::list_inspection_runs,
             inspection::inspection_respond,
+            mcp::list_mcp_servers,
+            mcp::save_mcp_server,
+            mcp::delete_mcp_server,
+            mcp::mcp_test,
             hosts::list_hosts,
             hosts::create_host,
             hosts::update_host,

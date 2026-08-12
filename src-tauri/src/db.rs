@@ -1,5 +1,5 @@
 use crate::models::{
-    AiModel, AiProvider, AiRule, AlertRule, AuditLog, Host, Inspection, InspectionRun,
+    AiModel, AiProvider, AiRule, AlertRule, AuditLog, Host, Inspection, InspectionRun, McpServer,
 };
 use rusqlite::{params, Connection, Row};
 use std::path::Path;
@@ -94,6 +94,14 @@ impl Db {
                  risk_level     TEXT NOT NULL DEFAULT 'low',
                  summary        TEXT,
                  respond_text   TEXT
+             );
+             CREATE TABLE IF NOT EXISTS mcp_servers (
+                 id         TEXT PRIMARY KEY,
+                 name       TEXT NOT NULL,
+                 command    TEXT NOT NULL,
+                 args       TEXT NOT NULL DEFAULT '',
+                 enabled    INTEGER NOT NULL DEFAULT 1,
+                 created_at INTEGER NOT NULL
              );",
         )?;
         migrate_ai_models(&conn)?;
@@ -524,6 +532,52 @@ impl Db {
             None => Ok(None),
         }
     }
+
+    pub fn list_mcp_servers(&self, enabled_only: bool) -> rusqlite::Result<Vec<McpServer>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = if enabled_only {
+            "SELECT id, name, command, args, enabled, created_at
+             FROM mcp_servers WHERE enabled=1 ORDER BY created_at DESC"
+        } else {
+            "SELECT id, name, command, args, enabled, created_at
+             FROM mcp_servers ORDER BY created_at DESC"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([], row_to_mcp)?;
+        rows.collect()
+    }
+
+    pub fn insert_mcp_server(&self, s: &McpServer) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO mcp_servers (id, name, command, args, enabled, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                s.id,
+                s.name,
+                s.command,
+                s.args,
+                s.enabled as i64,
+                s.created_at as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_mcp_server(&self, s: &McpServer) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE mcp_servers SET name=?2, command=?3, args=?4, enabled=?5 WHERE id=?1",
+            params![s.id, s.name, s.command, s.args, s.enabled as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_mcp_server(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM mcp_servers WHERE id=?1", params![id])?;
+        Ok(())
+    }
 }
 
 /// 旧版本只有一个 model 字段，迁移到 ai_models 表
@@ -656,5 +710,16 @@ fn row_to_inspection_run(row: &Row<'_>) -> rusqlite::Result<InspectionRun> {
         risk_level: row.get(7)?,
         summary: row.get(8)?,
         respond_text: row.get(9)?,
+    })
+}
+
+fn row_to_mcp(row: &Row<'_>) -> rusqlite::Result<McpServer> {
+    Ok(McpServer {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        command: row.get(2)?,
+        args: row.get(3)?,
+        enabled: row.get::<_, i64>(4)? != 0,
+        created_at: row.get::<_, i64>(5)? as u64,
     })
 }

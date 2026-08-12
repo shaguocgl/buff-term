@@ -14,6 +14,7 @@ import ChatPanel from './components/ChatPanel';
 import HostForm from './components/HostForm';
 import InspectionModal from './components/InspectionModal';
 import MonitorPanel from './components/MonitorPanel';
+import McpModal from './components/McpModal';
 import SftpPanel from './components/SftpPanel';
 import TerminalView from './components/TerminalView';
 import ToastContainer, { type ToastItem } from './components/Toast';
@@ -29,6 +30,7 @@ import {
   SparklesIcon,
   TerminalIcon,
   TrashIcon,
+  WrenchIcon,
 } from './components/Icons';
 
 interface Tab {
@@ -46,6 +48,7 @@ function App() {
   const [showLogs, setShowLogs] = useState(false);
   const [showAlerts, setShowAlerts] = useState(false);
   const [showInspection, setShowInspection] = useState(false);
+  const [showMcp, setShowMcp] = useState(false);
   const [chatOpen, setChatOpen] = useState(true);
   const [sftpOpen, setSftpOpen] = useState(false);
   const [monitorOpen, setMonitorOpen] = useState(false);
@@ -261,6 +264,9 @@ function App() {
         </div>
 
         <div className="sidebar-footer">
+          <button className="log-entry" onClick={() => setShowMcp(true)}>
+            <WrenchIcon size={15} /> MCP 工具
+          </button>
           <button className="log-entry" onClick={() => setShowInspection(true)}>
             <RadarIcon size={15} /> AI 定时巡检
           </button>
@@ -468,6 +474,8 @@ function App() {
       {showInspection && (
         <InspectionModal hosts={hosts} onClose={() => setShowInspection(false)} />
       )}
+
+      {showMcp && <McpModal onClose={() => setShowMcp(false)} />}
 
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>
