@@ -50,6 +50,8 @@ export default function TerminalView({
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sessionIdRef = useRef<number | null>(null);
+  const inputBufRef = useRef<number[]>([]);
+  const inputChainRef = useRef<Promise<void>>(Promise.resolve());
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const disposedRef = useRef(false);
@@ -116,12 +118,28 @@ export default function TerminalView({
     termRef.current = term;
     fitRef.current = fit;
 
+    const flushInput = () => {
+      const buf = inputBufRef.current;
+      if (buf.length === 0) return;
+      inputBufRef.current = [];
+      const data = buf.splice(0);
+      inputChainRef.current = inputChainRef.current
+        .then(() => {
+          const sid = sessionIdRef.current;
+          if (sid === null) return;
+          return sessionInput(sid, data);
+        })
+        .catch(() => {});
+    };
+
     term.onData((data) => {
-      const sid = sessionIdRef.current;
-      if (sid === null) return;
-      const bytes = new TextEncoder().encode(data);
-      sessionInput(sid, Array.from(bytes)).catch(() => {});
+      const bytes = Array.from(new TextEncoder().encode(data));
+      if (inputBufRef.current.length + bytes.length > 512) {
+        flushInput();
+      }
+      inputBufRef.current.push(...bytes);
     });
+    const inputTimer = window.setInterval(flushInput, 16);
     term.onResize(sendSize);
 
     const observer = new ResizeObserver(() => {
@@ -170,6 +188,8 @@ export default function TerminalView({
     return () => {
       disposed = true;
       disposedRef.current = true;
+      window.clearInterval(inputTimer);
+      flushInput();
       observer.disconnect();
       unData?.();
       unStatus?.();
