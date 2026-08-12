@@ -230,6 +230,15 @@ impl Db {
         Ok(())
     }
 
+    pub fn set_ai_provider_enabled(&self, id: &str, enabled: bool) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE ai_providers SET enabled=?2 WHERE id=?1",
+            params![id, enabled as i64],
+        )?;
+        Ok(())
+    }
+
     pub fn replace_ai_models(
         &self,
         provider_id: &str,

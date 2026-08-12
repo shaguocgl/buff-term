@@ -9,8 +9,9 @@ import {
   onAiStream,
   onAiTool,
   setActiveAiModel,
+  setActiveAiProvider,
 } from '../api';
-import type { AiModel } from '../types';
+import type { AiModel, AiProvider } from '../types';
 import Select, { type SelectOption } from './Select';
 import {
   RefreshIcon,
@@ -45,6 +46,7 @@ interface Props {
   hostName: string;
   providerLabel: string;
   providerConfigured: boolean;
+  providers: AiProvider[];
   models: AiModel[];
   providerId: string | null;
   onOpenConfig: () => void;
@@ -63,6 +65,7 @@ export default function ChatPanel({
   hostName,
   providerLabel,
   providerConfigured,
+  providers,
   models,
   providerId,
   onOpenConfig,
@@ -88,6 +91,15 @@ export default function ChatPanel({
 
   const currentModelId =
     models.find((m) => m.is_active)?.id ?? models[0]?.id ?? null;
+
+  const handleProviderChange = async (id: string) => {
+    try {
+      await setActiveAiProvider(id);
+      onModelSwitched();
+    } catch (err) {
+      updateLastAssistant((m) => ({ ...m, error: String(err) }));
+    }
+  };
 
   const handleModelChange = async (modelId: string) => {
     if (!providerId || !modelId) return;
@@ -353,6 +365,18 @@ export default function ChatPanel({
           </div>
         )}
         <div className="chat-controls">
+          {providers.length > 1 && providerId && (
+            <label className="chat-control">
+              <span className="chat-control-label">平台</span>
+              <Select
+                className="select-up"
+                value={providerId}
+                options={providers.map((p) => ({ value: p.id, label: p.name }))}
+                onChange={handleProviderChange}
+                ariaLabel="平台"
+              />
+            </label>
+          )}
           <label className={`chat-control permission-${permissionMode}`}>
             <span className="chat-control-label">
               安全级别

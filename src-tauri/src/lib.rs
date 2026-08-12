@@ -52,6 +52,7 @@ pub fn run() {
             ai::save_ai_provider,
             ai::delete_ai_provider,
             ai::set_active_ai_model,
+            ai::set_active_ai_provider,
             ai::list_ai_rules,
             ai::add_ai_rule,
             ai::delete_ai_rule,

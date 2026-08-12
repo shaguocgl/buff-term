@@ -127,6 +127,14 @@ pub fn set_active_ai_model(
 }
 
 #[tauri::command]
+pub fn set_active_ai_provider(db: State<'_, Db>, provider_id: String) -> Result<(), String> {
+    db.disable_all_ai_providers()
+        .map_err(|e| format!("切换平台失败: {e}"))?;
+    db.set_ai_provider_enabled(&provider_id, true)
+        .map_err(|e| format!("切换平台失败: {e}"))
+}
+
+#[tauri::command]
 pub fn list_ai_rules(db: State<'_, Db>) -> Result<Vec<AiRule>, String> {
     db.list_ai_rules()
         .map_err(|e| format!("读取智能审核规则失败: {e}"))

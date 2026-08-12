@@ -396,6 +396,7 @@ function App() {
                       : ''
                   }
                   providerConfigured={!!activeProvider}
+                  providers={aiProviders}
                   models={activeProvider?.models ?? []}
                   providerId={activeProvider?.id ?? null}
                   onOpenConfig={() => setShowAi(true)}

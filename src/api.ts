@@ -37,6 +37,8 @@ export const deleteAiProvider = (id: string) =>
   invoke<void>('delete_ai_provider', { id });
 export const setActiveAiModel = (providerId: string, modelId: string) =>
   invoke<void>('set_active_ai_model', { providerId, modelId });
+export const setActiveAiProvider = (providerId: string) =>
+  invoke<void>('set_active_ai_provider', { providerId });
 export const listAiRules = () => invoke<AiRule[]>('list_ai_rules');
 export const addAiRule = (pattern: string) =>
   invoke<AiRule>('add_ai_rule', { pattern });
