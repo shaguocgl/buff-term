@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -13,6 +13,9 @@ pub struct Session {
     master: Box<dyn MasterPty + Send>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    expecting_password: Arc<AtomicBool>,
+    password_capture: Arc<Mutex<String>>,
+    captured_once: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -31,6 +34,12 @@ pub struct TerminalData {
 pub struct SessionStatus {
     pub session_id: u32,
     pub status: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct SessionNotice {
+    pub session_id: u32,
+    pub message: String,
 }
 
 impl SessionManager {
@@ -70,6 +79,9 @@ impl SessionManager {
             .map_err(|e| format!("获取 PTY 写入端失败: {e}"))?;
         let writer = Arc::new(Mutex::new(writer));
         let auto_password = crate::credentials::get_password(&host.id);
+        let expecting_password = Arc::new(AtomicBool::new(false));
+        let password_capture = Arc::new(Mutex::new(String::new()));
+        let captured_once = Arc::new(AtomicBool::new(false));
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let session = Session {
@@ -77,6 +89,9 @@ impl SessionManager {
             master,
             child: Mutex::new(child),
             writer: writer.clone(),
+            expecting_password: expecting_password.clone(),
+            password_capture: password_capture.clone(),
+            captured_once: captured_once.clone(),
         };
         self.sessions.lock().unwrap().insert(id, session);
 
@@ -88,6 +103,8 @@ impl SessionManager {
             let mut buf = [0u8; 8192];
             let mut scan = String::new();
             let mut sent_secret = false;
+            let expecting = expecting_password.clone();
+            let captured = captured_once.clone();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
@@ -120,6 +137,29 @@ impl SessionManager {
                                 }
                                 sent_secret = true;
                                 scan.clear();
+                            }
+                        } else {
+                            // 用户手动输入密码时，捕获保存供 AI 复用
+                            scan.push_str(&String::from_utf8_lossy(&data));
+                            if scan.len() > 4096 {
+                                let cut = scan.len() - 4096;
+                                let mut start = cut;
+                                while start > 0 && !scan.is_char_boundary(start) {
+                                    start -= 1;
+                                }
+                                scan = scan[start..].to_string();
+                            }
+                            let lower = scan.to_ascii_lowercase();
+                            if !captured.load(Ordering::SeqCst)
+                                && !expecting.load(Ordering::SeqCst)
+                                && lower.contains("password:")
+                            {
+                                expecting.store(true, Ordering::SeqCst);
+                                scan.clear();
+                            }
+                            if lower.contains("permission denied") {
+                                // 密码错误时允许重新捕获
+                                captured.store(false, Ordering::SeqCst);
                             }
                         }
                     }
@@ -173,9 +213,34 @@ impl SessionManager {
         Ok(())
     }
 
-    pub fn write(&self, id: u32, data: Vec<u8>) -> Result<(), String> {
+    pub fn write(&self, app: &AppHandle, id: u32, data: Vec<u8>) -> Result<(), String> {
         let sessions = self.sessions.lock().unwrap();
         let session = sessions.get(&id).ok_or("会话不存在")?;
+        // 捕获用户手动输入的密码，成功后保存到钥匙串，AI 后续直接复用
+        if session.expecting_password.load(Ordering::SeqCst) {
+            let mut cap = session.password_capture.lock().unwrap();
+            cap.push_str(&String::from_utf8_lossy(&data));
+            if cap.contains('\r') || cap.contains('\n') {
+                let password = cap.trim_end_matches(['\r', '\n']).to_string();
+                cap.clear();
+                session.expecting_password.store(false, Ordering::SeqCst);
+                if !password.is_empty() {
+                    let host_id = session.host.id.clone();
+                    let saved =
+                        crate::credentials::save_password(&host_id, &password).is_ok();
+                    session.captured_once.store(true, Ordering::SeqCst);
+                    if saved {
+                        let _ = app.emit(
+                            "session:notice",
+                            SessionNotice {
+                                session_id: id,
+                                message: "密码已保存到系统钥匙串，AI 可直接使用".to_string(),
+                            },
+                        );
+                    }
+                }
+            }
+        }
         let mut writer = session.writer.lock().unwrap();
         writer
             .write_all(&data)
@@ -220,11 +285,12 @@ pub fn close_session(
 
 #[tauri::command]
 pub fn session_input(
+    app: AppHandle,
     state: State<'_, SessionManager>,
     id: u32,
     data: Vec<u8>,
 ) -> Result<(), String> {
-    state.write(id, data)
+    state.write(&app, id, data)
 }
 
 #[tauri::command]

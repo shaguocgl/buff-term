@@ -193,3 +193,15 @@ export const onSessionStatus = (
   listen<SessionStatusPayload>('session:status', (event) =>
     cb(event.payload.session_id, event.payload.status),
   );
+
+export interface SessionNoticePayload {
+  session_id: number;
+  message: string;
+}
+
+export const onSessionNotice = (
+  cb: (sessionId: number, message: string) => void,
+) =>
+  listen<SessionNoticePayload>('session:notice', (event) =>
+    cb(event.payload.session_id, event.payload.message),
+  );

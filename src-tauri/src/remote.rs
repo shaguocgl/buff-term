@@ -69,20 +69,24 @@ pub fn run_program(
     let reader = master
         .try_clone_reader()
         .map_err(|e| format!("获取 PTY 读取端失败: {e}"))?;
-    let mut writer = master
+    let writer = master
         .take_writer()
         .map_err(|e| format!("获取 PTY 写入端失败: {e}"))?;
-    if let Some(script) = stdin_script {
-        let _ = writer.write_all(script.as_bytes());
-        let _ = writer.flush();
-    }
     let auto_password = crate::credentials::get_password(host_id);
     let auto_password_thread = auto_password.clone();
+    let script_owned: Option<String> = stdin_script.map(String::from);
 
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
         let mut reader = reader;
         let mut writer = writer;
+        // 密钥认证（无需密码）：脚本可以立即写入
+        if auto_password_thread.is_none() {
+            if let Some(script) = &script_owned {
+                let _ = writer.write_all(script.as_bytes());
+                let _ = writer.flush();
+            }
+        }
         let mut buf = [0u8; 8192];
         let mut scan = String::new();
         let mut sent_secret = false;
@@ -109,6 +113,11 @@ pub fn run_program(
                             let _ = writer.flush();
                             sent_secret = true;
                             scan.clear();
+                            // 密码认证通过后再写入脚本，避免脚本被当成密码
+                            if let Some(script) = &script_owned {
+                                let _ = writer.write_all(script.as_bytes());
+                                let _ = writer.flush();
+                            }
                         }
                     }
                     if tx.send(data).is_err() {

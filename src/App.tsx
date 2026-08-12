@@ -4,6 +4,7 @@ import {
   importSshConfig,
   listAiProviders,
   listHosts,
+  onSessionNotice,
 } from './api';
 import './App.css';
 import type { AiProvider, Host } from './types';
@@ -86,6 +87,19 @@ function App() {
     refresh().catch((e) => showToast('error', String(e)));
     refreshAi().catch(() => {});
   }, [refresh, refreshAi, showToast]);
+
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    let cancelled = false;
+    onSessionNotice((_sessionId, message) => showToast('info', message)).then((fn) => {
+      if (cancelled) fn();
+      else un = fn;
+    });
+    return () => {
+      cancelled = true;
+      un?.();
+    };
+  }, [showToast]);
 
   const activeProvider = aiProviders.find((p) => p.enabled) ?? null;
   const activeModelLabel =
