@@ -1,4 +1,5 @@
 use crate::credentials;
+use crate::ai::TestResult;
 use crate::db::Db;
 use crate::models::Host;
 use crate::sshconfig;
@@ -168,4 +169,22 @@ pub fn import_ssh_config(db: State<'_, Db>, path: Option<String>) -> Result<Impo
 pub fn save_host_credentials(app: AppHandle, id: String, password: String) -> Result<(), String> {
     let _ = app;
     credentials::save_password(&id, &password)
+}
+
+#[tauri::command]
+pub async fn test_host_connection(
+    host: Host,
+    password: Option<String>,
+) -> Result<TestResult, String> {
+    let russh = crate::russh::RusshManager::new();
+    match russh.test_connection(&host, password).await {
+        Ok(message) => Ok(TestResult {
+            ok: true,
+            message,
+        }),
+        Err(message) => Ok(TestResult {
+            ok: false,
+            message,
+        }),
+    }
 }

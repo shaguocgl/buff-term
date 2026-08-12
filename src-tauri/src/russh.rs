@@ -90,9 +90,36 @@ impl RusshManager {
         *guard = Some(handle);
         Ok(result)
     }
+
+    /// 测试主机连接：连接 + 认证，成功返回提示
+    pub async fn test_connection(
+        &self,
+        host: &Host,
+        password: Option<String>,
+    ) -> Result<String, String> {
+        let _handle = tokio::time::timeout(
+            Duration::from_secs(10),
+            do_connect(host, password),
+        )
+        .await
+        .map_err(|_| "连接超时（10 秒）".to_string())??;
+        Ok(format!(
+            "连接成功（{}@{}:{}）",
+            host.username, host.address, host.port
+        ))
+    }
 }
 
 async fn connect(host: &Host) -> Result<Handle<ClientHandler>, String> {
+    tokio::time::timeout(Duration::from_secs(15), do_connect(host, None))
+        .await
+        .map_err(|_| "SSH 连接超时（15 秒）".to_string())?
+}
+
+async fn do_connect(
+    host: &Host,
+    password_override: Option<String>,
+) -> Result<Handle<ClientHandler>, String> {
     let mut config = Config::default();
     config.keepalive_interval = Some(Duration::from_secs(15));
     config.keepalive_max = 3;
@@ -116,10 +143,11 @@ async fn connect(host: &Host) -> Result<Handle<ClientHandler>, String> {
     })?;
 
     let success = if host.auth_type == "password" {
-        let password = crate::credentials::get_password(&host.id)
+        let password = password_override
+            .filter(|p| !p.trim().is_empty())
+            .or_else(|| crate::credentials::get_password(&host.id))
             .ok_or_else(|| {
-                "服务器要求密码认证，但该主机未保存密码。请在主机列表编辑该主机并保存密码。"
-                    .to_string()
+                "服务器要求密码认证，但未提供密码。请填写密码或先在主机中保存。".to_string()
             })?;
         session
             .authenticate_password(&host.username, password)

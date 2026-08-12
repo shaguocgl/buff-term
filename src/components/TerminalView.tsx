@@ -29,7 +29,7 @@ interface Props {
   onToggleSftp: () => void;
   onToggleMonitor: () => void;
   onOpened: (tabKey: number, sessionId: number) => void;
-  onFailed: (tabKey: number) => void;
+  onFailed: (tabKey: number, message: string) => void;
   onExited: (tabKey: number) => void;
   onDisconnect: (tabKey: number) => void;
 }
@@ -160,10 +160,11 @@ export default function TerminalView({
       await connectRef.current();
     })().catch((e) => {
       if (disposed) return;
-      term.writeln(`\r\n\x1b[31m[连接失败: ${e}]\x1b[0m`);
+      const message = String(e);
+      term.writeln(`\r\n\x1b[31m[连接失败: ${message}]\x1b[0m`);
       setConnecting(false);
       setExited(true);
-      onFailedRef.current(tabKey);
+      onFailedRef.current(tabKey, message);
     });
 
     return () => {
@@ -195,10 +196,11 @@ export default function TerminalView({
     setConnecting(true);
     termRef.current?.reset();
     connectRef.current().catch((e) => {
-      termRef.current?.writeln(`\r\n\x1b[31m[重连失败: ${e}]\x1b[0m`);
+      const message = String(e);
+      termRef.current?.writeln(`\r\n\x1b[31m[重连失败: ${message}]\x1b[0m`);
       setConnecting(false);
       setExited(true);
-      onFailedRef.current(tabKey);
+      onFailedRef.current(tabKey, message);
     });
   };
 
@@ -239,7 +241,14 @@ export default function TerminalView({
           </button>
         </div>
       </div>
-      <div className="terminal-body" ref={containerRef} />
+      <div className="terminal-body" ref={containerRef}>
+        {connecting && (
+          <div className="terminal-overlay">
+            <div className="spinner" />
+            <span>正在连接 {host.name}…</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

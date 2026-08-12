@@ -552,6 +552,7 @@ button {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  position: relative;
   padding: 8px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.012), transparent 160px),
@@ -561,6 +562,26 @@ button {
 .terminal-body .xterm {
   height: 100%;
   width: 100%;
+}
+
+.terminal-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  background: rgba(11, 14, 19, 0.82);
+  z-index: 5;
+}
+
+.terminal-overlay .spinner {
+  width: 22px;
+  height: 22px;
+  border-width: 3px;
 }
 
 /* ============ 弹窗 ============ */
@@ -2529,17 +2550,18 @@ input::placeholder {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  background: var(--panel-2);
+  background: var(--panel-3);
   border: 1px solid var(--border);
   color: var(--text);
-  border-radius: 8px;
-  padding: 6px 9px;
-  font-size: 12.5px;
+  border-radius: 9px;
+  padding: 9px 11px;
+  font-size: 13.5px;
   font-family: inherit;
   cursor: pointer;
   transition:
     border-color 0.15s,
-    background 0.15s;
+    background 0.15s,
+    box-shadow 0.15s;
 }
 
 .select-btn:hover {
@@ -2548,7 +2570,8 @@ input::placeholder {
 }
 
 .select-btn.open {
-  border-color: rgba(167, 139, 250, 0.55);
+  border-color: rgba(109, 141, 255, 0.65);
+  box-shadow: 0 0 0 3px rgba(109, 141, 255, 0.16);
 }
 
 .select-label {
@@ -2676,6 +2699,34 @@ input::placeholder {
 .add-model {
   align-self: flex-start;
   margin-top: 2px;
+}
+
+.password-input-wrap {
+  position: relative;
+}
+
+.password-input-wrap input {
+  padding-right: 38px;
+}
+
+.password-eye {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 5px;
+  display: grid;
+  place-items: center;
+}
+
+.password-eye:hover {
+  color: var(--text);
+  background: rgba(148, 163, 184, 0.12);
 }
 
 /* ============ 智能审核规则 ============ */

@@ -27,6 +27,8 @@ export const deleteHost = (id: string) => invoke<void>('delete_host', { id });
 export const importSshConfig = () => invoke<ImportResult>('import_ssh_config');
 export const saveHostPassword = (id: string, password: string) =>
   invoke<void>('save_host_credentials', { id, password });
+export const testHostConnection = (host: Host, password?: string) =>
+  invoke<TestResult>('test_host_connection', { host, password });
 
 export const listAiProviders = () => invoke<AiProvider[]>('list_ai_providers');
 export const saveAiProvider = (input: AiProviderInput, id?: string) =>

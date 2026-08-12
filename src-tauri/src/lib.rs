@@ -86,6 +86,7 @@ pub fn run() {
             hosts::delete_host,
             hosts::import_ssh_config,
             hosts::save_host_credentials,
+            hosts::test_host_connection,
             session::open_session,
             session::close_session,
             session::session_input,

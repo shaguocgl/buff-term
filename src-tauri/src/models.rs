@@ -140,6 +140,8 @@ impl Host {
             // 不转发本地 locale 变量，避免远端缺少 C.UTF-8 等 locale 时产生警告
             "SendEnv -LC_* -LANG".to_string(),
             "-o".to_string(),
+            "ConnectTimeout=10".to_string(),
+            "-o".to_string(),
             "ServerAliveInterval=15".to_string(),
             "-o".to_string(),
             "ServerAliveCountMax=3".to_string(),

@@ -368,11 +368,12 @@ function App() {
                       setLoadingHostId(null);
                       setChatOpen(true);
                     }}
-                    onFailed={(key) => {
+                    onFailed={(key, message) => {
                       setTabs((prev) =>
                         prev.map((t) => (t.key === key ? { ...t, status: 'exited' } : t)),
                       );
                       setLoadingHostId(null);
+                      showToast('error', `连接失败: ${message}`);
                     }}
                     onExited={(key) => {
                       setTabs((prev) =>
