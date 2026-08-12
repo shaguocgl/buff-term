@@ -336,9 +336,6 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
     }
   };
 
-  const activeModelLabel = (p: AiProvider) =>
-    p.models.find((m) => m.is_active)?.label ?? p.models[0]?.label ?? '未配置模型';
-
   return (
     <Modal
       title="AI 配置"
@@ -377,9 +374,19 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
                         )}
                       </div>
                       <span className="provider-detail">
-                        {p.models.length} 个模型 · {activeModelLabel(p)} ·{' '}
-                        {p.base_url}
+                        {p.models.length} 个模型 · {p.base_url}
                       </span>
+                      <div className="provider-model-chips">
+                        {p.models.map((m) => (
+                          <span
+                            key={m.id}
+                            className={`provider-model-chip${m.is_active ? ' active' : ''}`}
+                            title={m.is_active ? '默认模型' : m.model}
+                          >
+                            {m.label}
+                          </span>
+                        ))}
+                      </div>
                     </div>
                     <div className="provider-actions">
                       {!p.enabled && (

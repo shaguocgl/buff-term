@@ -1174,6 +1174,28 @@ input::placeholder {
   white-space: nowrap;
 }
 
+.provider-model-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 2px;
+}
+
+.provider-model-chip {
+  font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: rgba(148, 163, 184, 0.06);
+}
+
+.provider-model-chip.active {
+  color: var(--success);
+  border-color: rgba(52, 211, 153, 0.35);
+  background: rgba(52, 211, 153, 0.1);
+}
+
 .provider-actions {
   display: flex;
   align-items: center;
@@ -2662,6 +2684,8 @@ input::placeholder {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
 }
 
 .model-editor-label {
