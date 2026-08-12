@@ -70,6 +70,25 @@ pub struct AuditLog {
     pub duration_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertRule {
+    pub id: String,
+    pub metric: String,
+    pub operator: String,
+    pub threshold: f64,
+    pub channel: String,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default = "default_cooldown")]
+    pub cooldown_min: u64,
+    pub enabled: bool,
+    pub created_at: u64,
+}
+
+fn default_cooldown() -> u64 {
+    10
+}
+
 impl Host {
     pub fn label_address(&self) -> String {
         format!("{}@{}:{}", self.username, self.address, self.port)

@@ -1,3 +1,4 @@
+mod alert;
 mod ai;
 mod agent;
 mod audit;
@@ -21,6 +22,7 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let dir = app
                 .path()
@@ -34,6 +36,7 @@ pub fn run() {
             })?;
             let _ = hosts::migrate_json(&db, app.handle());
             app.manage(db);
+            alert::spawn_alert_loop(app.handle().clone());
             Ok(())
         })
         .manage(SessionManager::default())
@@ -59,6 +62,9 @@ pub fn run() {
             sftp::sftp_mkdir,
             sftp::sftp_rename,
             monitor::monitor_snapshot,
+            alert::list_alerts,
+            alert::save_alert,
+            alert::delete_alert,
             hosts::list_hosts,
             hosts::create_host,
             hosts::update_host,

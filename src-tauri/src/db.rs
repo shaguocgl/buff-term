@@ -1,4 +1,4 @@
-use crate::models::{AiModel, AiProvider, AiRule, AuditLog, Host};
+use crate::models::{AiModel, AiProvider, AiRule, AlertRule, AuditLog, Host};
 use rusqlite::{params, Connection, Row};
 use std::path::Path;
 use std::sync::Mutex;
@@ -61,6 +61,17 @@ impl Db {
                  status         TEXT NOT NULL,
                  result         TEXT,
                  duration_ms    INTEGER
+             );
+             CREATE TABLE IF NOT EXISTS alerts (
+                 id             TEXT PRIMARY KEY,
+                 metric         TEXT NOT NULL,
+                 operator       TEXT NOT NULL,
+                 threshold      REAL NOT NULL,
+                 channel        TEXT NOT NULL,
+                 target         TEXT,
+                 cooldown_min   INTEGER NOT NULL DEFAULT 10,
+                 enabled        INTEGER NOT NULL DEFAULT 1,
+                 created_at     INTEGER NOT NULL
              );",
         )?;
         migrate_ai_models(&conn)?;
@@ -300,6 +311,66 @@ impl Db {
         let rows = stmt.query_map(params![limit as i64], row_to_audit)?;
         rows.collect()
     }
+
+    pub fn list_alerts(&self, enabled_only: bool) -> rusqlite::Result<Vec<AlertRule>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = if enabled_only {
+            "SELECT id, metric, operator, threshold, channel, target, cooldown_min, enabled, created_at
+             FROM alerts WHERE enabled=1 ORDER BY created_at DESC"
+        } else {
+            "SELECT id, metric, operator, threshold, channel, target, cooldown_min, enabled, created_at
+             FROM alerts ORDER BY created_at DESC"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([], row_to_alert)?;
+        rows.collect()
+    }
+
+    pub fn insert_alert(&self, rule: &AlertRule) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO alerts (id, metric, operator, threshold, channel, target, cooldown_min, enabled, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                rule.id,
+                rule.metric,
+                rule.operator,
+                rule.threshold,
+                rule.channel,
+                rule.target,
+                rule.cooldown_min as i64,
+                rule.enabled as i64,
+                rule.created_at as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_alert(&self, rule: &AlertRule) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE alerts SET metric=?2, operator=?3, threshold=?4, channel=?5,
+                    target=?6, cooldown_min=?7, enabled=?8
+             WHERE id=?1",
+            params![
+                rule.id,
+                rule.metric,
+                rule.operator,
+                rule.threshold,
+                rule.channel,
+                rule.target,
+                rule.cooldown_min as i64,
+                rule.enabled as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_alert(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM alerts WHERE id=?1", params![id])?;
+        Ok(())
+    }
 }
 
 /// 旧版本只有一个 model 字段，迁移到 ai_models 表
@@ -392,5 +463,19 @@ fn row_to_audit(row: &Row<'_>) -> rusqlite::Result<AuditLog> {
         status: row.get(9)?,
         result: row.get(10)?,
         duration_ms: row.get::<_, Option<i64>>(11)?.map(|v| v as u64),
+    })
+}
+
+fn row_to_alert(row: &Row<'_>) -> rusqlite::Result<AlertRule> {
+    Ok(AlertRule {
+        id: row.get(0)?,
+        metric: row.get(1)?,
+        operator: row.get(2)?,
+        threshold: row.get(3)?,
+        channel: row.get(4)?,
+        target: row.get(5)?,
+        cooldown_min: row.get::<_, i64>(6)? as u64,
+        enabled: row.get::<_, i64>(7)? != 0,
+        created_at: row.get::<_, i64>(8)? as u64,
     })
 }

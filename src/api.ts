@@ -4,6 +4,8 @@ import type {
   AiProvider,
   AiProviderInput,
   AiRule,
+  AlertInput,
+  AlertRule,
   AuditLog,
   Host,
   HostInput,
@@ -55,6 +57,12 @@ export const sftpRename = (host: Host, from: string, to: string) =>
 
 export const monitorSnapshot = (host: Host) =>
   invoke<MonitorSnapshot>('monitor_snapshot', { host });
+
+export const listAlerts = () => invoke<AlertRule[]>('list_alerts');
+export const saveAlert = (input: AlertInput, id?: string) =>
+  invoke<AlertRule>('save_alert', { input, id });
+export const deleteAlert = (id: string) =>
+  invoke<void>('delete_alert', { id });
 export const testAiProvider = (p: {
   base_url: string;
   model: string;

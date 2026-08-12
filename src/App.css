@@ -1645,6 +1645,103 @@ input::placeholder {
   color: var(--text);
 }
 
+/* ============ 告警配置 ============ */
+
+.alert-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+
+.alert-form-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.alert-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--muted);
+}
+
+.alert-form label select,
+.alert-form label input {
+  width: 100%;
+}
+
+.alert-form-row label:first-child {
+  flex: 1;
+}
+
+.alert-form-row label:nth-child(2) {
+  flex: 0 0 70px;
+}
+
+.alert-form-row label:nth-child(3),
+.alert-form-row label:nth-child(4) {
+  flex: 0 0 90px;
+}
+
+.alert-form .btn {
+  flex: none;
+}
+
+.alert-target {
+  flex: 1;
+}
+
+.alert-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.alert-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel-3);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 9px 12px;
+  font-size: 12.5px;
+}
+
+.alert-metric {
+  font-weight: 600;
+  min-width: 60px;
+}
+
+.alert-op {
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.alert-channel.alert-notification {
+  color: var(--accent);
+  background: rgba(109, 141, 255, 0.1);
+  border-color: rgba(109, 141, 255, 0.3);
+}
+
+.alert-channel.alert-webhook {
+  color: var(--accent-2);
+  background: rgba(56, 200, 232, 0.1);
+  border-color: rgba(56, 200, 232, 0.3);
+}
+
+.alert-cooldown {
+  flex: 1;
+  color: var(--faint);
+  font-size: 11.5px;
+}
+
 .terminal-header-actions {
   display: flex;
   align-items: center;

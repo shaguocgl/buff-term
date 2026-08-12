@@ -47,6 +47,10 @@ fn now() -> u64 {
 /// 采集 Linux 服务器的资源快照（CPU / 内存 / 磁盘 / 负载 / TOP 进程）
 #[tauri::command]
 pub fn monitor_snapshot(host: Host) -> Result<MonitorSnapshot, String> {
+    collect(&host)
+}
+
+pub fn collect(host: &Host) -> Result<MonitorSnapshot, String> {
     let script = r#"
 echo "BEGIN"
 echo "LOAD $(cat /proc/loadavg 2>/dev/null | cut -d' ' -f1-3)"
@@ -59,7 +63,7 @@ ps -eo user,%cpu,%mem,args --sort=-%cpu 2>/dev/null | head -8
 echo "END"
 "#;
     let out = remote::run(&host, script, 25)?;
-    parse(&out.text, &host)
+    parse(&out.text, host)
 }
 
 fn parse(text: &str, host: &Host) -> Result<MonitorSnapshot, String> {

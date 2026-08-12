@@ -116,3 +116,25 @@ export interface MonitorSnapshot {
   disks: DiskInfo[];
   top: TopProc[];
 }
+
+export interface AlertRule {
+  id: string;
+  metric: string;
+  operator: string;
+  threshold: number;
+  channel: string;
+  target?: string | null;
+  cooldown_min: number;
+  enabled: boolean;
+  created_at: number;
+}
+
+export interface AlertInput {
+  metric: string;
+  operator: string;
+  threshold: number;
+  channel: string;
+  target?: string;
+  cooldown_min?: number;
+  enabled?: boolean;
+}

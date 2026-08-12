@@ -146,6 +146,15 @@ impl SessionManager {
         self.sessions.lock().unwrap().get(&id).map(|s| s.host.clone())
     }
 
+    pub fn hosts(&self) -> Vec<Host> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .values()
+            .map(|s| s.host.clone())
+            .collect()
+    }
+
     pub fn close(&self, app: &AppHandle, id: u32) -> Result<(), String> {
         let session = self
             .sessions

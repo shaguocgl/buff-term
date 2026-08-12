@@ -8,6 +8,7 @@ import {
 import './App.css';
 import type { AiProvider, Host } from './types';
 import AIConfigModal from './components/AIConfigModal';
+import AlertModal from './components/AlertModal';
 import AuditLogModal from './components/AuditLogModal';
 import ChatPanel from './components/ChatPanel';
 import HostForm from './components/HostForm';
@@ -16,6 +17,7 @@ import SftpPanel from './components/SftpPanel';
 import TerminalView from './components/TerminalView';
 import ToastContainer, { type ToastItem } from './components/Toast';
 import {
+  BellIcon,
   ImportIcon,
   PlusIcon,
   ChevronRightIcon,
@@ -40,6 +42,7 @@ function App() {
   const [aiProviders, setAiProviders] = useState<AiProvider[]>([]);
   const [showAi, setShowAi] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
+  const [showAlerts, setShowAlerts] = useState(false);
   const [chatOpen, setChatOpen] = useState(true);
   const [sftpOpen, setSftpOpen] = useState(false);
   const [monitorOpen, setMonitorOpen] = useState(false);
@@ -255,6 +258,9 @@ function App() {
         </div>
 
         <div className="sidebar-footer">
+          <button className="log-entry" onClick={() => setShowAlerts(true)}>
+            <BellIcon size={15} /> 告警通知
+          </button>
           <button className="log-entry" onClick={() => setShowLogs(true)}>
             <ListIcon size={15} /> 操作日志
           </button>
@@ -450,6 +456,8 @@ function App() {
       )}
 
       {showLogs && <AuditLogModal onClose={() => setShowLogs(false)} />}
+
+      {showAlerts && <AlertModal onClose={() => setShowAlerts(false)} />}
 
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>
