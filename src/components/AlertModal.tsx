@@ -4,6 +4,7 @@ import { deleteAlert, listAlerts, saveAlert } from '../api';
 import type { AlertRule } from '../types';
 import Modal from './Modal';
 import { BellIcon, PlusIcon, TrashIcon } from './Icons';
+import Select from './Select';
 
 interface Props {
   onClose: () => void;
@@ -95,19 +96,29 @@ export default function AlertModal({ onClose }: Props) {
           <div className="alert-form-row">
             <label>
               指标
-              <select value={metric} onChange={(e) => setMetric(e.target.value)}>
-                <option value="cpu">CPU</option>
-                <option value="mem">内存</option>
-                <option value="disk">磁盘</option>
-                <option value="load">负载</option>
-              </select>
+              <Select
+                value={metric}
+                options={[
+                  { value: 'cpu', label: 'CPU' },
+                  { value: 'mem', label: '内存' },
+                  { value: 'disk', label: '磁盘' },
+                  { value: 'load', label: '负载' },
+                ]}
+                onChange={setMetric}
+                ariaLabel="指标"
+              />
             </label>
             <label>
               条件
-              <select value={operator} onChange={(e) => setOperator(e.target.value)}>
-                <option value=">">&gt;</option>
-                <option value="<">&lt;</option>
-              </select>
+              <Select
+                value={operator}
+                options={[
+                  { value: '>', label: '>' },
+                  { value: '<', label: '<' },
+                ]}
+                onChange={setOperator}
+                ariaLabel="条件"
+              />
             </label>
             <label>
               阈值
@@ -131,10 +142,15 @@ export default function AlertModal({ onClose }: Props) {
           <div className="alert-form-row">
             <label>
               通知渠道
-              <select value={channel} onChange={(e) => setChannel(e.target.value)}>
-                <option value="notification">桌面通知</option>
-                <option value="webhook">Webhook</option>
-              </select>
+              <Select
+                value={channel}
+                options={[
+                  { value: 'notification', label: '桌面通知' },
+                  { value: 'webhook', label: 'Webhook' },
+                ]}
+                onChange={setChannel}
+                ariaLabel="通知渠道"
+              />
             </label>
             {channel === 'webhook' && (
               <label className="alert-target">

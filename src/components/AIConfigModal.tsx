@@ -441,8 +441,8 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
           </>
         ) : (
           <form className="ai-form" onSubmit={handleSave}>
-            <label>
-              平台预设
+            <div className="ai-field">
+              <span className="ai-field-label">平台预设</span>
               <Select
                 value={form.preset}
                 options={[
@@ -452,7 +452,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
                 onChange={applyPreset}
                 ariaLabel="平台预设"
               />
-            </label>
+            </div>
             <label>
               名称
               <input

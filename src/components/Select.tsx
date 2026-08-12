@@ -100,6 +100,7 @@ export default function Select<T extends string>({
                 setOpen(false);
                 buttonRef.current?.focus();
               }}
+              onMouseDown={(e) => e.preventDefault()}
               onKeyDown={handleKeyDown}
             >
               <span>{opt.label}</span>

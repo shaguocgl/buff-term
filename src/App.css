@@ -1202,6 +1202,15 @@ input::placeholder {
   color: var(--muted);
 }
 
+.ai-form .ai-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--muted);
+}
+
 .form-row-inline {
   display: flex;
   align-items: center;

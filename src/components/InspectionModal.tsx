@@ -9,6 +9,7 @@ import {
 import type { Host, InspectionRun } from '../types';
 import Modal from './Modal';
 import { PlusIcon, RadarIcon, RefreshIcon, TrashIcon } from './Icons';
+import Select from './Select';
 
 interface Props {
   hosts: Host[];
@@ -105,13 +106,12 @@ export default function InspectionModal({ hosts, onClose }: Props) {
         <div className="inspect-add">
           <label>
             主机
-            <select value={hostId} onChange={(e) => setHostId(e.target.value)}>
-              {hosts.map((h) => (
-                <option key={h.id} value={h.id}>
-                  {h.name}
-                </option>
-              ))}
-            </select>
+            <Select
+              value={hostId}
+              options={hosts.map((h) => ({ value: h.id, label: h.name }))}
+              onChange={setHostId}
+              ariaLabel="主机"
+            />
           </label>
           <label>
             间隔（分钟）
