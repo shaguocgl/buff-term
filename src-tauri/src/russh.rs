@@ -96,7 +96,7 @@ async fn connect(host: &Host) -> Result<Handle<ClientHandler>, String> {
     let mut config = Config::default();
     config.keepalive_interval = Some(Duration::from_secs(15));
     config.keepalive_max = 3;
-    config.inactivity_timeout = Some(Duration::from_secs(0));
+    config.inactivity_timeout = None; // 禁用空闲回收，避免连接刚建立就被判定超时
     let config = Arc::new(config);
 
     let mut session = client::connect(
@@ -105,7 +105,15 @@ async fn connect(host: &Host) -> Result<Handle<ClientHandler>, String> {
         ClientHandler::new(host.clone()),
     )
     .await
-    .map_err(|e| format!("SSH 连接失败（请先在终端中连接一次以确认主机指纹）: {e}"))?;
+    .map_err(|e| {
+        if e.to_string().to_lowercase().contains("host key")
+            || e.to_string().to_lowercase().contains("fingerprint")
+        {
+            format!("SSH 连接失败：主机指纹未通过校验，请先在终端中连接一次确认指纹（{e}）")
+        } else {
+            format!("SSH 连接失败: {e}")
+        }
+    })?;
 
     let success = if host.auth_type == "password" {
         let password = crate::credentials::get_password(&host.id)
