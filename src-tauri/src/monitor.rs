@@ -1,6 +1,8 @@
 use crate::models::Host;
 use crate::remote;
+use crate::russh::RusshManager;
 use serde::Serialize;
+use std::time::Duration;
 
 #[derive(Serialize, Default)]
 pub struct DiskInfo {
@@ -51,7 +53,17 @@ pub fn monitor_snapshot(host: Host) -> Result<MonitorSnapshot, String> {
 }
 
 pub fn collect(host: &Host) -> Result<MonitorSnapshot, String> {
-    let script = r#"
+    let out = remote::run(host, MONITOR_SCRIPT, 25)?;
+    parse(&out.text, host)
+}
+
+/// 通过 russh 连接池采集（支持未连接主机按需连接）
+pub async fn collect_russh(host: &Host, russh: &RusshManager) -> Result<MonitorSnapshot, String> {
+    let out = russh.exec(host, MONITOR_SCRIPT, Duration::from_secs(25)).await?;
+    parse(&out.text, host)
+}
+
+const MONITOR_SCRIPT: &str = r#"
 echo "BEGIN"
 echo "LOAD $(cat /proc/loadavg 2>/dev/null | cut -d' ' -f1-3)"
 echo "CPU $(top -bn1 2>/dev/null | awk '/%Cpu/{print 100-$8; exit}')"
@@ -62,9 +74,6 @@ echo "TOP"
 ps -eo user,%cpu,%mem,args --sort=-%cpu 2>/dev/null | head -8
 echo "END"
 "#;
-    let out = remote::run(&host, script, 25)?;
-    parse(&out.text, host)
-}
 
 fn parse(text: &str, host: &Host) -> Result<MonitorSnapshot, String> {
     let mut snap = MonitorSnapshot {

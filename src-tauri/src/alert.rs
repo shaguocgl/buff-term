@@ -1,12 +1,14 @@
 use crate::db::Db;
 use crate::models::{AlertRule, AlertSettings};
 use crate::monitor;
+use crate::russh::RusshManager;
 use crate::session::SessionManager;
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::Duration;
 use tauri::{AppHandle, Manager, State};
 
@@ -154,9 +156,10 @@ pub async fn test_alert_channel(
 pub fn spawn_alert_loop(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut last_fired: HashMap<(String, String), u64> = HashMap::new();
+        let mut last_collect: HashMap<String, u64> = HashMap::new();
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
-            let _ = evaluate_once(&app, &mut last_fired).await;
+            let _ = evaluate_once(&app, &mut last_fired, &mut last_collect).await;
         }
     });
 }
@@ -164,9 +167,11 @@ pub fn spawn_alert_loop(app: AppHandle) {
 async fn evaluate_once(
     app: &AppHandle,
     last_fired: &mut HashMap<(String, String), u64>,
+    last_collect: &mut HashMap<String, u64>,
 ) -> Result<(), String> {
     let db = app.state::<Db>();
     let sessions = app.state::<SessionManager>();
+    let russh = app.state::<RusshManager>();
     let rules = db
         .list_alerts(true)
         .map_err(|e| format!("读取告警规则失败: {e}"))?;
@@ -174,14 +179,24 @@ async fn evaluate_once(
         return Ok(());
     }
     let now = now();
-    let hosts = sessions.hosts();
+    let connected: HashSet<String> = sessions.hosts().into_iter().map(|h| h.id).collect();
+    let hosts = db.list().map_err(|e| format!("读取主机列表失败: {e}"))?;
     eprintln!(
-        "[alert] 评估周期: 规则 {} 条, 已连接主机 {} 台",
+        "[alert] 评估周期: 规则 {} 条, 主机 {} 台（已连接 {}）",
         rules.len(),
-        hosts.len()
+        hosts.len(),
+        connected.len()
     );
     for host in hosts {
-        let snap = match monitor::collect(&host) {
+        let is_connected = connected.contains(&host.id);
+        // 已连接主机每 30 秒采集；未连接主机每 5 分钟按需连接采集
+        let interval = if is_connected { 30 } else { 300 };
+        let last = last_collect.get(&host.id).copied().unwrap_or(0);
+        if now.saturating_sub(last) < interval {
+            continue;
+        }
+        last_collect.insert(host.id.clone(), now);
+        let snap = match monitor::collect_russh(&host, &russh).await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[alert] 采集 {} 失败: {}", host.name, e);
