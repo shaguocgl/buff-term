@@ -12,6 +12,7 @@ import AlertModal from './components/AlertModal';
 import AuditLogModal from './components/AuditLogModal';
 import ChatPanel from './components/ChatPanel';
 import HostForm from './components/HostForm';
+import InspectionModal from './components/InspectionModal';
 import MonitorPanel from './components/MonitorPanel';
 import SftpPanel from './components/SftpPanel';
 import TerminalView from './components/TerminalView';
@@ -23,6 +24,7 @@ import {
   ChevronRightIcon,
   ListIcon,
   PencilIcon,
+  RadarIcon,
   ServerIcon,
   SparklesIcon,
   TerminalIcon,
@@ -43,6 +45,7 @@ function App() {
   const [showAi, setShowAi] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [showAlerts, setShowAlerts] = useState(false);
+  const [showInspection, setShowInspection] = useState(false);
   const [chatOpen, setChatOpen] = useState(true);
   const [sftpOpen, setSftpOpen] = useState(false);
   const [monitorOpen, setMonitorOpen] = useState(false);
@@ -258,6 +261,9 @@ function App() {
         </div>
 
         <div className="sidebar-footer">
+          <button className="log-entry" onClick={() => setShowInspection(true)}>
+            <RadarIcon size={15} /> AI 定时巡检
+          </button>
           <button className="log-entry" onClick={() => setShowAlerts(true)}>
             <BellIcon size={15} /> 告警通知
           </button>
@@ -458,6 +464,10 @@ function App() {
       {showLogs && <AuditLogModal onClose={() => setShowLogs(false)} />}
 
       {showAlerts && <AlertModal onClose={() => setShowAlerts(false)} />}
+
+      {showInspection && (
+        <InspectionModal hosts={hosts} onClose={() => setShowInspection(false)} />
+      )}
 
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>

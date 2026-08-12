@@ -151,39 +151,42 @@ async fn fire(app: &AppHandle, rule: &AlertRule, host: &Host, value: f64) {
         "{}：{} 达到 {:.1}（阈值 {} {}）",
         host.name, rule.metric, value, rule.operator, rule.threshold
     );
-    match rule.channel.as_str() {
-        "webhook" => {
-            if let Some(url) = &rule.target {
-                let url = url.clone();
-                let payload = serde_json::json!({
-                    "event": "alert",
-                    "host": host.name,
-                    "address": host.address,
-                    "metric": rule.metric,
-                    "value": value,
-                    "operator": rule.operator,
-                    "threshold": rule.threshold,
-                    "ts": now(),
-                });
-                let _ = tokio::spawn(async move {
-                    let client = reqwest::Client::new();
-                    let _ = client
-                        .post(&url)
-                        .json(&payload)
-                        .timeout(Duration::from_secs(10))
-                        .send()
-                        .await;
-                });
-            }
-        }
-        _ => {
-            use tauri_plugin_notification::NotificationExt;
-            let _ = app
-                .notification()
-                .builder()
-                .title("KeyWisp 告警")
-                .body(&message)
-                .show();
-        }
+    let webhook = if rule.channel == "webhook" {
+        rule.target.as_deref()
+    } else {
+        None
+    };
+    notify(app, "KeyWisp 告警", &message, webhook).await;
+}
+
+/// 发送桌面通知或 Webhook（告警与巡检共用）
+pub async fn notify(app: &AppHandle, title: &str, body: &str, webhook: Option<&str>) {
+    if let Some(url) = webhook {
+        let url = url.to_string();
+        let title = title.to_string();
+        let body = body.to_string();
+        let _ = tokio::spawn(async move {
+            let payload = serde_json::json!({
+                "event": "alert",
+                "title": title,
+                "body": body,
+                "ts": now(),
+            });
+            let client = reqwest::Client::new();
+            let _ = client
+                .post(&url)
+                .json(&payload)
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await;
+        });
+    } else {
+        use tauri_plugin_notification::NotificationExt;
+        let _ = app
+            .notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show();
     }
 }

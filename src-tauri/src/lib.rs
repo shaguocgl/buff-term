@@ -5,6 +5,7 @@ mod audit;
 mod credentials;
 mod db;
 mod hosts;
+mod inspection;
 mod models;
 mod monitor;
 mod remote;
@@ -39,6 +40,7 @@ pub fn run() {
             let _ = hosts::migrate_json(&db, app.handle());
             app.manage(db);
             alert::spawn_alert_loop(app.handle().clone());
+            inspection::spawn_inspection_loop(app.handle().clone());
             Ok(())
         })
         .manage(SessionManager::default())
@@ -68,6 +70,11 @@ pub fn run() {
             alert::list_alerts,
             alert::save_alert,
             alert::delete_alert,
+            inspection::list_inspections,
+            inspection::save_inspection,
+            inspection::delete_inspection,
+            inspection::list_inspection_runs,
+            inspection::inspection_respond,
             hosts::list_hosts,
             hosts::create_host,
             hosts::update_host,

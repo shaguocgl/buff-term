@@ -138,3 +138,31 @@ export interface AlertInput {
   cooldown_min?: number;
   enabled?: boolean;
 }
+
+export interface Inspection {
+  id: string;
+  host_id: string;
+  interval_min: number;
+  enabled: boolean;
+  last_run_at?: number | null;
+  created_at: number;
+}
+
+export interface InspectionInput {
+  host_id: string;
+  interval_min?: number;
+  enabled?: boolean;
+}
+
+export interface InspectionRun {
+  id: string;
+  inspection_id: string;
+  host_id: string;
+  host_label: string;
+  started_at: number;
+  finished_at?: number | null;
+  status: string;
+  risk_level: string;
+  summary?: string | null;
+  respond_text?: string | null;
+}

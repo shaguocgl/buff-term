@@ -85,6 +85,33 @@ pub struct AlertRule {
     pub created_at: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Inspection {
+    pub id: String,
+    pub host_id: String,
+    pub interval_min: u64,
+    pub enabled: bool,
+    #[serde(default)]
+    pub last_run_at: Option<u64>,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InspectionRun {
+    pub id: String,
+    pub inspection_id: String,
+    pub host_id: String,
+    pub host_label: String,
+    pub started_at: u64,
+    pub finished_at: Option<u64>,
+    pub status: String,
+    pub risk_level: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub respond_text: Option<String>,
+}
+
 fn default_cooldown() -> u64 {
     10
 }

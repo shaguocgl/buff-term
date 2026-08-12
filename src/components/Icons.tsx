@@ -192,3 +192,13 @@ export const BellIcon = (p: IconProps) => (
     <path d="M13.73 21a2 2 0 0 1-3.46 0" />
   </Svg>
 );
+
+export const RadarIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M19.07 4.93A10 10 0 0 0 6.99 3.34" />
+    <path d="M4 6h.01M6 4h.01" />
+    <path d="M2.29 9.62A10 10 0 1 0 21.31 8.35" />
+    <path d="M12 12l5.6-5.6" />
+    <path d="M12 12h.01" />
+  </Svg>
+);

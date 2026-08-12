@@ -9,6 +9,9 @@ import type {
   AuditLog,
   Host,
   HostInput,
+  Inspection,
+  InspectionInput,
+  InspectionRun,
   ImportResult,
   MonitorSnapshot,
   TestResult,
@@ -63,6 +66,16 @@ export const saveAlert = (input: AlertInput, id?: string) =>
   invoke<AlertRule>('save_alert', { input, id });
 export const deleteAlert = (id: string) =>
   invoke<void>('delete_alert', { id });
+
+export const listInspections = () => invoke<Inspection[]>('list_inspections');
+export const saveInspection = (input: InspectionInput, id?: string) =>
+  invoke<Inspection>('save_inspection', { input, id });
+export const deleteInspection = (id: string) =>
+  invoke<void>('delete_inspection', { id });
+export const listInspectionRuns = (limit?: number) =>
+  invoke<InspectionRun[]>('list_inspection_runs', { limit });
+export const inspectionRespond = (runId: string) =>
+  invoke<string>('inspection_respond', { runId });
 export const testAiProvider = (p: {
   base_url: string;
   model: string;
