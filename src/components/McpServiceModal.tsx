@@ -240,7 +240,7 @@ function configJson(service: McpService): string {
   return JSON.stringify(
     {
       mcpServers: {
-        keywisp: {
+        'keywisp-ssh': {
           type: 'http',
           url,
           headers: { Authorization: `Bearer ${service.token}` },

@@ -429,7 +429,7 @@ async fn handle_jsonrpc(app: &AppHandle, body: &str) -> String {
             serde_json::json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": { "name": "keywisp-mcp", "version": "0.1.0" }
+                "serverInfo": { "name": "keywisp-ssh", "version": "0.1.0" }
             }),
         ),
         "notifications/initialized" => String::new(),
