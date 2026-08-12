@@ -40,9 +40,44 @@ impl client::Handler for ClientHandler {
             server_public_key,
             &known_hosts,
         ) {
-            Ok(matched) => Ok(matched),
+            Ok(true) => Ok(true),
+            Ok(false) => {
+                // 首次连接：信任并记录，后续严格校验
+                append_known_host(
+                    &known_hosts,
+                    &self.host.address,
+                    self.host.port,
+                    server_public_key,
+                );
+                Ok(true)
+            }
             Err(_) => Ok(false),
         }
+    }
+}
+
+/// 首次连接：把主机指纹追加到 known_hosts（TOFU，等同 ssh accept-new），
+/// 之后再次连接会严格校验，指纹变化会立即被拒绝。
+fn append_known_host(path: &PathBuf, host: &str, port: u16, key: &keys::PublicKey) {
+    let Ok(openssh) = key.to_openssh() else {
+        return;
+    };
+    let hostname = if port == 22 {
+        host.to_string()
+    } else {
+        format!("[{host}]:{port}")
+    };
+    let line = format!("{hostname} {openssh}\n");
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = file.write_all(line.as_bytes());
     }
 }
 
@@ -133,10 +168,16 @@ async fn do_connect(
     )
     .await
     .map_err(|e| {
-        if e.to_string().to_lowercase().contains("host key")
-            || e.to_string().to_lowercase().contains("fingerprint")
+        let lower = e.to_string().to_lowercase();
+        if lower.contains("host key")
+            || lower.contains("server key")
+            || lower.contains("fingerprint")
+            || lower.contains("unknown")
         {
-            format!("SSH 连接失败：主机指纹未通过校验，请先在终端中连接一次确认指纹（{e}）")
+            format!(
+                "SSH 连接失败：主机指纹校验未通过（{e}）。首次连接会自动信任并记录指纹；\
+                 若此前已连接过仍报此错，可能存在中间人风险，请检查服务器。"
+            )
         } else {
             format!("SSH 连接失败: {e}")
         }
