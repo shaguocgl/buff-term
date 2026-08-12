@@ -9,7 +9,7 @@
 //! - 所有命令输出复用脱敏规则，外部调用同样写入审计日志。
 
 use crate::db::Db;
-use crate::models::{Host, McpService};
+use crate::models::{Host, McpRule, McpService};
 use crate::russh::RusshManager;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -180,6 +180,35 @@ pub fn mcp_approve(
     allow: bool,
 ) -> Result<(), String> {
     registry.resolve(&request_id, allow)
+}
+
+#[tauri::command]
+pub fn list_mcp_rules(db: State<'_, Db>) -> Result<Vec<McpRule>, String> {
+    db.list_mcp_rules()
+        .map_err(|e| format!("读取 MCP 管控规则失败: {e}"))
+}
+
+#[tauri::command]
+pub fn add_mcp_rule(db: State<'_, Db>, pattern: String) -> Result<McpRule, String> {
+    let pattern = pattern.trim().to_string();
+    if pattern.is_empty() {
+        return Err("管控命令不能为空".to_string());
+    }
+    let rule = McpRule {
+        id: uuid::Uuid::new_v4().to_string(),
+        pattern,
+        enabled: true,
+        created_at: now(),
+    };
+    db.insert_mcp_rule(&rule)
+        .map_err(|e| format!("保存管控规则失败: {e}"))?;
+    Ok(rule)
+}
+
+#[tauri::command]
+pub fn delete_mcp_rule(db: State<'_, Db>, id: String) -> Result<(), String> {
+    db.delete_mcp_rule(&id)
+        .map_err(|e| format!("删除管控规则失败: {e}"))
 }
 
 // ---------- 服务生命周期 ----------
@@ -670,10 +699,9 @@ fn check_dangerous(app: &AppHandle, command: &str) -> bool {
     }
     let c = command.to_ascii_lowercase();
     app.try_state::<Db>()
-        .and_then(|db| db.list_ai_rules().ok())
+        .and_then(|db| db.list_mcp_rules().ok())
         .unwrap_or_default()
         .iter()
-        .filter(|r| r.enabled)
         .any(|r| {
             let pattern = r.pattern.trim();
             !pattern.is_empty() && c.contains(&pattern.to_ascii_lowercase())

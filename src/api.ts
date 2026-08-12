@@ -15,6 +15,7 @@ import type {
   InspectionRun,
   ImportResult,
   McpApprovalRequest,
+  McpRule,
   McpService,
   McpServiceInput,
   MonitorSnapshot,
@@ -104,6 +105,11 @@ export const rotateMcpToken = () =>
   invoke<McpService>('rotate_mcp_token');
 export const mcpApprove = (requestId: string, allow: boolean) =>
   invoke<void>('mcp_approve', { requestId, allow });
+export const listMcpRules = () => invoke<McpRule[]>('list_mcp_rules');
+export const addMcpRule = (pattern: string) =>
+  invoke<McpRule>('add_mcp_rule', { pattern });
+export const deleteMcpRule = (id: string) =>
+  invoke<void>('delete_mcp_rule', { id });
 export const onMcpApprovalRequest = (
   cb: (payload: McpApprovalRequest) => void,
 ) => listen<McpApprovalRequest>('mcp:approval-request', (event) => cb(event.payload));

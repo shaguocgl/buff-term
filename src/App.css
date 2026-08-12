@@ -2970,6 +2970,12 @@ input::placeholder {
   font-size: 12.5px;
 }
 
+.mcp-rule-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
 /* ---------- MCP 服务 ---------- */
 
 .mcp-service-modal {

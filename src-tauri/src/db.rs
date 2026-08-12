@@ -1,6 +1,6 @@
 use crate::models::{
     AiModel, AiProvider, AiRule, AlertRule, AlertSettings, AuditLog, Host, Inspection,
-    InspectionRun, McpService,
+    InspectionRun, McpRule, McpService,
 };
 use rusqlite::{params, Connection, Row};
 use rusqlite::OptionalExtension;
@@ -111,6 +111,12 @@ impl Db {
                  token          TEXT,
                  port           INTEGER,
                  updated_at     INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS mcp_rules (
+                 id         TEXT PRIMARY KEY,
+                 pattern    TEXT NOT NULL,
+                 enabled    INTEGER NOT NULL DEFAULT 1,
+                 created_at INTEGER NOT NULL
              );",
         )?;
         migrate_ai_models(&conn)?;
@@ -633,6 +639,32 @@ impl Db {
         )?;
         Ok(())
     }
+
+    pub fn list_mcp_rules(&self) -> rusqlite::Result<Vec<McpRule>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, pattern, enabled, created_at FROM mcp_rules
+             WHERE enabled=1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], row_to_mcp_rule)?;
+        rows.collect()
+    }
+
+    pub fn insert_mcp_rule(&self, rule: &McpRule) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO mcp_rules (id, pattern, enabled, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![rule.id, rule.pattern, rule.enabled as i64, rule.created_at as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_mcp_rule(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM mcp_rules WHERE id=?1", params![id])?;
+        Ok(())
+    }
 }
 
 /// 旧版本只有一个 model 字段，迁移到 ai_models 表
@@ -704,6 +736,15 @@ fn row_to_ai_model(row: &Row<'_>) -> rusqlite::Result<AiModel> {
 
 fn row_to_ai_rule(row: &Row<'_>) -> rusqlite::Result<AiRule> {
     Ok(AiRule {
+        id: row.get(0)?,
+        pattern: row.get(1)?,
+        enabled: row.get::<_, i64>(2)? != 0,
+        created_at: row.get::<_, i64>(3)? as u64,
+    })
+}
+
+fn row_to_mcp_rule(row: &Row<'_>) -> rusqlite::Result<McpRule> {
+    Ok(McpRule {
         id: row.get(0)?,
         pattern: row.get(1)?,
         enabled: row.get::<_, i64>(2)? != 0,

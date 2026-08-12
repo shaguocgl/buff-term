@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
-import { getMcpService, rotateMcpToken, saveMcpService } from '../api';
-import type { Host, McpService } from '../types';
+import {
+  addMcpRule,
+  deleteMcpRule,
+  getMcpService,
+  listMcpRules,
+  rotateMcpToken,
+  saveMcpService,
+} from '../api';
+import type { Host, McpRule, McpService } from '../types';
 import Modal from './Modal';
 import Select, { type SelectOption } from './Select';
 import { CheckIcon, KeyIcon, PowerIcon, ServerIcon } from './Icons';
@@ -33,6 +40,8 @@ export default function McpServiceModal({ hosts, onClose }: Props) {
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rules, setRules] = useState<McpRule[]>([]);
+  const [ruleInput, setRuleInput] = useState('');
 
   const load = useCallback(async () => {
     const s = await getMcpService();
@@ -44,6 +53,12 @@ export default function McpServiceModal({ hosts, onClose }: Props) {
   useEffect(() => {
     load().catch((e) => setError(String(e)));
   }, [load]);
+
+  useEffect(() => {
+    listMcpRules()
+      .then(setRules)
+      .catch((e) => setError(String(e)));
+  }, []);
 
   const toggleHost = (id: string) => {
     setHostIds((prev) =>
@@ -88,6 +103,29 @@ export default function McpServiceModal({ hosts, onClose }: Props) {
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
       setError('复制失败，请手动选择复制');
+    }
+  };
+
+  const handleAddRule = async () => {
+    const pattern = ruleInput.trim();
+    if (!pattern) return;
+    setError(null);
+    try {
+      const rule = await addMcpRule(pattern);
+      setRules((prev) => [rule, ...prev]);
+      setRuleInput('');
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleDeleteRule = async (id: string) => {
+    setError(null);
+    try {
+      await deleteMcpRule(id);
+      setRules((prev) => prev.filter((r) => r.id !== id));
+    } catch (e) {
+      setError(String(e));
     }
   };
 
@@ -165,6 +203,55 @@ export default function McpServiceModal({ hosts, onClose }: Props) {
           />
           <p className="mcp-hint">{PERMISSION_HINTS[permission]}</p>
         </div>
+
+        {permission === 'confirm' && (
+          <div className="mcp-section">
+            <div className="mcp-section-title">
+              <strong>自定义管控命令</strong>
+              <span>命中后执行前需你确认</span>
+            </div>
+            <div className="rule-add">
+              <input
+                value={ruleInput}
+                onChange={(e) => setRuleInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    handleAddRule().catch(() => {});
+                  }
+                }}
+                placeholder="如 rm -rf，子串匹配，无需通配符"
+              />
+              <button
+                className="btn secondary small"
+                onClick={handleAddRule}
+                disabled={!ruleInput.trim()}
+              >
+                添加
+              </button>
+            </div>
+            {rules.length > 0 ? (
+              <div className="mcp-rule-list">
+                {rules.map((rule) => (
+                  <span className="rule-chip" key={rule.id}>
+                    <code>{rule.pattern}</code>
+                    <button
+                      className="rule-del"
+                      title="删除"
+                      onClick={() => handleDeleteRule(rule.id)}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="mcp-hint">
+                还没有自定义规则。这里只影响 MCP 服务，与内置 AI 的智能审核规则相互独立。
+              </p>
+            )}
+          </div>
+        )}
 
         {running && service?.token && service.port && (
           <div className="mcp-config-block">

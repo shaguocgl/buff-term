@@ -65,6 +65,14 @@ pub struct AiRule {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpRule {
+    pub id: String,
+    pub pattern: String,
+    pub enabled: bool,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditLog {
     pub id: String,
     pub ts: u64,

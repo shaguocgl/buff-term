@@ -195,6 +195,13 @@ export interface McpServiceInput {
   permission_mode: string;
 }
 
+export interface McpRule {
+  id: string;
+  pattern: string;
+  enabled: boolean;
+  created_at: number;
+}
+
 export interface McpApprovalRequest {
   request_id: string;
   host: string;
