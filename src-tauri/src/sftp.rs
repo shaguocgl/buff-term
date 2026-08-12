@@ -55,44 +55,55 @@ fn finish(out: &remote::RemoteOutput) -> Result<SftpResult, String> {
     })
 }
 
+fn run_sftp(host: &Host, script: &str, timeout: u64) -> Result<remote::RemoteOutput, String> {
+    remote::run_program(
+        &host.id,
+        "sftp",
+        &[],
+        &sftp_args(host),
+        Some(script),
+        timeout,
+    )
+}
+
 #[tauri::command]
 pub fn sftp_list(host: Host, path: String) -> Result<SftpResult, String> {
     let script = format!("ls -la {}\nbye\n", sftp_quote(&path));
-    let out = remote::run_batch(&host, &sftp_args(&host), &script, 20)?;
+    let out = run_sftp(&host, &script, 20)?;
     finish(&out)
 }
 
 #[tauri::command]
 pub fn sftp_download(host: Host, remote: String, local: String) -> Result<SftpResult, String> {
     let script = format!("get {} {}\nbye\n", sftp_quote(&remote), sftp_quote(&local));
-    let out = remote::run_batch(&host, &sftp_args(&host), &script, 120)?;
+    let out = run_sftp(&host, &script, 120)?;
     finish(&out)
 }
 
 #[tauri::command]
 pub fn sftp_upload(host: Host, local: String, remote: String) -> Result<SftpResult, String> {
     let script = format!("put {} {}\nbye\n", sftp_quote(&local), sftp_quote(&remote));
-    let out = remote::run_batch(&host, &sftp_args(&host), &script, 120)?;
+    let out = run_sftp(&host, &script, 120)?;
     finish(&out)
 }
 
 #[tauri::command]
 pub fn sftp_delete(host: Host, path: String) -> Result<SftpResult, String> {
     let script = format!("rm {}\nbye\n", sftp_quote(&path));
-    let out = remote::run_batch(&host, &sftp_args(&host), &script, 20)?;
+    let out = run_sftp(&host, &script, 20)?;
     finish(&out)
 }
 
 #[tauri::command]
 pub fn sftp_mkdir(host: Host, path: String) -> Result<SftpResult, String> {
     let script = format!("mkdir {}\nbye\n", sftp_quote(&path));
-    let out = remote::run_batch(&host, &sftp_args(&host), &script, 20)?;
+    let out = run_sftp(&host, &script, 20)?;
     finish(&out)
 }
 
 #[tauri::command]
 pub fn sftp_rename(host: Host, from: String, to: String) -> Result<SftpResult, String> {
     let script = format!("rename {} {}\nbye\n", sftp_quote(&from), sftp_quote(&to));
-    let out = remote::run_batch(&host, &sftp_args(&host), &script, 20)?;
+    let out = run_sftp(&host, &script, 20)?;
     finish(&out)
 }

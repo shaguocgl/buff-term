@@ -23,21 +23,21 @@ fn auth_prompt_re() -> &'static Regex {
 
 /// 通过一个独立 ssh 进程执行远程命令（非交互），自动响应密码提示，带超时。
 pub fn run(host: &Host, command: &str, timeout_secs: u64) -> Result<RemoteOutput, String> {
-    execute(host, &[command.to_string()], None, timeout_secs)
+    run_program(
+        &host.id,
+        "ssh",
+        &host.ssh_args(),
+        &[command.to_string()],
+        None,
+        timeout_secs,
+    )
 }
 
-/// 通过一个独立 ssh 进程执行批处理（如 sftp -b -），stdin 写入脚本。
-pub fn run_batch(
-    host: &Host,
-    extra_args: &[String],
-    stdin_script: &str,
-    timeout_secs: u64,
-) -> Result<RemoteOutput, String> {
-    execute(host, extra_args, Some(stdin_script), timeout_secs)
-}
-
-fn execute(
-    host: &Host,
+/// 通过指定程序（ssh / sftp）执行，stdin 可写入批处理脚本。
+pub fn run_program(
+    host_id: &str,
+    program: &str,
+    base_args: &[String],
     extra_args: &[String],
     stdin_script: Option<&str>,
     timeout_secs: u64,
@@ -53,8 +53,8 @@ fn execute(
         .map_err(|e| format!("创建 PTY 失败: {e}"))?;
     let master = pair.master;
 
-    let mut cmd = CommandBuilder::new("ssh");
-    for arg in host.ssh_args() {
+    let mut cmd = CommandBuilder::new(program);
+    for arg in base_args {
         cmd.arg(arg);
     }
     for arg in extra_args {
@@ -76,7 +76,7 @@ fn execute(
         let _ = writer.write_all(script.as_bytes());
         let _ = writer.flush();
     }
-    let auto_password = crate::credentials::get_password(&host.id);
+    let auto_password = crate::credentials::get_password(host_id);
     let auto_password_thread = auto_password.clone();
 
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
