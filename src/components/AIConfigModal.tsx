@@ -176,6 +176,11 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
   };
 
   const applyPreset = (name: string) => {
+    if (name === '自定义') {
+      // 保留当前填写内容，仅切换预设标记，用户可继续自由编辑
+      setForm((prev) => ({ ...prev, preset: '自定义' }));
+      return;
+    }
     const preset = PRESETS.find((p) => p.name === name);
     if (!preset) return;
     setForm((prev) => ({
