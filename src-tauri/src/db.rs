@@ -1,6 +1,6 @@
 use crate::models::{
     AiModel, AiProvider, AiRule, AlertRule, AlertSettings, AuditLog, Host, Inspection,
-    InspectionRun, McpServer,
+    InspectionRun, McpService,
 };
 use rusqlite::{params, Connection, Row};
 use rusqlite::OptionalExtension;
@@ -102,13 +102,15 @@ impl Db {
                  summary        TEXT,
                  respond_text   TEXT
              );
-             CREATE TABLE IF NOT EXISTS mcp_servers (
-                 id         TEXT PRIMARY KEY,
-                 name       TEXT NOT NULL,
-                 command    TEXT NOT NULL,
-                 args       TEXT NOT NULL DEFAULT '',
-                 enabled    INTEGER NOT NULL DEFAULT 1,
-                 created_at INTEGER NOT NULL
+             DROP TABLE IF EXISTS mcp_servers;
+             CREATE TABLE IF NOT EXISTS mcp_service (
+                 id             INTEGER PRIMARY KEY CHECK (id = 1),
+                 enabled        INTEGER NOT NULL DEFAULT 0,
+                 host_ids       TEXT NOT NULL DEFAULT '[]',
+                 permission_mode TEXT NOT NULL DEFAULT 'confirm',
+                 token          TEXT,
+                 port           INTEGER,
+                 updated_at     INTEGER NOT NULL DEFAULT 0
              );",
         )?;
         migrate_ai_models(&conn)?;
@@ -585,49 +587,50 @@ impl Db {
         }
     }
 
-    pub fn list_mcp_servers(&self, enabled_only: bool) -> rusqlite::Result<Vec<McpServer>> {
+    pub fn get_mcp_service(&self) -> rusqlite::Result<McpService> {
         let conn = self.conn.lock().unwrap();
-        let sql = if enabled_only {
-            "SELECT id, name, command, args, enabled, created_at
-             FROM mcp_servers WHERE enabled=1 ORDER BY created_at DESC"
-        } else {
-            "SELECT id, name, command, args, enabled, created_at
-             FROM mcp_servers ORDER BY created_at DESC"
-        };
-        let mut stmt = conn.prepare(sql)?;
-        let rows = stmt.query_map([], row_to_mcp)?;
-        rows.collect()
+        conn.query_row(
+            "SELECT enabled, host_ids, permission_mode, token, port, updated_at
+             FROM mcp_service WHERE id=1",
+            [],
+            |row| {
+                Ok(McpService {
+                    enabled: row.get::<_, i64>(0)? != 0,
+                    host_ids: serde_json::from_str(&row.get::<_, String>(1)?)
+                        .unwrap_or_default(),
+                    permission_mode: row.get(2)?,
+                    token: row.get(3)?,
+                    port: row.get(4)?,
+                    updated_at: row.get::<_, i64>(5)? as u64,
+                })
+            },
+        )
+        .or(Ok(McpService {
+            enabled: false,
+            host_ids: Vec::new(),
+            permission_mode: "confirm".to_string(),
+            token: None,
+            port: None,
+            updated_at: 0,
+        }))
     }
 
-    pub fn insert_mcp_server(&self, s: &McpServer) -> rusqlite::Result<()> {
+    pub fn save_mcp_service(&self, s: &McpService) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO mcp_servers (id, name, command, args, enabled, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO mcp_service (id, enabled, host_ids, permission_mode, token, port, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+               enabled=?1, host_ids=?2, permission_mode=?3, token=?4, port=?5, updated_at=?6",
             params![
-                s.id,
-                s.name,
-                s.command,
-                s.args,
                 s.enabled as i64,
-                s.created_at as i64,
+                serde_json::to_string(&s.host_ids).unwrap_or_else(|_| "[]".to_string()),
+                s.permission_mode,
+                s.token,
+                s.port.map(|p| p as i64),
+                s.updated_at as i64,
             ],
         )?;
-        Ok(())
-    }
-
-    pub fn update_mcp_server(&self, s: &McpServer) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE mcp_servers SET name=?2, command=?3, args=?4, enabled=?5 WHERE id=?1",
-            params![s.id, s.name, s.command, s.args, s.enabled as i64],
-        )?;
-        Ok(())
-    }
-
-    pub fn delete_mcp_server(&self, id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM mcp_servers WHERE id=?1", params![id])?;
         Ok(())
     }
 }
@@ -783,16 +786,5 @@ fn row_to_inspection_run(row: &Row<'_>) -> rusqlite::Result<InspectionRun> {
         risk_level: row.get(7)?,
         summary: row.get(8)?,
         respond_text: row.get(9)?,
-    })
-}
-
-fn row_to_mcp(row: &Row<'_>) -> rusqlite::Result<McpServer> {
-    Ok(McpServer {
-        id: row.get(0)?,
-        name: row.get(1)?,
-        command: row.get(2)?,
-        args: row.get(3)?,
-        enabled: row.get::<_, i64>(4)? != 0,
-        created_at: row.get::<_, i64>(5)? as u64,
     })
 }

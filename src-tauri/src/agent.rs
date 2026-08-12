@@ -1,6 +1,6 @@
 use crate::credentials;
 use crate::db::Db;
-use crate::models::{AiProvider, AuditLog, Host, McpServer};
+use crate::models::{AiProvider, AuditLog, Host};
 use crate::remote;
 use crate::russh::RusshManager;
 use crate::session::SessionManager;
@@ -129,10 +129,6 @@ pub async fn agent_chat(
         .map(|r| r.pattern)
         .collect();
     let russh = app.state::<RusshManager>();
-    let mcp_servers: Vec<McpServer> = db
-        .list_mcp_servers(true)
-        .map_err(|e| format!("读取 MCP 服务器失败: {e}"))?;
-
     let (tx, rx) = mpsc::channel::<Control>();
     agents.set_control(session_id, tx);
 
@@ -169,7 +165,6 @@ pub async fn agent_chat(
         &danger_rules,
         &db,
         &russh,
-        &mcp_servers,
         rx,
         &mut history,
     )
@@ -227,7 +222,6 @@ async fn run_agent_loop(
     danger_rules: &[String],
     db: &Db,
     russh: &RusshManager,
-    mcp_servers: &[McpServer],
     rx: mpsc::Receiver<Control>,
     history: &mut Vec<serde_json::Value>,
 ) -> Result<(), String> {
@@ -247,7 +241,7 @@ async fn run_agent_loop(
             "model": model,
             "messages": history,
             "stream": true,
-            "tools": tools_schema(&mcp_servers.iter().map(|s| s.name.clone()).collect::<Vec<_>>()),
+            "tools": tools_schema(),
         });
         let resp = client
             .post(url)
@@ -472,7 +466,7 @@ async fn run_agent_loop(
                 },
             );
 
-            let result = execute_tool(russh, host, &acc.name, &args, mcp_servers).await;
+            let result = execute_tool(russh, host, &acc.name, &args).await;
             match result {
                 Ok(output) => {
                     let _ = insert_audit(
@@ -640,7 +634,6 @@ async fn execute_tool(
     host: &Host,
     name: &str,
     args: &serde_json::Value,
-    mcp_servers: &[McpServer],
 ) -> Result<String, String> {
     match name {
         "exec_command" => {
@@ -678,23 +671,6 @@ async fn execute_tool(
                 .await?;
             Ok(sanitize(&format_exec(&out)))
         }
-        "use_mcp_tool" => {
-            let server_name = args
-                .get("server")
-                .and_then(|s| s.as_str())
-                .ok_or_else(|| "缺少 server 参数".to_string())?;
-            let tool = args
-                .get("tool")
-                .and_then(|t| t.as_str())
-                .ok_or_else(|| "缺少 tool 参数".to_string())?;
-            let arguments = args.get("arguments").cloned().unwrap_or(serde_json::json!({}));
-            let server = mcp_servers
-                .iter()
-                .find(|s| s.name == server_name)
-                .ok_or_else(|| format!("MCP 服务器 {server_name} 未配置或未启用"))?;
-            let output = crate::mcp::call_tool(server, tool, arguments).await?;
-            Ok(sanitize(&output))
-        }
         _ => {
             let mut effective = name;
             // 模型漏填工具名时，根据参数推断（command → exec_command，path → read_file）
@@ -712,12 +688,12 @@ async fn execute_tool(
             }
             let normalized = normalize_tool(effective);
             if normalized != name {
-                return Box::pin(execute_tool(russh, host, normalized, args, mcp_servers)).await;
+                return Box::pin(execute_tool(russh, host, normalized, args)).await;
             }
             eprintln!("[agent] 未知工具调用: {name}，参数: {args}");
             Err(format!(
                 "未知工具: {name}。可用工具：exec_command（执行命令）、read_file（读文件）、\
-                 list_dir（列目录）、resource_usage（资源占用）、use_mcp_tool（调用 MCP 工具）。\
+                 list_dir（列目录）、resource_usage（资源占用）。\
                  请改用这些工具重试。"
             ))
         }
@@ -746,7 +722,7 @@ fn format_exec(out: &crate::russh::ExecResult) -> String {
 }
 
 /// 命令输出进入模型上下文前过滤敏感信息
-fn sanitize(text: &str) -> String {
+pub(crate) fn sanitize(text: &str) -> String {
     struct Rule {
         re: Regex,
         keep_key: bool,
@@ -805,7 +781,7 @@ fn sanitize(text: &str) -> String {
 }
 
 /// 智能审核模式下判断命令是否有风险
-fn is_dangerous(command: &str) -> bool {
+pub(crate) fn is_dangerous(command: &str) -> bool {
     let c = command.to_ascii_lowercase();
     const PATTERNS: &[&str] = &[
         "rm -rf",
@@ -892,7 +868,7 @@ fn system_prompt(host: &Host, provider: &AiProvider, model: &str) -> String {
          5. 身份说明：当用户询问“你是什么模型/你由谁开发”时，如实回答你由 {} 驱动、配置的模型为 {}，
             以及你是 KeyWisp Agent；不要声称自己是任何其他 AI 助手（如 ChatGPT、Claude、Gemini 等），
             也不要编造版本号或开发厂商信息。\n\
-         6. 工具调用约定：工具名称必须是以下之一——exec_command、read_file、list_dir、resource_usage、use_mcp_tool；
+         6. 工具调用约定：工具名称必须是以下之一——exec_command、read_file、list_dir、resource_usage；
             每次工具调用都必须包含完整的 name 字段且不能为空，不要发明新工具名；参数放入 arguments（JSON 对象）。",
         provider.name,
         model,
@@ -905,7 +881,7 @@ fn system_prompt(host: &Host, provider: &AiProvider, model: &str) -> String {
     )
 }
 
-fn tools_schema(server_names: &[String]) -> serde_json::Value {
+fn tools_schema() -> serde_json::Value {
     serde_json::json!([
         {
             "type": "function",
@@ -958,28 +934,5 @@ fn tools_schema(server_names: &[String]) -> serde_json::Value {
                 "parameters": { "type": "object", "properties": {} }
             }
         },
-        {
-            "type": "function",
-            "function": {
-                "name": "use_mcp_tool",
-                "description": format!(
-                    "调用已配置的外部 MCP 服务器工具，扩展能力（如数据库查询、云平台操作等）。可用的 MCP 服务器：{}",
-                    if server_names.is_empty() {
-                        "（无，请先在 MCP 配置中添加）".to_string()
-                    } else {
-                        server_names.join("、")
-                    }
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "server": { "type": "string", "description": "MCP 服务器名称，必须来自上面的列表" },
-                        "tool": { "type": "string", "description": "要调用的工具名" },
-                        "arguments": { "type": "object", "description": "传给工具的参数对象" }
-                    },
-                    "required": ["server", "tool", "arguments"]
-                }
-            }
-        }
     ])
 }

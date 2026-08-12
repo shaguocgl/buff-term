@@ -137,14 +137,23 @@ pub struct InspectionRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpServer {
-    pub id: String,
-    pub name: String,
-    pub command: String,
-    #[serde(default)]
-    pub args: String,
+pub struct McpService {
     pub enabled: bool,
-    pub created_at: u64,
+    #[serde(default)]
+    pub host_ids: Vec<String>,
+    /// readonly（只读）/ confirm（危险命令需确认）/ allow（全部放行）
+    #[serde(default = "default_mcp_permission")]
+    pub permission_mode: String,
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub updated_at: u64,
+}
+
+fn default_mcp_permission() -> String {
+    "confirm".to_string()
 }
 
 fn default_cooldown() -> u64 {

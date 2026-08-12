@@ -179,23 +179,25 @@ export interface InspectionRun {
   respond_text?: string | null;
 }
 
-export interface McpServer {
-  id: string;
-  name: string;
-  command: string;
-  args: string;
+export interface McpService {
   enabled: boolean;
-  created_at: number;
+  host_ids: string[];
+  permission_mode: 'readonly' | 'confirm' | 'allow';
+  token?: string | null;
+  port?: number | null;
+  updated_at: number;
+  running: boolean;
 }
 
-export interface McpServerInput {
-  name: string;
+export interface McpServiceInput {
+  enabled: boolean;
+  host_ids: string[];
+  permission_mode: string;
+}
+
+export interface McpApprovalRequest {
+  request_id: string;
+  host: string;
+  host_label: string;
   command: string;
-  args?: string;
-  enabled?: boolean;
-}
-
-export interface McpToolInfo {
-  name: string;
-  description: string;
 }

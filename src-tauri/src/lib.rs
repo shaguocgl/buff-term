@@ -40,6 +40,21 @@ pub fn run() {
             })?;
             let _ = hosts::migrate_json(&db, app.handle());
             app.manage(db);
+            app.manage(mcp::McpServiceManager::default());
+            app.manage(mcp::ApprovalRegistry::default());
+            // 若上次退出前开启了 MCP 服务，启动时自动恢复
+            let mcp_enabled = app
+                .state::<Db>()
+                .get_mcp_service()
+                .map(|c| c.enabled)
+                .unwrap_or(false);
+            if mcp_enabled {
+                if let Err(e) =
+                    mcp::start_service(app.handle(), &app.state::<mcp::McpServiceManager>())
+                {
+                    eprintln!("[mcp] 启动 MCP 服务失败: {e}");
+                }
+            }
             alert::spawn_alert_loop(app.handle().clone());
             inspection::spawn_inspection_loop(app.handle().clone());
             Ok(())
@@ -81,10 +96,10 @@ pub fn run() {
             inspection::delete_inspection,
             inspection::list_inspection_runs,
             inspection::inspection_respond,
-            mcp::list_mcp_servers,
-            mcp::save_mcp_server,
-            mcp::delete_mcp_server,
-            mcp::mcp_test,
+            mcp::get_mcp_service,
+            mcp::save_mcp_service,
+            mcp::rotate_mcp_token,
+            mcp::mcp_approve,
             hosts::list_hosts,
             hosts::create_host,
             hosts::update_host,

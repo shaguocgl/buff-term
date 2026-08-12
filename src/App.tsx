@@ -4,18 +4,21 @@ import {
   importSshConfig,
   listAiProviders,
   listHosts,
+  mcpApprove,
+  onMcpApprovalRequest,
   onSessionNotice,
 } from './api';
 import './App.css';
-import type { AiProvider, Host } from './types';
+import type { AiProvider, Host, McpApprovalRequest } from './types';
 import AIConfigModal from './components/AIConfigModal';
 import AlertModal from './components/AlertModal';
 import AuditLogModal from './components/AuditLogModal';
 import ChatPanel from './components/ChatPanel';
 import HostForm from './components/HostForm';
 import InspectionModal from './components/InspectionModal';
+import McpApprovalModal from './components/McpApprovalModal';
+import McpServiceModal from './components/McpServiceModal';
 import MonitorPanel from './components/MonitorPanel';
-import McpModal from './components/McpModal';
 import SftpPanel from './components/SftpPanel';
 import TerminalView from './components/TerminalView';
 import ToastContainer, { type ToastItem } from './components/Toast';
@@ -50,6 +53,7 @@ function App() {
   const [showAlerts, setShowAlerts] = useState(false);
   const [showInspection, setShowInspection] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
+  const [mcpApproval, setMcpApproval] = useState<McpApprovalRequest | null>(null);
   const [chatOpen, setChatOpen] = useState(true);
   const [sftpOpen, setSftpOpen] = useState(false);
   const [monitorOpen, setMonitorOpen] = useState(false);
@@ -100,6 +104,31 @@ function App() {
       un?.();
     };
   }, [showToast]);
+
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    let cancelled = false;
+    onMcpApprovalRequest((req) => setMcpApproval(req)).then((fn) => {
+      if (cancelled) fn();
+      else un = fn;
+    });
+    return () => {
+      cancelled = true;
+      un?.();
+    };
+  }, []);
+
+  const resolveMcpApproval = async (allow: boolean) => {
+    const req = mcpApproval;
+    if (!req) return;
+    try {
+      await mcpApprove(req.request_id, allow);
+    } catch (e) {
+      showToast('error', String(e));
+    } finally {
+      setMcpApproval(null);
+    }
+  };
 
   const activeProvider = aiProviders.find((p) => p.enabled) ?? null;
   const activeModelLabel =
@@ -279,7 +308,7 @@ function App() {
 
         <div className="sidebar-footer">
           <button className="log-entry" onClick={() => setShowMcp(true)}>
-            <WrenchIcon size={15} /> MCP 工具
+            <WrenchIcon size={15} /> MCP 服务
           </button>
           <button className="log-entry" onClick={() => setShowInspection(true)}>
             <RadarIcon size={15} /> AI 定时巡检
@@ -490,7 +519,16 @@ function App() {
         <InspectionModal hosts={hosts} onClose={() => setShowInspection(false)} />
       )}
 
-      {showMcp && <McpModal onClose={() => setShowMcp(false)} />}
+      {showMcp && (
+        <McpServiceModal hosts={hosts} onClose={() => setShowMcp(false)} />
+      )}
+
+      {mcpApproval && (
+        <McpApprovalModal
+          request={mcpApproval}
+          onResolve={resolveMcpApproval}
+        />
+      )}
 
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>

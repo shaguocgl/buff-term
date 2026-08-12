@@ -1,26 +1,778 @@
+//! 对外 MCP 服务：KeyWisp 作为 MCP 服务器（Streamable HTTP），
+//! 把用户勾选的 SSH 服务器能力开放给外部 AI（Codex、Claude Desktop 等）。
+//!
+//! 设计要点：
+//! - 默认关闭，用户在 UI 中启用时才监听 127.0.0.1；
+//! - 随机 token 认证，可随时吊销；
+//! - list_hosts 只返回启用时勾选的服务器；
+//! - 权限模式：readonly（只读）/ confirm（危险命令需确认）/ allow（全部放行）；
+//! - 所有命令输出复用脱敏规则，外部调用同样写入审计日志。
+
 use crate::db::Db;
-use crate::models::McpServer;
+use crate::models::{Host, McpService};
+use crate::russh::RusshManager;
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
-use tauri::State;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tauri::{AppHandle, Emitter, Manager, State};
+use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+
+const DEFAULT_PORT: u16 = 48123;
+const PROTOCOL_VERSION: &str = "2025-03-26";
+
+// ---------- 配置 ----------
 
 #[derive(Debug, Deserialize)]
-pub struct McpServerInput {
-    pub name: String,
-    pub command: String,
-    #[serde(default)]
-    pub args: String,
-    #[serde(default)]
+pub struct McpServiceInput {
     pub enabled: bool,
+    #[serde(default)]
+    pub host_ids: Vec<String>,
+    #[serde(default = "default_permission")]
+    pub permission_mode: String,
 }
 
-#[derive(Serialize)]
-pub struct McpToolInfo {
-    pub name: String,
-    pub description: String,
+fn default_permission() -> String {
+    "confirm".to_string()
+}
+
+#[derive(Serialize, Clone)]
+pub struct McpServiceView {
+    #[serde(flatten)]
+    pub config: McpService,
+    pub running: bool,
+}
+
+// ---------- 运行管理 ----------
+
+struct RunningMcp {
+    shutdown: tokio::sync::oneshot::Sender<()>,
+}
+
+#[derive(Default)]
+pub struct McpServiceManager {
+    inner: Mutex<Option<RunningMcp>>,
+}
+
+impl McpServiceManager {
+    pub fn is_running(&self) -> bool {
+        self.inner.lock().unwrap().is_some()
+    }
+
+    fn set(&self, running: Option<RunningMcp>) {
+        *self.inner.lock().unwrap() = running;
+    }
+}
+
+// ---------- 审批注册表（外部调用危险命令时弹窗确认） ----------
+
+#[derive(Default)]
+pub struct ApprovalRegistry {
+    pending: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+}
+
+impl ApprovalRegistry {
+    fn register(&self, id: String) -> tokio::sync::oneshot::Receiver<bool> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending.lock().unwrap().insert(id, tx);
+        rx
+    }
+
+    fn resolve(&self, id: &str, allow: bool) -> Result<(), String> {
+        let tx = self.pending.lock().unwrap().remove(id);
+        match tx {
+            Some(tx) => tx.send(allow).map_err(|_| "审批接收方已关闭".to_string()),
+            None => Err("审批请求不存在或已超时".to_string()),
+        }
+    }
+}
+
+// ---------- Tauri 命令 ----------
+
+#[tauri::command]
+pub fn get_mcp_service(
+    db: State<'_, Db>,
+    manager: State<'_, McpServiceManager>,
+) -> Result<McpServiceView, String> {
+    let config = db
+        .get_mcp_service()
+        .map_err(|e| format!("读取 MCP 服务配置失败: {e}"))?;
+    Ok(McpServiceView {
+        running: manager.is_running(),
+        config,
+    })
+}
+
+#[tauri::command]
+pub async fn save_mcp_service(
+    app: AppHandle,
+    db: State<'_, Db>,
+    manager: State<'_, McpServiceManager>,
+    input: McpServiceInput,
+) -> Result<McpServiceView, String> {
+    if !["readonly", "confirm", "allow"].contains(&input.permission_mode.as_str()) {
+        return Err("权限模式不合法".to_string());
+    }
+    if input.enabled && input.host_ids.is_empty() {
+        return Err("启用 MCP 服务前，请至少勾选一台服务器".to_string());
+    }
+
+    let mut config = db
+        .get_mcp_service()
+        .map_err(|e| format!("读取 MCP 服务配置失败: {e}"))?;
+    config.enabled = input.enabled;
+    config.host_ids = input.host_ids;
+    config.permission_mode = input.permission_mode;
+    config.updated_at = now();
+
+    if !config.enabled {
+        stop_service(&manager);
+        config.port = None;
+        db.save_mcp_service(&config)
+            .map_err(|e| format!("保存 MCP 服务配置失败: {e}"))?;
+        return Ok(McpServiceView {
+            running: false,
+            config,
+        });
+    }
+
+    // 首次启用时生成 token
+    if config.token.is_none() {
+        config.token = Some(generate_token());
+    }
+    // 未运行时才启动；已运行时只需更新配置（请求时实时读取）
+    if !manager.is_running() {
+        let port = start_service(&app, &manager)?;
+        config.port = Some(port);
+    }
+    db.save_mcp_service(&config)
+        .map_err(|e| format!("保存 MCP 服务配置失败: {e}"))?;
+    Ok(McpServiceView {
+        running: true,
+        config,
+    })
+}
+
+#[tauri::command]
+pub fn rotate_mcp_token(
+    db: State<'_, Db>,
+    manager: State<'_, McpServiceManager>,
+) -> Result<McpServiceView, String> {
+    let mut config = db
+        .get_mcp_service()
+        .map_err(|e| format!("读取 MCP 服务配置失败: {e}"))?;
+    config.token = Some(generate_token());
+    config.updated_at = now();
+    db.save_mcp_service(&config)
+        .map_err(|e| format!("保存 MCP 服务配置失败: {e}"))?;
+    Ok(McpServiceView {
+        running: manager.is_running(),
+        config,
+    })
+}
+
+#[tauri::command]
+pub fn mcp_approve(
+    registry: State<'_, ApprovalRegistry>,
+    request_id: String,
+    allow: bool,
+) -> Result<(), String> {
+    registry.resolve(&request_id, allow)
+}
+
+// ---------- 服务生命周期 ----------
+
+pub(crate) fn start_service(app: &AppHandle, manager: &McpServiceManager) -> Result<u16, String> {
+    let (port_tx, port_rx) = mpsc::channel::<Result<u16, String>>();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let app = app.clone();
+    std::thread::spawn(move || mcp_server_main(app, port_tx, shutdown_rx));
+    let port = port_rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| "MCP 服务启动超时".to_string())??;
+    manager.set(Some(RunningMcp {
+        shutdown: shutdown_tx,
+    }));
+    Ok(port)
+}
+
+fn stop_service(manager: &McpServiceManager) {
+    if let Some(running) = manager.inner.lock().unwrap().take() {
+        let _ = running.shutdown.send(());
+    }
+}
+
+fn mcp_server_main(
+    app: AppHandle,
+    port_tx: mpsc::Sender<Result<u16, String>>,
+    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) {
+    let server = match Server::http(&format!("127.0.0.1:{DEFAULT_PORT}")) {
+        Ok(s) => s,
+        Err(_) => match Server::http("127.0.0.1:0") {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = port_tx.send(Err(format!("启动 MCP 服务失败: {e}")));
+                return;
+            }
+        },
+    };
+    let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(DEFAULT_PORT);
+    if port_tx.send(Ok(port)).is_err() {
+        return;
+    }
+
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("[mcp] 创建 runtime 失败: {e}");
+            return;
+        }
+    };
+    let rt = Arc::new(rt);
+
+    loop {
+        match server.recv_timeout(Duration::from_millis(300)) {
+            Ok(Some(request)) => {
+                let app = app.clone();
+                let rt = rt.clone();
+                std::thread::spawn(move || handle_http(app, rt, request));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("[mcp] HTTP 服务器错误: {e}");
+                break;
+            }
+        }
+        if shutdown_rx.try_recv().is_ok() {
+            break;
+        }
+    }
+}
+
+// ---------- HTTP 层 ----------
+
+fn cors_headers() -> Vec<Header> {
+    vec![
+        Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap(),
+        Header::from_bytes(
+            &b"Access-Control-Allow-Headers"[..],
+            &b"Authorization, Content-Type, MCP-Protocol-Version, MCP-Session-Id"[..],
+        )
+        .unwrap(),
+        Header::from_bytes(
+            &b"Access-Control-Allow-Methods"[..],
+            &b"GET, POST, OPTIONS"[..],
+        )
+        .unwrap(),
+    ]
+}
+
+fn attach_headers<R: Read>(response: Response<R>, headers: Vec<Header>) -> Response<R> {
+    headers
+        .into_iter()
+        .fold(response, |resp, header| resp.with_header(header))
+}
+
+fn check_auth(app: &AppHandle, request: &Request) -> bool {
+    let db = match app.try_state::<Db>() {
+        Some(db) => db,
+        None => return false,
+    };
+    let token = db
+        .get_mcp_service()
+        .ok()
+        .and_then(|c| c.token)
+        .unwrap_or_default();
+    if token.is_empty() {
+        return false;
+    }
+    if let Some(h) = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Authorization"))
+    {
+        let v = h.value.as_str();
+        if v == token {
+            return true;
+        }
+        if let Some(bearer) = v.strip_prefix("Bearer ") {
+            if bearer == token {
+                return true;
+            }
+        }
+        if let Some(bearer) = v.strip_prefix("bearer ") {
+            if bearer == token {
+                return true;
+            }
+        }
+    }
+    if let Some(query) = request.url().split('?').nth(1) {
+        for pair in query.split('&') {
+            if let Some(v) = pair.strip_prefix("access_token=") {
+                let decoded = percent_encoding::percent_decode_str(v).decode_utf8_lossy();
+                if decoded == token {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn handle_http(app: AppHandle, rt: Arc<tokio::runtime::Runtime>, mut request: Request) {
+    let method = request.method().clone();
+    let url = request.url().to_string();
+    let path = url.split('?').next().unwrap_or("/");
+
+    if method == Method::Options {
+        let resp = attach_headers(Response::empty(StatusCode(204)), cors_headers());
+        let _ = request.respond(resp);
+        return;
+    }
+    if path != "/mcp" && path != "/" {
+        let _ = request.respond(
+            attach_headers(
+                Response::from_string("not found").with_status_code(StatusCode(404)),
+                cors_headers(),
+            ),
+        );
+        return;
+    }
+    if !check_auth(&app, &request) {
+        let _ = request.respond(
+            attach_headers(
+                Response::from_string("未授权：请检查 MCP 配置中的 token")
+                    .with_status_code(StatusCode(401)),
+                cors_headers(),
+            ),
+        );
+        return;
+    }
+
+    match method {
+        Method::Get => handle_sse(request),
+        Method::Post => {
+            let mut body = String::new();
+            if request.as_reader().read_to_string(&mut body).is_err() {
+                let _ = request.respond(
+                    attach_headers(
+                        Response::from_string("读取请求体失败")
+                            .with_status_code(StatusCode(400)),
+                        cors_headers(),
+                    ),
+                );
+                return;
+            }
+            let response = rt.block_on(handle_jsonrpc(&app, &body));
+            let mut headers = cors_headers();
+            headers.push(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let _ = request.respond(attach_headers(Response::from_string(response), headers));
+        }
+        _ => {
+            let _ = request.respond(
+                attach_headers(Response::empty(StatusCode(405)), cors_headers()),
+            );
+        }
+    }
+}
+
+fn handle_sse(request: Request) {
+    // tiny_http 的 respond 会把响应写入 BufWriter，无限流 body 阻塞读取时
+    // header 永远无法 flush；这里直接用 into_writer 手动写头并立即 flush。
+    let mut writer = request.into_writer();
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/event-stream\r\n\
+         Cache-Control: no-cache\r\n\
+         Connection: keep-alive\r\n\
+         Access-Control-Allow-Origin: *\r\n\
+         \r\n"
+    );
+    if writer.write_all(headers.as_bytes()).is_err() {
+        return;
+    }
+    if writer.flush().is_err() {
+        return;
+    }
+    let _ = writer.write_all(b": connected\n\n");
+    let _ = writer.flush();
+    loop {
+        std::thread::sleep(Duration::from_secs(15));
+        if writer.write_all(b": ping\n\n").is_err() {
+            break;
+        }
+        if writer.flush().is_err() {
+            break;
+        }
+    }
+}
+
+// ---------- JSON-RPC / MCP 协议 ----------
+
+async fn handle_jsonrpc(app: &AppHandle, body: &str) -> String {
+    let value: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => return json_error(None, -32700, &format!("解析请求失败: {e}")),
+    };
+    let method = value["method"].as_str().unwrap_or("").to_string();
+    let id = value.get("id").cloned();
+
+    match method.as_str() {
+        "initialize" => respond(
+            id,
+            serde_json::json!({
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": { "tools": { "listChanged": false } },
+                "serverInfo": { "name": "keywisp-mcp", "version": "0.1.0" }
+            }),
+        ),
+        "notifications/initialized" => String::new(),
+        "ping" => respond(id, serde_json::json!({})),
+        "tools/list" => {
+            let permission = permission_of(app);
+            respond(id, serde_json::json!({ "tools": tools_schema(&permission) }))
+        }
+        "tools/call" => {
+            let name = value["params"]["name"].as_str().unwrap_or("").to_string();
+            let args = value["params"]["arguments"].clone();
+            let args = if args.is_object() {
+                args
+            } else {
+                serde_json::json!({})
+            };
+            match call_tool(app, &name, &args).await {
+                Ok(text) => respond(
+                    id,
+                    serde_json::json!({
+                        "content": [{ "type": "text", "text": text }],
+                        "isError": false
+                    }),
+                ),
+                Err(e) => respond(
+                    id,
+                    serde_json::json!({
+                        "content": [{ "type": "text", "text": format!("错误: {e}") }],
+                        "isError": true
+                    }),
+                ),
+            }
+        }
+        _ => json_error(id, -32601, &format!("未知方法: {method}")),
+    }
+}
+
+fn respond(id: Option<serde_json::Value>, result: serde_json::Value) -> String {
+    let mut obj = serde_json::Map::new();
+    obj.insert("jsonrpc".to_string(), serde_json::json!("2.0"));
+    if let Some(id) = id {
+        obj.insert("id".to_string(), id);
+    }
+    obj.insert("result".to_string(), result);
+    serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_default()
+}
+
+fn json_error(id: Option<serde_json::Value>, code: i64, message: &str) -> String {
+    let mut obj = serde_json::Map::new();
+    obj.insert("jsonrpc".to_string(), serde_json::json!("2.0"));
+    if let Some(id) = id {
+        obj.insert("id".to_string(), id);
+    }
+    obj.insert(
+        "error".to_string(),
+        serde_json::json!({ "code": code, "message": message }),
+    );
+    serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_default()
+}
+
+fn permission_of(app: &AppHandle) -> String {
+    app.try_state::<Db>()
+        .and_then(|db| db.get_mcp_service().ok())
+        .map(|c| c.permission_mode)
+        .unwrap_or_else(|| "confirm".to_string())
+}
+
+fn tools_schema(permission: &str) -> Vec<serde_json::Value> {
+    let mut tools = vec![
+        serde_json::json!({
+            "name": "list_hosts",
+            "description": "列出当前 MCP 服务授权可操作的服务器（仅包含用户勾选的主机）",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        serde_json::json!({
+            "name": "resource_usage",
+            "description": "查看指定服务器（host 参数）的磁盘、内存、负载和占用最高的进程。host 可以是 list_hosts 返回的 id、name 或 address",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "host": { "type": "string", "description": "主机 id / name / address" } },
+                "required": ["host"]
+            }
+        }),
+        serde_json::json!({
+            "name": "read_file",
+            "description": "读取指定服务器上的文件内容",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "host": { "type": "string", "description": "主机 id / name / address" },
+                    "path": { "type": "string", "description": "服务器上的文件路径" }
+                },
+                "required": ["host", "path"]
+            }
+        }),
+        serde_json::json!({
+            "name": "list_dir",
+            "description": "列出指定服务器上的目录内容",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "host": { "type": "string", "description": "主机 id / name / address" },
+                    "path": { "type": "string", "description": "目录路径，默认当前目录" }
+                },
+                "required": ["host"]
+            }
+        }),
+    ];
+    if permission != "readonly" {
+        tools.push(serde_json::json!({
+            "name": "exec_command",
+            "description": "在指定服务器上执行一条 shell 命令并返回输出。可能触发用户确认（取决于权限模式）。host 可以是 list_hosts 返回的 id、name 或 address",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "host": { "type": "string", "description": "主机 id / name / address" },
+                    "command": { "type": "string", "description": "要执行的 shell 命令" },
+                    "timeout_secs": { "type": "number", "description": "超时秒数，默认 30" }
+                },
+                "required": ["host", "command"]
+            }
+        }));
+    }
+    tools
+}
+
+// ---------- 工具执行 ----------
+
+async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Result<String, String> {
+    let db = app
+        .try_state::<Db>()
+        .ok_or_else(|| "数据库不可用".to_string())?;
+    let config = db
+        .get_mcp_service()
+        .map_err(|e| format!("读取 MCP 服务配置失败: {e}"))?;
+    if !config.enabled {
+        return Err("MCP 服务未启用".to_string());
+    }
+    let allowed: HashSet<String> = config.host_ids.iter().cloned().collect();
+    let hosts = db.list().map_err(|e| format!("读取主机失败: {e}"))?;
+
+    if name == "list_hosts" {
+        let visible: Vec<serde_json::Value> = hosts
+            .iter()
+            .filter(|h| allowed.contains(&h.id))
+            .map(|h| {
+                serde_json::json!({
+                    "id": h.id,
+                    "name": h.name,
+                    "address": h.address,
+                    "port": h.port,
+                    "username": h.username,
+                    "auth_type": h.auth_type
+                })
+            })
+            .collect();
+        return Ok(serde_json::to_string_pretty(&visible).unwrap_or_default());
+    }
+
+    let host = resolve_host(&hosts, args.get("host").and_then(|h| h.as_str()))?;
+    if !allowed.contains(&host.id) {
+        return Err(format!(
+            "主机 {} 未授权给 MCP 服务，请先在 KeyWisp 中勾选该服务器",
+            host.name
+        ));
+    }
+    match name {
+        "resource_usage" => {
+            let script = "echo '-- 磁盘 --'; df -h; echo; echo '-- 内存 --'; (free -h 2>/dev/null || vm_stat); echo; echo '-- 负载 --'; uptime; echo; echo '-- TOP 进程 --'; (ps aux --sort=-%mem 2>/dev/null || ps aux) | head -8";
+            run_and_log(app, host, name, script, 25, None).await
+        }
+        "read_file" => {
+            let path = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "缺少 path 参数".to_string())?;
+            let script = format!("cat {}", shq(path));
+            run_and_log(app, host, name, &script, 15, None).await
+        }
+        "list_dir" => {
+            let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
+            let script = format!("ls -lah {}", shq(path));
+            run_and_log(app, host, name, &script, 15, None).await
+        }
+        "exec_command" => {
+            if config.permission_mode == "readonly" {
+                return Err("当前权限模式为只读，不允许执行命令".to_string());
+            }
+            let command = args
+                .get("command")
+                .and_then(|c| c.as_str())
+                .ok_or_else(|| "缺少 command 参数".to_string())?
+                .to_string();
+            let timeout = args
+                .get("timeout_secs")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(30);
+            let dangerous = check_dangerous(app, &command);
+            let mut approval: Option<bool> = None;
+            if config.permission_mode == "confirm" && dangerous {
+                approval = Some(request_approval(app, host, &command).await?);
+                if approval == Some(false) {
+                    let _ = write_audit(app, host, "mcp:exec_command", &command, "denied");
+                    return Err("用户拒绝执行该命令".to_string());
+                }
+            }
+            run_and_log(app, host, name, &command, timeout, approval).await
+        }
+        _ => Err(format!("未知工具: {name}")),
+    }
+}
+
+async fn run_and_log(
+    app: &AppHandle,
+    host: &Host,
+    tool_name: &str,
+    command: &str,
+    timeout_secs: u64,
+    approval: Option<bool>,
+) -> Result<String, String> {
+    let _ = write_audit(
+        app,
+        host,
+        tool_name,
+        command,
+        match approval {
+            Some(true) => "approved",
+            Some(false) => "denied",
+            None => "auto",
+        },
+    );
+    let russh = app.try_state::<RusshManager>().ok_or_else(|| "SSH 管理器不可用".to_string())?;
+    let out = russh
+        .exec(host, command, Duration::from_secs(timeout_secs))
+        .await?;
+    Ok(crate::agent::sanitize(&format_cmd_output(&out)))
+}
+
+fn check_dangerous(app: &AppHandle, command: &str) -> bool {
+    if crate::agent::is_dangerous(command) {
+        return true;
+    }
+    let c = command.to_ascii_lowercase();
+    app.try_state::<Db>()
+        .and_then(|db| db.list_ai_rules().ok())
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.enabled)
+        .any(|r| {
+            let pattern = r.pattern.trim();
+            !pattern.is_empty() && c.contains(&pattern.to_ascii_lowercase())
+        })
+}
+
+async fn request_approval(
+    app: &AppHandle,
+    host: &Host,
+    command: &str,
+) -> Result<bool, String> {
+    let registry = app
+        .try_state::<ApprovalRegistry>()
+        .ok_or_else(|| "审批服务不可用".to_string())?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let rx = registry.register(request_id.clone());
+    let _ = app.emit(
+        "mcp:approval-request",
+        serde_json::json!({
+            "request_id": request_id,
+            "host": host.name,
+            "host_label": host.label_address(),
+            "command": command
+        }),
+    );
+    match tokio::time::timeout(Duration::from_secs(600), rx).await {
+        Ok(Ok(allow)) => Ok(allow),
+        Ok(Err(_)) => Err("审批通道已关闭".to_string()),
+        Err(_) => Err("等待用户审批超时（10 分钟）".to_string()),
+    }
+}
+
+fn write_audit(
+    app: &AppHandle,
+    host: &Host,
+    tool_name: &str,
+    summary: &str,
+    approval: &str,
+) -> Result<(), String> {
+    let db = app.try_state::<Db>().ok_or_else(|| "数据库不可用".to_string())?;
+    let log = crate::models::AuditLog {
+        id: uuid::Uuid::new_v4().to_string(),
+        ts: now(),
+        session_id: None,
+        host_id: host.id.clone(),
+        host_label: format!("{} ({})", host.name, host.label_address()),
+        tool_name: tool_name.to_string(),
+        summary: summary.chars().take(500).collect(),
+        permission_mode: "mcp".to_string(),
+        approval: approval.to_string(),
+        status: "ok".to_string(),
+        result: None,
+        duration_ms: None,
+    };
+    db.insert_audit_log(&log)
+        .map_err(|e| format!("写入操作日志失败: {e}"))
+}
+
+fn resolve_host<'a>(hosts: &'a [Host], key: Option<&str>) -> Result<&'a Host, String> {
+    let key = key.ok_or_else(|| "缺少 host 参数".to_string())?;
+    hosts
+        .iter()
+        .find(|h| h.id == key || h.name == key || h.address == key)
+        .ok_or_else(|| format!("未找到主机 {key}，请先调用 list_hosts 查看可用主机"))
+}
+
+fn format_cmd_output(out: &crate::russh::ExecResult) -> String {
+    let mut text = out.text.trim().to_string();
+    const MAX: usize = 12000;
+    if text.chars().count() > MAX {
+        let head: String = text.chars().take(8000).collect();
+        let tail: String = text.chars().skip(text.chars().count() - 4000).collect();
+        text = format!("{head}\n...[输出过长，已截断]...\n{tail}");
+    }
+    if out.timed_out {
+        text.push_str("\n[命令执行超时，输出可能不完整]");
+    }
+    if let Some(code) = out.exit_code {
+        if code != 0 {
+            text.push_str(&format!("\n[退出码 {code}]"));
+        }
+    }
+    text
+}
+
+fn shq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn generate_token() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 fn now() -> u64 {
@@ -28,240 +780,4 @@ fn now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-#[tauri::command]
-pub fn list_mcp_servers(db: State<'_, Db>) -> Result<Vec<McpServer>, String> {
-    db.list_mcp_servers(false)
-        .map_err(|e| format!("读取 MCP 服务器失败: {e}"))
-}
-
-#[tauri::command]
-pub fn save_mcp_server(
-    db: State<'_, Db>,
-    input: McpServerInput,
-    id: Option<String>,
-) -> Result<McpServer, String> {
-    if input.command.trim().is_empty() {
-        return Err("启动命令不能为空".to_string());
-    }
-    let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let exists = db
-        .list_mcp_servers(false)
-        .map_err(|e| format!("读取 MCP 服务器失败: {e}"))?
-        .iter()
-        .any(|s| s.id == id);
-    let server = McpServer {
-        id,
-        name: input.name,
-        command: input.command,
-        args: input.args,
-        enabled: input.enabled,
-        created_at: now(),
-    };
-    if exists {
-        db.update_mcp_server(&server)
-            .map_err(|e| format!("更新 MCP 服务器失败: {e}"))?;
-    } else {
-        db.insert_mcp_server(&server)
-            .map_err(|e| format!("保存 MCP 服务器失败: {e}"))?;
-    }
-    Ok(server)
-}
-
-#[tauri::command]
-pub fn delete_mcp_server(db: State<'_, Db>, id: String) -> Result<(), String> {
-    db.delete_mcp_server(&id)
-        .map_err(|e| format!("删除 MCP 服务器失败: {e}"))
-}
-
-/// 测试连接：启动服务器并列出可用工具
-#[tauri::command]
-pub async fn mcp_test(server: McpServer) -> Result<Vec<McpToolInfo>, String> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        let result = list_tools_blocking(&server);
-        let _ = tx.send(result);
-    });
-    tokio::time::timeout(Duration::from_secs(20), rx)
-        .await
-        .map_err(|_| "MCP 连接超时".to_string())?
-        .map_err(|_| "MCP 进程异常退出".to_string())?
-}
-
-/// 供 Agent 调用的工具执行入口
-pub async fn call_tool(
-    server: &McpServer,
-    tool: &str,
-    arguments: serde_json::Value,
-) -> Result<String, String> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let server = server.clone();
-    let tool = tool.to_string();
-    std::thread::spawn(move || {
-        let result = call_tool_blocking(&server, &tool, arguments);
-        let _ = tx.send(result);
-    });
-    tokio::time::timeout(Duration::from_secs(60), rx)
-        .await
-        .map_err(|_| "MCP 调用超时".to_string())?
-        .map_err(|_| "MCP 进程异常退出".to_string())?
-}
-
-// ---------- 自研 MCP stdio 客户端 ----------
-
-struct McpProc {
-    child: Child,
-    stdin: ChildStdin,
-    rx: mpsc::Receiver<Vec<u8>>,
-}
-
-fn spawn_mcp(server: &McpServer) -> Result<McpProc, String> {
-    let args: Vec<String> = server.args.split_whitespace().map(String::from).collect();
-    let mut child = std::process::Command::new(&server.command)
-        .args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("启动 MCP 服务器失败（{}）: {e}", server.command))?;
-    let stdin = child.stdin.take().ok_or_else(|| "无法获取 MCP stdin".to_string())?;
-    let stdout: ChildStdout = child.stdout.take().ok_or_else(|| "无法获取 MCP stdout".to_string())?;
-    if let Some(mut stderr) = child.stderr.take() {
-        std::thread::spawn(move || {
-            let mut sink = Vec::new();
-            let _ = std::io::Read::read_to_end(&mut stderr, &mut sink);
-        });
-    }
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    if tx.send(line.as_bytes().to_vec()).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-    Ok(McpProc { child, stdin, rx })
-}
-
-impl McpProc {
-    fn request(&mut self, req: &serde_json::Value, timeout: Duration) -> Result<serde_json::Value, String> {
-        let mut payload = serde_json::to_string(req).map_err(|e| format!("序列化请求失败: {e}"))?;
-        payload.push('\n');
-        self.stdin
-            .write_all(payload.as_bytes())
-            .and_then(|_| self.stdin.flush())
-            .map_err(|e| format!("写入 MCP 请求失败: {e}"))?;
-
-        let deadline = Instant::now() + timeout;
-        let req_id = req.get("id").cloned();
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err("MCP 响应超时".to_string());
-            }
-            match self.rx.recv_timeout(remaining) {
-                Ok(line) => {
-                    let text = String::from_utf8_lossy(&line);
-                    let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
-                        continue;
-                    };
-                    if value.get("id").is_none() {
-                        continue; // 通知类消息
-                    }
-                    if let Some(id) = &req_id {
-                        if value.get("id") != Some(id) {
-                            continue; // 不是本次请求的响应
-                        }
-                    }
-                    return Ok(value);
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => return Err("MCP 响应超时".to_string()),
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err("MCP 进程提前退出".to_string());
-                }
-            }
-        }
-    }
-}
-
-fn initialize(proc: &mut McpProc) -> Result<(), String> {
-    let req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": { "name": "keywisp-agent", "version": "0.1.0" }
-        }
-    });
-    let resp = proc.request(&req, Duration::from_secs(10))?;
-    if let Some(err) = resp.get("error") {
-        return Err(format!("MCP 初始化失败: {err}"));
-    }
-    Ok(())
-}
-
-fn list_tools_blocking(server: &McpServer) -> Result<Vec<McpToolInfo>, String> {
-    let mut proc = spawn_mcp(server)?;
-    initialize(&mut proc)?;
-    let req = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
-    let resp = proc.request(&req, Duration::from_secs(10))?;
-    let tools = resp["result"]["tools"].as_array().cloned().unwrap_or_default();
-    let list: Vec<McpToolInfo> = tools
-        .iter()
-        .map(|t| McpToolInfo {
-            name: t["name"].as_str().unwrap_or("").to_string(),
-            description: t["description"].as_str().unwrap_or("").to_string(),
-        })
-        .collect();
-    let _ = proc.child.kill();
-    Ok(list)
-}
-
-fn call_tool_blocking(
-    server: &McpServer,
-    tool: &str,
-    arguments: serde_json::Value,
-) -> Result<String, String> {
-    let mut proc = spawn_mcp(server)?;
-    initialize(&mut proc)?;
-    let req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 3,
-        "method": "tools/call",
-        "params": { "name": tool, "arguments": arguments }
-    });
-    let resp = proc.request(&req, Duration::from_secs(60))?;
-    let _ = proc.child.kill();
-    if let Some(err) = resp.get("error") {
-        return Err(format!("MCP 工具调用失败: {err}"));
-    }
-    let is_error = resp["result"]["isError"].as_bool().unwrap_or(false);
-    let content = resp["result"]["content"].as_array().cloned().unwrap_or_default();
-    let mut text = String::new();
-    for item in content {
-        if let Some(t) = item["text"].as_str() {
-            text.push_str(t);
-            text.push('\n');
-        }
-    }
-    if is_error {
-        Err(if text.trim().is_empty() {
-            "MCP 工具返回错误".to_string()
-        } else {
-            text
-        })
-    } else {
-        Ok(text)
-    }
 }

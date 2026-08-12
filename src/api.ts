@@ -14,9 +14,9 @@ import type {
   InspectionInput,
   InspectionRun,
   ImportResult,
-  McpServer,
-  McpServerInput,
-  McpToolInfo,
+  McpApprovalRequest,
+  McpService,
+  McpServiceInput,
   MonitorSnapshot,
   TestResult,
 } from './types';
@@ -97,13 +97,16 @@ export const listInspectionRuns = (limit?: number) =>
 export const inspectionRespond = (runId: string) =>
   invoke<string>('inspection_respond', { runId });
 
-export const listMcpServers = () => invoke<McpServer[]>('list_mcp_servers');
-export const saveMcpServer = (input: McpServerInput, id?: string) =>
-  invoke<McpServer>('save_mcp_server', { input, id });
-export const deleteMcpServer = (id: string) =>
-  invoke<void>('delete_mcp_server', { id });
-export const mcpTest = (server: McpServer) =>
-  invoke<McpToolInfo[]>('mcp_test', { server });
+export const getMcpService = () => invoke<McpService>('get_mcp_service');
+export const saveMcpService = (input: McpServiceInput) =>
+  invoke<McpService>('save_mcp_service', { input });
+export const rotateMcpToken = () =>
+  invoke<McpService>('rotate_mcp_token');
+export const mcpApprove = (requestId: string, allow: boolean) =>
+  invoke<void>('mcp_approve', { requestId, allow });
+export const onMcpApprovalRequest = (
+  cb: (payload: McpApprovalRequest) => void,
+) => listen<McpApprovalRequest>('mcp:approval-request', (event) => cb(event.payload));
 export const testAiProvider = (p: {
   base_url: string;
   model: string;
