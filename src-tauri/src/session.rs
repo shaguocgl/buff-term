@@ -4,6 +4,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -12,10 +13,7 @@ pub struct Session {
     pub host: Host,
     master: Box<dyn MasterPty + Send>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    expecting_password: Arc<AtomicBool>,
-    password_capture: Arc<Mutex<String>>,
-    captured_once: Arc<AtomicBool>,
+    input_tx: Mutex<mpsc::Sender<Vec<u8>>>,
 }
 
 #[derive(Default)]
@@ -82,18 +80,57 @@ impl SessionManager {
         let expecting_password = Arc::new(AtomicBool::new(false));
         let password_capture = Arc::new(Mutex::new(String::new()));
         let captured_once = Arc::new(AtomicBool::new(false));
+        let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>();
+        let writer_for_input = writer.clone();
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let session = Session {
             host: host.clone(),
             master,
             child: Mutex::new(child),
-            writer: writer.clone(),
-            expecting_password: expecting_password.clone(),
-            password_capture: password_capture.clone(),
-            captured_once: captured_once.clone(),
+            input_tx: Mutex::new(input_tx),
         };
         self.sessions.lock().unwrap().insert(id, session);
+
+        // 输入写入线程：串行消费输入队列，保证顺序、不丢字
+        let app_for_input = app.clone();
+        let host_id = host.id.clone();
+        let expecting_for_input = expecting_password.clone();
+        let capture_for_input = password_capture.clone();
+        let captured_for_input = captured_once.clone();
+        std::thread::spawn(move || {
+            let writer = writer_for_input;
+            for data in input_rx {
+                if expecting_for_input.load(Ordering::SeqCst) {
+                    let mut cap = capture_for_input.lock().unwrap();
+                    cap.push_str(&String::from_utf8_lossy(&data));
+                    if cap.contains('\r') || cap.contains('\n') {
+                        let password = cap.trim_end_matches(['\r', '\n']).to_string();
+                        cap.clear();
+                        expecting_for_input.store(false, Ordering::SeqCst);
+                        if !password.is_empty() {
+                            let saved = crate::credentials::save_password(&host_id, &password).is_ok();
+                            captured_for_input.store(true, Ordering::SeqCst);
+                            if saved {
+                                let _ = app_for_input.emit(
+                                    "session:notice",
+                                    SessionNotice {
+                                        session_id: id,
+                                        message: "密码已保存到系统钥匙串，AI 可直接使用".to_string(),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+                if let Ok(mut w) = writer.lock() {
+                    if w.write_all(&data).is_err() {
+                        break;
+                    }
+                    let _ = w.flush();
+                }
+            }
+        });
 
         // 读取线程：把 PTY 输出转发给前端，退出后清理会话
         // 若钥匙串中有该主机密码，自动响应首次密码 / 密钥口令提示
@@ -213,39 +250,11 @@ impl SessionManager {
         Ok(())
     }
 
-    pub fn write(&self, app: &AppHandle, id: u32, data: Vec<u8>) -> Result<(), String> {
+    pub fn write(&self, _app: &AppHandle, id: u32, data: Vec<u8>) -> Result<(), String> {
         let sessions = self.sessions.lock().unwrap();
         let session = sessions.get(&id).ok_or("会话不存在")?;
-        // 捕获用户手动输入的密码，成功后保存到钥匙串，AI 后续直接复用
-        if session.expecting_password.load(Ordering::SeqCst) {
-            let mut cap = session.password_capture.lock().unwrap();
-            cap.push_str(&String::from_utf8_lossy(&data));
-            if cap.contains('\r') || cap.contains('\n') {
-                let password = cap.trim_end_matches(['\r', '\n']).to_string();
-                cap.clear();
-                session.expecting_password.store(false, Ordering::SeqCst);
-                if !password.is_empty() {
-                    let host_id = session.host.id.clone();
-                    let saved =
-                        crate::credentials::save_password(&host_id, &password).is_ok();
-                    session.captured_once.store(true, Ordering::SeqCst);
-                    if saved {
-                        let _ = app.emit(
-                            "session:notice",
-                            SessionNotice {
-                                session_id: id,
-                                message: "密码已保存到系统钥匙串，AI 可直接使用".to_string(),
-                            },
-                        );
-                    }
-                }
-            }
-        }
-        let mut writer = session.writer.lock().unwrap();
-        writer
-            .write_all(&data)
-            .and_then(|_| writer.flush())
-            .map_err(|e| format!("写入会话失败: {e}"))
+        let tx = session.input_tx.lock().unwrap();
+        tx.send(data).map_err(|_| "会话已关闭".to_string())
     }
 
     pub fn resize(&self, id: u32, cols: u16, rows: u16) -> Result<(), String> {
