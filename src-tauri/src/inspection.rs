@@ -418,7 +418,26 @@ async fn execute_tool_inspect(
                 .await?;
             Ok(format_tool_output(&out))
         }
-        _ => Err(format!("未知工具: {name}")),
+        _ => {
+            let normalized = normalize_tool(name);
+            if normalized != name {
+                return Box::pin(execute_tool_inspect(russh, host, normalized, args)).await;
+            }
+            eprintln!("[inspection] 未知工具调用: {name}");
+            Err(format!(
+                "未知工具: {name}。可用工具：exec_command（只读命令）、read_file、list_dir、resource_usage。"
+            ))
+        }
+    }
+}
+
+fn normalize_tool(name: &str) -> &str {
+    match name {
+        "exec" | "shell" | "run_command" | "run" | "command" | "execute" => "exec_command",
+        "read" | "cat" | "readfile" => "read_file",
+        "ls" | "list" | "listdir" | "dir" => "list_dir",
+        "resources" | "usage" | "system_status" | "monitor" => "resource_usage",
+        _ => name,
     }
 }
 

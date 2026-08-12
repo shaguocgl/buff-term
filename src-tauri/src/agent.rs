@@ -673,7 +673,31 @@ async fn execute_tool(
             let output = crate::mcp::call_tool(server, tool, arguments).await?;
             Ok(sanitize(&output))
         }
-        _ => Err(format!("未知工具: {name}")),
+        _ => {
+            let normalized = normalize_tool(name);
+            if normalized != name {
+                return Box::pin(execute_tool(russh, host, normalized, args, mcp_servers)).await;
+            }
+            eprintln!("[agent] 未知工具调用: {name}，参数: {args}");
+            Err(format!(
+                "未知工具: {name}。可用工具：exec_command（执行命令）、read_file（读文件）、\
+                 list_dir（列目录）、resource_usage（资源占用）、use_mcp_tool（调用 MCP 工具）。\
+                 请改用这些工具重试。"
+            ))
+        }
+    }
+}
+
+/// 常见工具名别名归一化，降低模型幻觉导致的调用失败
+fn normalize_tool(name: &str) -> &str {
+    match name {
+        "exec" | "shell" | "run_command" | "run" | "command" | "execute" => "exec_command",
+        "read" | "cat" | "readfile" | "read_file_content" => "read_file",
+        "ls" | "list" | "listdir" | "dir" | "list_directory" => "list_dir",
+        "resources" | "usage" | "system_status" | "monitor" | "resource_usage_show" => {
+            "resource_usage"
+        }
+        _ => name,
     }
 }
 
