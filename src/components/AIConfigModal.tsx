@@ -177,8 +177,14 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
 
   const applyPreset = (name: string) => {
     if (name === '自定义') {
-      // 保留当前填写内容，仅切换预设标记，用户可继续自由编辑
-      setForm((prev) => ({ ...prev, preset: '自定义' }));
+      // 清空下方所有字段，方便从零配置
+      setForm({
+        preset: '自定义',
+        name: '',
+        base_url: '',
+        models: [],
+        apiKey: '',
+      });
       return;
     }
     const preset = PRESETS.find((p) => p.name === name);

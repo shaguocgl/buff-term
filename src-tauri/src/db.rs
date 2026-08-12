@@ -200,8 +200,8 @@ impl Db {
     pub fn insert_ai_provider(&self, p: &AiProvider) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO ai_providers (id, name, base_url, protocol, enabled, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO ai_providers (id, name, base_url, model, protocol, enabled, created_at)
+             VALUES (?1, ?2, ?3, '', ?4, ?5, ?6)",
             params![
                 p.id,
                 p.name,
