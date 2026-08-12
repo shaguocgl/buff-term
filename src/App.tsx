@@ -11,6 +11,7 @@ import AIConfigModal from './components/AIConfigModal';
 import AuditLogModal from './components/AuditLogModal';
 import ChatPanel from './components/ChatPanel';
 import HostForm from './components/HostForm';
+import MonitorPanel from './components/MonitorPanel';
 import SftpPanel from './components/SftpPanel';
 import TerminalView from './components/TerminalView';
 import ToastContainer, { type ToastItem } from './components/Toast';
@@ -41,6 +42,7 @@ function App() {
   const [showLogs, setShowLogs] = useState(false);
   const [chatOpen, setChatOpen] = useState(true);
   const [sftpOpen, setSftpOpen] = useState(false);
+  const [monitorOpen, setMonitorOpen] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingHost, setEditingHost] = useState<Host | null>(null);
   const [tabs, setTabs] = useState<Tab[]>([]);
@@ -102,6 +104,7 @@ function App() {
     setLoadingHostId(host.id);
     setChatOpen(true);
     setSftpOpen(false);
+    setMonitorOpen(false);
   };
 
   const closeTab = (key: number) => {
@@ -326,10 +329,17 @@ function App() {
                     tabKey={tab.key}
                     chatOpen={chatOpen}
                     sftpOpen={sftpOpen}
+                    monitorOpen={monitorOpen}
                     onToggleChat={() => setChatOpen((v) => !v)}
                     onToggleSftp={() => {
                       setSftpOpen((v) => !v);
                       setChatOpen(false);
+                      setMonitorOpen(false);
+                    }}
+                    onToggleMonitor={() => {
+                      setMonitorOpen((v) => !v);
+                      setChatOpen(false);
+                      setSftpOpen(false);
                     }}
                     onOpened={(key, id) => {
                       setTabs((prev) =>
@@ -382,6 +392,14 @@ function App() {
                   key={`sftp-${activeTab.sessionId}`}
                   host={activeTab.host}
                   onClose={() => setSftpOpen(false)}
+                />
+              )}
+
+              {activeTab && activeTab.sessionId !== null && monitorOpen && (
+                <MonitorPanel
+                  key={`mon-${activeTab.sessionId}`}
+                  host={activeTab.host}
+                  onClose={() => setMonitorOpen(false)}
                 />
               )}
             </div>

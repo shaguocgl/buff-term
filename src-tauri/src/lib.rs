@@ -5,6 +5,7 @@ mod credentials;
 mod db;
 mod hosts;
 mod models;
+mod monitor;
 mod remote;
 mod session;
 mod sftp;
@@ -57,6 +58,7 @@ pub fn run() {
             sftp::sftp_delete,
             sftp::sftp_mkdir,
             sftp::sftp_rename,
+            monitor::monitor_snapshot,
             hosts::list_hosts,
             hosts::create_host,
             hosts::update_host,

@@ -8,6 +8,7 @@ import type {
   Host,
   HostInput,
   ImportResult,
+  MonitorSnapshot,
   TestResult,
 } from './types';
 
@@ -51,6 +52,9 @@ export const sftpMkdir = (host: Host, path: string) =>
   invoke<SftpResult>('sftp_mkdir', { host, path });
 export const sftpRename = (host: Host, from: string, to: string) =>
   invoke<SftpResult>('sftp_rename', { host, from, to });
+
+export const monitorSnapshot = (host: Host) =>
+  invoke<MonitorSnapshot>('monitor_snapshot', { host });
 export const testAiProvider = (p: {
   base_url: string;
   model: string;

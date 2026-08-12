@@ -85,3 +85,34 @@ export interface AuditLog {
   result: string | null;
   duration_ms: number | null;
 }
+
+export interface DiskInfo {
+  mount: string;
+  fs: string;
+  total: string;
+  used: string;
+  percent: number;
+}
+
+export interface MemInfo {
+  total_mb: number;
+  used_mb: number;
+  percent: number;
+}
+
+export interface TopProc {
+  user: string;
+  cpu: string;
+  mem: string;
+  cmd: string;
+}
+
+export interface MonitorSnapshot {
+  ts: number;
+  host_label: string;
+  load: string;
+  cpu_percent: number;
+  mem: MemInfo;
+  disks: DiskInfo[];
+  top: TopProc[];
+}

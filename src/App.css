@@ -1507,6 +1507,144 @@ input::placeholder {
   height: 24px;
 }
 
+/* ============ 监控面板 ============ */
+
+.monitor-panel {
+  width: 400px;
+  min-width: 340px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+}
+
+.monitor-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.monitor-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 12px;
+  font-family: var(--mono);
+}
+
+.gauges {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.gauge {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gauge-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12.5px;
+}
+
+.gauge-label {
+  color: var(--muted);
+}
+
+.gauge-value {
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.gauge-track {
+  height: 8px;
+  border-radius: 99px;
+  background: var(--panel-3);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.gauge-fill {
+  height: 100%;
+  border-radius: 99px;
+  transition: width 0.5s ease;
+}
+
+.gauge-fill.green {
+  background: linear-gradient(90deg, #34d399, #22c55e);
+}
+
+.gauge-fill.amber {
+  background: linear-gradient(90deg, #fbbf24, #f59e0b);
+}
+
+.gauge-fill.red {
+  background: linear-gradient(90deg, #f87171, #ef4444);
+}
+
+.monitor-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.5px;
+  margin-top: 4px;
+}
+
+.monitor-procs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.proc-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  font-family: var(--mono);
+  padding: 5px 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.proc-rank {
+  width: 18px;
+  color: var(--faint);
+}
+
+.proc-user {
+  width: 56px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.proc-cpu,
+.proc-mem {
+  flex: none;
+  color: var(--accent-2);
+}
+
+.proc-cmd {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
 .terminal-header-actions {
   display: flex;
   align-items: center;
