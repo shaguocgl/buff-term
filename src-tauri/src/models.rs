@@ -1,5 +1,15 @@
 use serde::{Deserialize, Serialize};
 
+/// 忽略 ssh 系统/用户配置（我们显式传入全部连接参数），
+/// 同时避免 macOS 默认 SendEnv LANG LC_* 转发 locale 导致远端 setlocale 警告
+pub fn null_config_path() -> &'static str {
+    if cfg!(windows) {
+        "NUL"
+    } else {
+        "/dev/null"
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Host {
     pub id: String,
@@ -135,6 +145,8 @@ impl Host {
     /// 构造系统 OpenSSH 参数（M1 阶段）
     pub fn ssh_args(&self) -> Vec<String> {
         let mut args = vec![
+            "-F".to_string(),
+            null_config_path().to_string(),
             "-tt".to_string(),
             "-o".to_string(),
             // 不转发本地 locale 变量，避免远端缺少 C.UTF-8 等 locale 时产生警告

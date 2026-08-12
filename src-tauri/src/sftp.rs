@@ -10,6 +10,8 @@ pub struct SftpResult {
 
 fn sftp_args(host: &Host) -> Vec<String> {
     let mut args = vec![
+        "-F".to_string(),
+        crate::models::null_config_path().to_string(),
         "-b".to_string(),
         "-".to_string(),
         "-o".to_string(),
