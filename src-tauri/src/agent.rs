@@ -143,11 +143,17 @@ pub async fn agent_chat(
     let url = format!("{}/chat/completions", provider.base_url.trim_end_matches('/'));
 
     let mut history = agents.history(session_id);
+    let system = system_prompt(&host, &provider, &model);
     if history.is_empty() {
         history.push(serde_json::json!({
             "role": "system",
-            "content": system_prompt(&host, &provider, &model),
+            "content": system,
         }));
+    } else if let Some(first) = history.first_mut() {
+        // 会话中途切换平台/模型时，同步刷新系统提示词中的身份描述
+        if first.get("role").and_then(|r| r.as_str()) == Some("system") {
+            first["content"] = serde_json::json!(system);
+        }
     }
     history.push(serde_json::json!({"role": "user", "content": message}));
 
