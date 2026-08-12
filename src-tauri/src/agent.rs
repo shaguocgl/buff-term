@@ -2,6 +2,7 @@ use crate::credentials;
 use crate::db::Db;
 use crate::models::{AiProvider, AuditLog, Host};
 use crate::remote;
+use crate::russh::RusshManager;
 use crate::session::SessionManager;
 use futures_util::StreamExt;
 use regex::Regex;
@@ -11,7 +12,7 @@ use std::sync::mpsc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Default)]
 pub struct AgentManager {
@@ -127,6 +128,7 @@ pub async fn agent_chat(
         .into_iter()
         .map(|r| r.pattern)
         .collect();
+    let russh = app.state::<RusshManager>();
 
     let (tx, rx) = mpsc::channel::<Control>();
     agents.set_control(session_id, tx);
@@ -157,6 +159,7 @@ pub async fn agent_chat(
         &permission_mode,
         &danger_rules,
         &db,
+        &russh,
         rx,
         &mut history,
     )
@@ -213,6 +216,7 @@ async fn run_agent_loop(
     permission_mode: &str,
     danger_rules: &[String],
     db: &Db,
+    russh: &RusshManager,
     rx: mpsc::Receiver<Control>,
     history: &mut Vec<serde_json::Value>,
 ) -> Result<(), String> {
@@ -442,7 +446,7 @@ async fn run_agent_loop(
                 },
             );
 
-            let result = execute_tool(host, &acc.name, &args);
+            let result = execute_tool(russh, host, &acc.name, &args).await;
             match result {
                 Ok(output) => {
                     let _ = insert_audit(
@@ -598,7 +602,12 @@ fn apply_delta(
     }
 }
 
-fn execute_tool(host: &Host, name: &str, args: &serde_json::Value) -> Result<String, String> {
+async fn execute_tool(
+    russh: &RusshManager,
+    host: &Host,
+    name: &str,
+    args: &serde_json::Value,
+) -> Result<String, String> {
     match name {
         "exec_command" => {
             let command = args
@@ -606,29 +615,45 @@ fn execute_tool(host: &Host, name: &str, args: &serde_json::Value) -> Result<Str
                 .and_then(|c| c.as_str())
                 .ok_or_else(|| "缺少 command 参数".to_string())?;
             let timeout = args.get("timeout_secs").and_then(|t| t.as_u64()).unwrap_or(30);
-            let out = remote::run(host, command, timeout)?;
-            Ok(sanitize(&format_output(&out)))
+            let out = russh
+                .exec(host, command, std::time::Duration::from_secs(timeout))
+                .await?;
+            Ok(sanitize(&format_exec(&out)))
         }
         "read_file" => {
             let path = args
                 .get("path")
                 .and_then(|p| p.as_str())
                 .ok_or_else(|| "缺少 path 参数".to_string())?;
-            let out = remote::run(host, &format!("cat {}", shq(path)), 15)?;
-            Ok(sanitize(&format_output(&out)))
+            let out = russh
+                .exec(host, &format!("cat {}", shq(path)), std::time::Duration::from_secs(15))
+                .await?;
+            Ok(sanitize(&format_exec(&out)))
         }
         "list_dir" => {
             let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
-            let out = remote::run(host, &format!("ls -lah {}", shq(path)), 15)?;
-            Ok(sanitize(&format_output(&out)))
+            let out = russh
+                .exec(host, &format!("ls -lah {}", shq(path)), std::time::Duration::from_secs(15))
+                .await?;
+            Ok(sanitize(&format_exec(&out)))
         }
         "resource_usage" => {
             let script = "echo '-- 磁盘 --'; df -h; echo; echo '-- 内存 --'; (free -h 2>/dev/null || vm_stat); echo; echo '-- 负载 --'; uptime; echo; echo '-- TOP 进程 --'; (ps aux --sort=-%mem 2>/dev/null || ps aux) | head -8";
-            let out = remote::run(host, script, 25)?;
-            Ok(sanitize(&format_output(&out)))
+            let out = russh
+                .exec(host, script, std::time::Duration::from_secs(25))
+                .await?;
+            Ok(sanitize(&format_exec(&out)))
         }
         _ => Err(format!("未知工具: {name}")),
     }
+}
+
+fn format_exec(out: &crate::russh::ExecResult) -> String {
+    format_output(&remote::RemoteOutput {
+        text: out.text.clone(),
+        exit_code: out.exit_code.map(|c| c as i32),
+        timed_out: out.timed_out,
+    })
 }
 
 /// 命令输出进入模型上下文前过滤敏感信息

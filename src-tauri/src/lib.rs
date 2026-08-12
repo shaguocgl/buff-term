@@ -8,12 +8,14 @@ mod hosts;
 mod models;
 mod monitor;
 mod remote;
+mod russh;
 mod session;
 mod sftp;
 mod sshconfig;
 
 use db::Db;
 use agent::AgentManager;
+use russh::RusshManager;
 use session::SessionManager;
 use std::io;
 use tauri::Manager;
@@ -40,6 +42,7 @@ pub fn run() {
             Ok(())
         })
         .manage(SessionManager::default())
+        .manage(RusshManager::new())
         .manage(AgentManager::default())
         .invoke_handler(tauri::generate_handler![
             ai::list_ai_providers,
