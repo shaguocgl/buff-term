@@ -60,6 +60,7 @@ fn finish(out: &remote::RemoteOutput) -> Result<SftpResult, String> {
 fn run_sftp(host: &Host, script: &str, timeout: u64) -> Result<remote::RemoteOutput, String> {
     remote::run_program(
         &host.id,
+        host.auth_type == "password",
         "sftp",
         &[],
         &sftp_args(host),

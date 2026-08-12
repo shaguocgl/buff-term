@@ -25,6 +25,7 @@ fn auth_prompt_re() -> &'static Regex {
 pub fn run(host: &Host, command: &str, timeout_secs: u64) -> Result<RemoteOutput, String> {
     run_program(
         &host.id,
+        host.auth_type == "password",
         "ssh",
         &host.ssh_args(),
         &[command.to_string()],
@@ -36,6 +37,7 @@ pub fn run(host: &Host, command: &str, timeout_secs: u64) -> Result<RemoteOutput
 /// 通过指定程序（ssh / sftp）执行，stdin 可写入批处理脚本。
 pub fn run_program(
     host_id: &str,
+    needs_password: bool,
     program: &str,
     base_args: &[String],
     extra_args: &[String],
@@ -81,7 +83,7 @@ pub fn run_program(
         let mut reader = reader;
         let mut writer = writer;
         // 密钥认证（无需密码）：脚本可以立即写入
-        if auto_password_thread.is_none() {
+        if !needs_password {
             if let Some(script) = &script_owned {
                 let _ = writer.write_all(script.as_bytes());
                 let _ = writer.flush();
