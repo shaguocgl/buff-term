@@ -240,7 +240,9 @@ async fn execute_inspection(app: &AppHandle, host: &Host) -> Result<String, Stri
                  3. 磁盘、内存、负载异常；\n\
                  4. 关键文件改动（/etc/passwd、/etc/ssh/sshd_config 等）；\n\
                  5. 系统更新缺失与常见风险配置。\n\
-                 请先调用工具收集证据，再输出结论：风险等级、发现的异常、依据、建议。使用中文。",
+                 请先调用工具收集证据，再输出结论：风险等级、发现的异常、依据、建议。使用中文。\n\
+                 工具调用约定：工具名称必须是 exec_command、read_file、list_dir、resource_usage 之一，\
+                 每次调用必须包含完整的 name 字段且不能为空，参数放入 arguments（JSON 对象）。",
                 host.label_address()
             ),
         }),

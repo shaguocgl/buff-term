@@ -326,6 +326,21 @@ async fn run_agent_loop(
             }
         }
 
+        // 模型漏填工具名时，从参数推断（command → exec_command，path → read_file）
+        for (_, acc) in tool_calls.iter_mut() {
+            if acc.name.trim().is_empty() {
+                if let Ok(args) = serde_json::from_str::<serde_json::Value>(&acc.args) {
+                    if let Some(cmd) = args.get("command").and_then(|c| c.as_str()) {
+                        if !cmd.trim().is_empty() {
+                            acc.name = "exec_command".to_string();
+                        }
+                    } else if args.get("path").and_then(|p| p.as_str()).is_some() {
+                        acc.name = "read_file".to_string();
+                    }
+                }
+            }
+        }
+
         if tool_calls.is_empty() {
             if content.is_empty() {
                 content = "（模型未返回内容）".to_string();
@@ -876,7 +891,9 @@ fn system_prompt(host: &Host, provider: &AiProvider, model: &str) -> String {
          4. 使用中文回答，简洁、专业、有条理。\n\
          5. 身份说明：当用户询问“你是什么模型/你由谁开发”时，如实回答你由 {} 驱动、配置的模型为 {}，
             以及你是 KeyWisp Agent；不要声称自己是任何其他 AI 助手（如 ChatGPT、Claude、Gemini 等），
-            也不要编造版本号或开发厂商信息。",
+            也不要编造版本号或开发厂商信息。\n\
+         6. 工具调用约定：工具名称必须是以下之一——exec_command、read_file、list_dir、resource_usage、use_mcp_tool；
+            每次工具调用都必须包含完整的 name 字段且不能为空，不要发明新工具名；参数放入 arguments（JSON 对象）。",
         provider.name,
         model,
         host.name,
