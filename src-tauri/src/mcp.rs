@@ -560,7 +560,7 @@ fn tools_schema() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "exec_command",
-            "description": "在指定服务器上执行一条 shell 命令并返回输出。只读模式下写操作会被拒绝；管控模式下系统预置及用户自定义的危险命令会触发用户确认。host 可以是 list_hosts 返回的 id、name 或 address",
+            "description": "在指定服务器上执行一条 shell 命令并返回输出。只读模式下写操作会被拒绝；管控模式下命中自定义管控规则的命令会触发用户确认。host 可以是 list_hosts 返回的 id、name 或 address",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -653,8 +653,8 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
                             .to_string(),
                     );
                 }
-            } else if config.permission_mode == "confirm" && check_dangerous(app, &command) {
-                // 管控模式：预置危险命令 + 用户自定义规则命中时弹窗审批
+            } else if config.permission_mode == "confirm" && check_mcp_rule_match(app, &command) {
+                // 管控模式：仅自定义管控规则命中时弹窗审批
                 approval = Some(request_approval(app, host, &command).await?);
                 if approval == Some(false) {
                     let _ = write_audit(app, host, "mcp:exec_command", &command, "denied");
@@ -693,10 +693,7 @@ async fn run_and_log(
     Ok(crate::agent::sanitize(&format_cmd_output(&out)))
 }
 
-fn check_dangerous(app: &AppHandle, command: &str) -> bool {
-    if crate::agent::is_dangerous(command) {
-        return true;
-    }
+fn check_mcp_rule_match(app: &AppHandle, command: &str) -> bool {
     let c = command.to_ascii_lowercase();
     app.try_state::<Db>()
         .and_then(|db| db.list_mcp_rules().ok())

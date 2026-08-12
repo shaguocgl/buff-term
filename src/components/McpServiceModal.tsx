@@ -21,7 +21,7 @@ type Permission = 'readonly' | 'confirm' | 'allow';
 
 const PERMISSION_OPTIONS: SelectOption<Permission>[] = [
   { value: 'readonly', label: '只读模式（不能进行写操作）' },
-  { value: 'confirm', label: '管控模式（预置 + 自定义管控规则）' },
+  { value: 'confirm', label: '管控模式（自定义管控规则）' },
   { value: 'allow', label: '全部放行（可执行任意命令）' },
 ];
 
@@ -29,7 +29,7 @@ const PERMISSION_HINTS: Record<Permission, string> = {
   readonly:
     '可以执行查看类命令（ps、df、cat 等），写操作（重定向写文件、修改、删除、安装、传输等）会被拒绝。',
   confirm:
-    '系统预置的危险命令（rm、mkfs、关机重启等）以及你在 AI 配置中自定义的管控规则命中时，会弹出确认框由你批准。',
+    '仅当命令模糊匹配到你添加的自定义管控规则时，执行前会弹出确认框由你批准；系统预置危险命令不参与审批。',
   allow: '可执行任意命令，仅记录审计日志。请确保信任外部 AI 的来源。',
 };
 
