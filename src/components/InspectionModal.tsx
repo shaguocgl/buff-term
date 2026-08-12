@@ -104,15 +104,15 @@ export default function InspectionModal({ hosts, onClose }: Props) {
     >
       <div className="ai-modal">
         <div className="inspect-add">
-          <label>
-            主机
+          <div className="alert-field">
+            <span className="alert-field-label">主机</span>
             <Select
               value={hostId}
               options={hosts.map((h) => ({ value: h.id, label: h.name }))}
               onChange={setHostId}
               ariaLabel="主机"
             />
-          </label>
+          </div>
           <label>
             间隔（分钟）
             <input

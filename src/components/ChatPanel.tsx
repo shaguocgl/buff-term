@@ -354,7 +354,7 @@ export default function ChatPanel({
           </div>
         )}
         <div className="chat-controls">
-          <label className={`chat-control permission-${permissionMode}`}>
+          <div className={`chat-control permission-${permissionMode}`}>
             <span className="chat-control-label">
               安全级别
               {permissionMode === 'smart' && (
@@ -368,9 +368,9 @@ export default function ChatPanel({
               onChange={changePermissionMode}
               ariaLabel="安全级别"
             />
-          </label>
+          </div>
           {models.length > 0 && providerId && (
-            <label className="chat-control">
+            <div className="chat-control">
               <span className="chat-control-label">模型</span>
               <Select
                 className="select-up"
@@ -379,7 +379,7 @@ export default function ChatPanel({
                 onChange={handleModelChange}
                 ariaLabel="模型"
               />
-            </label>
+            </div>
           )}
         </div>
         <div className="chat-input-row">

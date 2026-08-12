@@ -1748,6 +1748,45 @@ input::placeholder {
   color: var(--muted);
 }
 
+.alert-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--muted);
+  flex: 1;
+  min-width: 0;
+}
+
+.alert-field-label {
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--muted);
+}
+
+.alert-grid {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.alert-grid .alert-field {
+  flex: 1;
+}
+
+.alert-grid .alert-field.field-90 {
+  flex: 0 0 90px;
+}
+
+.alert-grid .alert-field.field-110 {
+  flex: 0 0 110px;
+}
+
+.alert-grid .alert-field.field-150 {
+  flex: 0 0 150px;
+}
+
 .alert-form label select,
 .alert-form label input {
   width: 100%;
@@ -1862,6 +1901,16 @@ input::placeholder {
   font-weight: 550;
   color: var(--muted);
   flex: 1;
+}
+
+.inspect-add .alert-field {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--muted);
 }
 
 .inspect-add label:nth-child(2) {
