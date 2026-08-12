@@ -435,8 +435,7 @@ async fn handle_jsonrpc(app: &AppHandle, body: &str) -> String {
         "notifications/initialized" => String::new(),
         "ping" => respond(id, serde_json::json!({})),
         "tools/list" => {
-            let permission = permission_of(app);
-            respond(id, serde_json::json!({ "tools": tools_schema(&permission) }))
+            respond(id, serde_json::json!({ "tools": tools_schema() }))
         }
         "tools/call" => {
             let name = value["params"]["name"].as_str().unwrap_or("").to_string();
@@ -490,15 +489,8 @@ fn json_error(id: Option<serde_json::Value>, code: i64, message: &str) -> String
     serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_default()
 }
 
-fn permission_of(app: &AppHandle) -> String {
-    app.try_state::<Db>()
-        .and_then(|db| db.get_mcp_service().ok())
-        .map(|c| c.permission_mode)
-        .unwrap_or_else(|| "confirm".to_string())
-}
-
-fn tools_schema(permission: &str) -> Vec<serde_json::Value> {
-    let mut tools = vec![
+fn tools_schema() -> Vec<serde_json::Value> {
+    let tools = vec![
         serde_json::json!({
             "name": "list_hosts",
             "description": "列出当前 MCP 服务授权可操作的服务器（仅包含用户勾选的主机）",
@@ -537,11 +529,9 @@ fn tools_schema(permission: &str) -> Vec<serde_json::Value> {
                 "required": ["host"]
             }
         }),
-    ];
-    if permission != "readonly" {
-        tools.push(serde_json::json!({
+        serde_json::json!({
             "name": "exec_command",
-            "description": "在指定服务器上执行一条 shell 命令并返回输出。可能触发用户确认（取决于权限模式）。host 可以是 list_hosts 返回的 id、name 或 address",
+            "description": "在指定服务器上执行一条 shell 命令并返回输出。只读模式下写操作会被拒绝；管控模式下系统预置及用户自定义的危险命令会触发用户确认。host 可以是 list_hosts 返回的 id、name 或 address",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -551,8 +541,8 @@ fn tools_schema(permission: &str) -> Vec<serde_json::Value> {
                 },
                 "required": ["host", "command"]
             }
-        }));
-    }
+        }),
+    ];
     tools
 }
 
@@ -615,9 +605,6 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
             run_and_log(app, host, name, &script, 15, None).await
         }
         "exec_command" => {
-            if config.permission_mode == "readonly" {
-                return Err("当前权限模式为只读，不允许执行命令".to_string());
-            }
             let command = args
                 .get("command")
                 .and_then(|c| c.as_str())
@@ -627,9 +614,18 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
                 .get("timeout_secs")
                 .and_then(|t| t.as_u64())
                 .unwrap_or(30);
-            let dangerous = check_dangerous(app, &command);
             let mut approval: Option<bool> = None;
-            if config.permission_mode == "confirm" && dangerous {
+            if config.permission_mode == "readonly" {
+                // 只读模式：允许只读命令，拒绝任何写操作
+                if is_write_operation(&command) {
+                    let _ = write_audit(app, host, "mcp:exec_command", &command, "denied");
+                    return Err(
+                        "只读模式不允许写操作，已拒绝执行。如需写操作请切换到管控模式或全部放行"
+                            .to_string(),
+                    );
+                }
+            } else if config.permission_mode == "confirm" && check_dangerous(app, &command) {
+                // 管控模式：预置危险命令 + 用户自定义规则命中时弹窗审批
                 approval = Some(request_approval(app, host, &command).await?);
                 if approval == Some(false) {
                     let _ = write_audit(app, host, "mcp:exec_command", &command, "denied");
@@ -682,6 +678,47 @@ fn check_dangerous(app: &AppHandle, command: &str) -> bool {
             let pattern = r.pattern.trim();
             !pattern.is_empty() && c.contains(&pattern.to_ascii_lowercase())
         })
+}
+
+/// 只读模式下判断命令是否包含写操作（修改 / 删除 / 安装 / 网络传输 / 重定向写文件等）
+fn is_write_operation(command: &str) -> bool {
+    let c = command.to_ascii_lowercase();
+    // 预置危险命令（删除、格式化、关机等）一律视为写操作
+    if crate::agent::is_dangerous(&c) {
+        return true;
+    }
+    // 重定向写文件：排除 /dev/null 丢弃与 fd 复制等无害写法
+    let cleaned = c
+        .replace("2>/dev/null", "")
+        .replace(">/dev/null", "")
+        .replace("1>/dev/null", "")
+        .replace("2>&1", "")
+        .replace(">&2", "")
+        .replace(">&1", "")
+        .replace("2>&-", "");
+    if cleaned.contains('>') {
+        return true;
+    }
+    // 常见写类命令关键词（子串匹配，宁可多拦）
+    const WRITE_CMDS: &[&str] = &[
+        "touch ", "mkdir ", "rmdir ", "rm ", "mv ", "cp ", "ln ", "tee ",
+        "chmod", "chown", "chattr", "chgrp", "dd ",
+        "mkfs", "mount ", "umount", "fdisk", "parted", "swapoff", "swapon",
+        "useradd", "userdel", "usermod", "groupadd", "groupdel", "passwd ", "chage",
+        "systemctl", "service ", "kill ", "pkill", "killall", "nohup ",
+        "reboot", "shutdown", "poweroff", "halt ", "init ",
+        "install ", "sed -i", "perl -i", "awk -i", "vim ", "vi ", "nano ", "ed ",
+        "crontab", "at ", "batch ",
+        "apt ", "apt-get", "yum ", "dnf ", "brew ", "zypper", "pacman ",
+        "pip install", "pip3 install", "npm install", "pnpm install", "yarn add", "go install",
+        "curl -o", "curl -o-", "wget -o", "scp ", "rsync ", "sftp ",
+        "tar -x", "tar -zxf", "tar -xjf", "unzip ", "zip ", "gzip ", "bzip2 ", "xz ",
+        "git add", "git commit", "git push", "git reset", "git checkout", "git merge",
+        "git rebase", "git clean", "git rm", "git mv", "git stash",
+        "echo >", "printf >", "cat >", "tee >", "dd if=",
+        "docker ", "podman ", "kubectl ", "helm ",
+    ];
+    WRITE_CMDS.iter().any(|w| c.contains(w))
 }
 
 async fn request_approval(

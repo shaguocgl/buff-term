@@ -13,15 +13,17 @@ interface Props {
 type Permission = 'readonly' | 'confirm' | 'allow';
 
 const PERMISSION_OPTIONS: SelectOption<Permission>[] = [
-  { value: 'readonly', label: '只读（不能执行命令）' },
-  { value: 'confirm', label: '危险命令需确认' },
-  { value: 'allow', label: '全部放行' },
+  { value: 'readonly', label: '只读模式（不能进行写操作）' },
+  { value: 'confirm', label: '管控模式（预置 + 自定义管控规则）' },
+  { value: 'allow', label: '全部放行（可执行任意命令）' },
 ];
 
 const PERMISSION_HINTS: Record<Permission, string> = {
-  readonly: '外部 AI 只能查看资源占用、读取文件和列目录，不能执行任何命令。',
-  confirm: '危险命令（rm -rf、mkfs、关机重启等）会弹出确认框，由你在 KeyWisp 中批准。',
-  allow: '全部放行，仅记录审计日志。请确保信任外部 AI 的来源。',
+  readonly:
+    '可以执行查看类命令（ps、df、cat 等），写操作（重定向写文件、修改、删除、安装、传输等）会被拒绝。',
+  confirm:
+    '系统预置的危险命令（rm、mkfs、关机重启等）以及你在 AI 配置中自定义的管控规则命中时，会弹出确认框由你批准。',
+  allow: '可执行任意命令，仅记录审计日志。请确保信任外部 AI 的来源。',
 };
 
 export default function McpServiceModal({ hosts, onClose }: Props) {
@@ -191,8 +193,7 @@ export default function McpServiceModal({ hosts, onClose }: Props) {
             </div>
             <p className="mcp-hint">
               在 Codex / Claude Desktop 的 MCP 配置中粘贴上面 JSON 即可接入。
-              外部 AI 可调用 list_hosts、resource_usage、read_file、list_dir
-              {permission !== 'readonly' && '、exec_command'}。
+              外部 AI 可调用 list_hosts、resource_usage、read_file、list_dir、exec_command。
             </p>
           </div>
         )}
