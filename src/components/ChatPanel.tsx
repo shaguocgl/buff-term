@@ -80,6 +80,7 @@ export default function ChatPanel({
   const seq = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const activeAssistantId = useRef<number | null>(null);
+  const composingRef = useRef(false);
 
   const changePermissionMode = (mode: 'all' | 'smart' | 'none') => {
     setPermissionMode(mode);
@@ -386,10 +387,21 @@ export default function ChatPanel({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
+              if (
+                e.key === 'Enter' &&
+                !e.shiftKey &&
+                !e.nativeEvent.isComposing &&
+                !composingRef.current
+              ) {
                 e.preventDefault();
                 handleSend();
               }
+            }}
+            onCompositionStart={() => {
+              composingRef.current = true;
+            }}
+            onCompositionEnd={() => {
+              composingRef.current = false;
             }}
             placeholder={providerConfigured ? '给 AI 下达指令…' : '请先配置 AI 平台'}
             rows={2}
