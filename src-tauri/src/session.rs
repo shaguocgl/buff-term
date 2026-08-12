@@ -78,7 +78,7 @@ impl SessionManager {
         let writer = Arc::new(Mutex::new(writer));
         let auto_password = crate::credentials::get_password(&host.id);
         let expecting_password = Arc::new(AtomicBool::new(false));
-        let password_capture = Arc::new(Mutex::new(String::new()));
+        let password_capture = Arc::new(Mutex::new(Vec::<u8>::new()));
         let captured_once = Arc::new(AtomicBool::new(false));
         let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>();
         let writer_for_input = writer.clone();
@@ -103,23 +103,36 @@ impl SessionManager {
             for data in input_rx {
                 if expecting_for_input.load(Ordering::SeqCst) {
                     let mut cap = capture_for_input.lock().unwrap();
-                    cap.push_str(&String::from_utf8_lossy(&data));
-                    if cap.contains('\r') || cap.contains('\n') {
-                        let password = cap.trim_end_matches(['\r', '\n']).to_string();
-                        cap.clear();
-                        expecting_for_input.store(false, Ordering::SeqCst);
-                        if !password.is_empty() {
-                            let saved = crate::credentials::save_password(&host_id, &password).is_ok();
-                            captured_for_input.store(true, Ordering::SeqCst);
-                            if saved {
-                                let _ = app_for_input.emit(
-                                    "session:notice",
-                                    SessionNotice {
-                                        session_id: id,
-                                        message: "密码已保存到系统钥匙串，AI 可直接使用".to_string(),
-                                    },
-                                );
+                    for &b in &data {
+                        match b {
+                            // 回车/换行：密码输入结束
+                            b'\r' | b'\n' => {
+                                let password = String::from_utf8_lossy(&cap).to_string();
+                                cap.clear();
+                                expecting_for_input.store(false, Ordering::SeqCst);
+                                if !password.is_empty() {
+                                    let saved =
+                                        crate::credentials::save_password(&host_id, &password)
+                                            .is_ok();
+                                    captured_for_input.store(true, Ordering::SeqCst);
+                                    if saved {
+                                        let _ = app_for_input.emit(
+                                            "session:notice",
+                                            SessionNotice {
+                                                session_id: id,
+                                                message: "密码已保存到系统钥匙串，AI 可直接使用"
+                                                    .to_string(),
+                                            },
+                                        );
+                                    }
+                                }
+                                break;
                             }
+                            // 退格：删除前一个字符（与终端行规程一致）
+                            0x7f | 0x08 => {
+                                cap.pop();
+                            }
+                            _ => cap.push(b),
                         }
                     }
                 }
@@ -140,6 +153,9 @@ impl SessionManager {
             let mut buf = [0u8; 8192];
             let mut scan = String::new();
             let mut sent_secret = false;
+            // 捕获模式：无自动密码时默认开启；自动填充失败（Permission denied）时也会开启，
+            // 以便把用户手动输入的正确密码重新保存
+            let mut capture_mode = auto_password.is_none();
             let expecting = expecting_password.clone();
             let captured = captured_once.clone();
             loop {
@@ -154,20 +170,27 @@ impl SessionManager {
                                 data: data.clone(),
                             },
                         );
-                        if let Some(secret) = &auto_password {
-                            scan.push_str(&String::from_utf8_lossy(&data));
-                            if scan.len() > 4096 {
-                                let cut = scan.len() - 4096;
-                                let mut start = cut;
-                                while start > 0 && !scan.is_char_boundary(start) {
-                                    start -= 1;
-                                }
-                                scan = scan[start..].to_string();
+                        scan.push_str(&String::from_utf8_lossy(&data));
+                        if scan.len() > 4096 {
+                            let cut = scan.len() - 4096;
+                            let mut start = cut;
+                            while start > 0 && !scan.is_char_boundary(start) {
+                                start -= 1;
                             }
-                            let lower = scan.to_ascii_lowercase();
-                            let is_prompt = lower.contains("password:")
-                                || lower.contains("passphrase for key");
-                            if !sent_secret && is_prompt {
+                            scan = scan[start..].to_string();
+                        }
+                        let lower = scan.to_ascii_lowercase();
+                        let is_auth_prompt =
+                            lower.contains("password:") || lower.contains("passphrase for key");
+                        let is_password_prompt = lower.contains("password:");
+                        if lower.contains("permission denied") {
+                            // 自动填充或手动输入失败：转为捕获模式，允许重新记录正确密码
+                            capture_mode = true;
+                            captured.store(false, Ordering::SeqCst);
+                            scan.clear();
+                        }
+                        if let Some(secret) = &auto_password {
+                            if !sent_secret && is_auth_prompt {
                                 if let Ok(mut w) = writer.lock() {
                                     let _ = w.write_all(format!("{secret}\r").as_bytes());
                                     let _ = w.flush();
@@ -175,29 +198,15 @@ impl SessionManager {
                                 sent_secret = true;
                                 scan.clear();
                             }
-                        } else {
-                            // 用户手动输入密码时，捕获保存供 AI 复用
-                            scan.push_str(&String::from_utf8_lossy(&data));
-                            if scan.len() > 4096 {
-                                let cut = scan.len() - 4096;
-                                let mut start = cut;
-                                while start > 0 && !scan.is_char_boundary(start) {
-                                    start -= 1;
-                                }
-                                scan = scan[start..].to_string();
-                            }
-                            let lower = scan.to_ascii_lowercase();
-                            if !captured.load(Ordering::SeqCst)
-                                && !expecting.load(Ordering::SeqCst)
-                                && lower.contains("password:")
-                            {
-                                expecting.store(true, Ordering::SeqCst);
-                                scan.clear();
-                            }
-                            if lower.contains("permission denied") {
-                                // 密码错误时允许重新捕获
-                                captured.store(false, Ordering::SeqCst);
-                            }
+                        }
+                        // 捕获用户手动输入的密码（含自动填充失败后重新输入的情况）
+                        if capture_mode
+                            && !captured.load(Ordering::SeqCst)
+                            && !expecting.load(Ordering::SeqCst)
+                            && is_password_prompt
+                        {
+                            expecting.store(true, Ordering::SeqCst);
+                            scan.clear();
                         }
                     }
                 }

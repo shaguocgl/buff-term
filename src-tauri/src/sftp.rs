@@ -58,15 +58,7 @@ fn finish(out: &remote::RemoteOutput) -> Result<SftpResult, String> {
 }
 
 fn run_sftp(host: &Host, script: &str, timeout: u64) -> Result<remote::RemoteOutput, String> {
-    remote::run_program(
-        &host.id,
-        host.auth_type == "password",
-        "sftp",
-        &[],
-        &sftp_args(host),
-        Some(script),
-        timeout,
-    )
+    remote::run_sftp_batch(host, &sftp_args(host), script, timeout)
 }
 
 #[tauri::command]
