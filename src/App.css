@@ -68,10 +68,6 @@ button {
   overflow: hidden;
 }
 
-.platform-mac .app {
-  padding-top: 38px;
-}
-
 /* ============ 侧边栏 ============ */
 
 .sidebar {
@@ -86,67 +82,14 @@ button {
 }
 
 .brand {
-  position: relative;
   display: flex;
   align-items: center;
   gap: 11px;
   padding: 16px 16px 14px;
 }
 
-.brand-collapse {
-  width: 28px;
-  height: 28px;
-  margin-left: auto;
-  flex: none;
-  display: grid;
-  place-items: center;
-  border-radius: 8px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  transition:
-    color 0.15s,
-    background 0.15s,
-    border-color 0.15s;
-}
-
-.brand-collapse:hover {
-  color: var(--text);
-  background: rgba(148, 163, 184, 0.1);
-  border-color: var(--border);
-}
-
-.brand-collapse svg {
-  transform: rotate(180deg);
-}
-
-.sidebar.collapsed {
-  width: 64px;
-  min-width: 64px;
-}
-
-.sidebar.collapsed .brand {
-  justify-content: center;
-  padding: 16px 0 14px;
-}
-
-.sidebar.collapsed .brand-text,
-.sidebar.collapsed .brand-mark,
-.sidebar.collapsed .sidebar-actions,
-.sidebar.collapsed .section-title,
-.sidebar.collapsed .host-list,
-.sidebar.collapsed .sidebar-footer {
-  display: none;
-}
-
-.sidebar.collapsed .brand-collapse {
-  position: static;
-  margin-left: 0;
-}
-
-.sidebar.collapsed .brand-collapse svg {
-  transform: none;
+.platform-mac .brand {
+  padding: 12px 16px 12px 82px;
 }
 
 .brand-mark {
