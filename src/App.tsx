@@ -333,7 +333,7 @@ function App() {
       <main className="main">
         {tabs.length > 0 ? (
           <div className="workbench">
-            <div className="tab-bar">
+            <div className="tab-bar" data-tauri-drag-region>
               {tabs.map((tab) => (
                 <div
                   key={tab.key}

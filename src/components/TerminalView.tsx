@@ -245,17 +245,12 @@ export default function TerminalView({
 
   return (
     <div className="terminal-wrap">
-      <div className="terminal-header">
-        <div className="terminal-title-group">
-          <span className="terminal-title-dot" />
-          <span className="terminal-title">{host.name}</span>
-          {connecting && <span className="terminal-status">连接中…</span>}
-          {exited && !connecting && (
-            <button className="btn reconnect" onClick={handleReconnect}>
-              <RefreshIcon size={13} /> 重连
-            </button>
-          )}
-        </div>
+      <div className="terminal-header" data-tauri-drag-region>
+        {exited && !connecting && (
+          <button className="btn reconnect" onClick={handleReconnect}>
+            <RefreshIcon size={13} /> 重连
+          </button>
+        )}
         <div className="terminal-header-actions">
           <button
             className={`btn ai-toggle${chatOpen ? ' active' : ''}`}
