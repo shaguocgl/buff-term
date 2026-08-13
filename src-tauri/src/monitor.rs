@@ -1,6 +1,8 @@
 use crate::models::Host;
-use crate::remote;
+use crate::russh::RusshManager;
 use serde::Serialize;
+use std::time::Duration;
+use tauri::State;
 
 #[derive(Serialize, Default)]
 pub struct DiskInfo {
@@ -45,20 +47,30 @@ fn now() -> u64 {
 }
 
 /// 采集 Linux 服务器的资源快照（CPU / 内存 / 磁盘 / 负载 / TOP 进程）
+/// 复用 russh 连接池，避免每次采集都新建系统 ssh 进程
 #[tauri::command]
-pub fn monitor_snapshot(host: Host) -> Result<MonitorSnapshot, String> {
-    collect(&host)
+pub async fn monitor_snapshot(
+    russh: State<'_, RusshManager>,
+    host: Host,
+) -> Result<MonitorSnapshot, String> {
+    collect_russh(&host, &russh).await
 }
 
-pub fn collect(host: &Host) -> Result<MonitorSnapshot, String> {
-    let out = remote::run(host, MONITOR_SCRIPT, 25)?;
+/// 通过 russh 连接池采集（复用 AI / MCP 同一 SSH 通道）
+pub async fn collect_russh(
+    host: &Host,
+    russh: &RusshManager,
+) -> Result<MonitorSnapshot, String> {
+    let out = russh
+        .exec(host, MONITOR_SCRIPT, Duration::from_secs(25))
+        .await?;
     parse(&out.text, host)
 }
 
 const MONITOR_SCRIPT: &str = r#"
 echo "BEGIN"
 echo "LOAD $(cat /proc/loadavg 2>/dev/null | cut -d' ' -f1-3)"
-echo "CPU $(top -bn1 2>/dev/null | awk '/%Cpu/{print 100-$8; exit}')"
+echo "CPU $(p1=$(grep '^cpu ' /proc/stat); sleep 0.3; p2=$(grep '^cpu ' /proc/stat); awk -v a=\"$p1\" -v b=\"$p2\" 'BEGIN { split(a,A); split(b,B); t1=0; t2=0; for(i=2;i<=9;i++){t1+=A[i]; t2+=B[i]} u1=t1-A[5]-A[6]; u2=t2-B[5]-B[6]; d=t2-t1; if(d<=0){print 0; exit} printf \"%.1f\n\", (u2-u1)/d*100 }')"
 echo "MEM $(free -m 2>/dev/null | awk '/Mem:/{print $2, $3}')"
 echo "DISK"
 df -hP 2>/dev/null | awk 'NR>1 {print $6 "|" $1 "|" $2 "|" $3}'
