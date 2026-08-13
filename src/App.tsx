@@ -354,6 +354,8 @@ function App() {
                 <div
                   key={tab.key}
                   className={`tab${tab.key === activeKey ? ' active' : ''}${
+                    tab.status === 'connecting' ? ' connecting' : ''
+                  }${
                     tab.status === 'exited' ? ' exited' : ''
                   }`}
                   onClick={() => setActiveKey(tab.key)}
