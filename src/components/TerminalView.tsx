@@ -261,28 +261,28 @@ export default function TerminalView({
             className={`btn ai-toggle${chatOpen ? ' active' : ''}`}
             onClick={onToggleChat}
           >
-            <SparklesIcon size={14} /> AI
+            <SparklesIcon size={14} /> <span className="toolbar-label">AI</span>
           </button>
           <button
             className={`btn ai-toggle${sftpOpen ? ' active' : ''}`}
             onClick={onToggleSftp}
           >
-            <FolderIcon size={14} /> 文件
+            <FolderIcon size={14} /> <span className="toolbar-label">文件</span>
           </button>
           <button
             className={`btn ai-toggle${monitorOpen ? ' active' : ''}`}
             onClick={onToggleMonitor}
           >
-            <ActivityIcon size={14} /> 监控
+            <ActivityIcon size={14} /> <span className="toolbar-label">监控</span>
           </button>
           <button
             className={`btn ai-toggle${inspectionOpen ? ' active' : ''}`}
             onClick={onToggleInspection}
           >
-            <InspectIcon size={14} /> 巡检
+            <InspectIcon size={14} /> <span className="toolbar-label">巡检</span>
           </button>
           <button className="btn disconnect" onClick={handleDisconnect}>
-            <PowerIcon size={14} /> 断开
+            <PowerIcon size={14} /> <span className="toolbar-label">断开</span>
           </button>
         </div>
       </div>

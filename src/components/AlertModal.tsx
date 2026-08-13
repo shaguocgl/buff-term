@@ -167,7 +167,7 @@ export default function AlertModal({ onClose }: Props) {
               onClick={handleTest}
               disabled={testing || saving}
             >
-              {testing ? '测试中…' : '测试连接'}
+              {testing ? '测试中…' : '测试发送'}
             </button>
             <button
               type="button"

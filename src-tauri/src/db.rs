@@ -555,6 +555,12 @@ impl Db {
         };
         Ok(rows)
     }
+
+    pub fn delete_inspection_report(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM inspection_reports WHERE id=?1", params![id])?;
+        Ok(())
+    }
 }
 
 fn row_to_host(row: &Row<'_>) -> rusqlite::Result<Host> {

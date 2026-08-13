@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   cancelInspection,
+  deleteInspectionReport,
   getAlertSettings,
   getInspectionReport,
   listInspectionReports,
@@ -17,7 +18,7 @@ import type {
   InspectionStatus,
 } from '../types';
 import type { Host } from '../types';
-import { InspectIcon, RefreshIcon, StopIcon, XIcon } from './Icons';
+import { InspectIcon, RefreshIcon, StopIcon, TrashIcon, XIcon } from './Icons';
 
 interface Props {
   host: Host;
@@ -150,6 +151,23 @@ export default function InspectionPanel({ host, onClose }: Props) {
     await cancelInspection(currentIdRef.current).catch(() => {});
   };
 
+  const handleDeleteReport = async (id: string) => {
+    if (!window.confirm('确定删除这条巡检报告吗？')) return;
+    await deleteInspectionReport(id).catch((e) => {
+      setError(String(e));
+    });
+    if (currentIdRef.current === id) {
+      currentIdRef.current = null;
+      setCurrentId(null);
+      setReport(null);
+      setStatus(null);
+      setError(null);
+      setProgress(null);
+      setSteps([]);
+    }
+    await refreshHistory().catch(() => {});
+  };
+
   const openReport = async (id: string) => {
     const next = await getInspectionReport(id).catch(() => null);
     if (next) {
@@ -277,6 +295,16 @@ export default function InspectionPanel({ host, onClose }: Props) {
               <span className="inspection-history-time">
                 {new Date(item.created_at * 1000).toLocaleString()}
               </span>
+              <button
+                className="icon-btn danger inspection-delete"
+                title="删除报告"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleDeleteReport(item.id);
+                }}
+              >
+                <TrashIcon size={14} />
+              </button>
             </button>
           ))}
         </div>

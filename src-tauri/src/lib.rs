@@ -84,6 +84,7 @@ pub fn run() {
             inspection::start_inspection,
             inspection::get_inspection_report,
             inspection::list_inspection_reports,
+            inspection::delete_inspection_report,
             inspection::cancel_inspection,
             alert::get_alert_settings,
             alert::save_alert_settings,

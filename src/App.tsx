@@ -56,6 +56,7 @@ function App() {
   const [sftpOpen, setSftpOpen] = useState(false);
   const [monitorOpen, setMonitorOpen] = useState(false);
   const [inspectionOpen, setInspectionOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingHost, setEditingHost] = useState<Host | null>(null);
   const [tabs, setTabs] = useState<Tab[]>([]);
@@ -202,7 +203,7 @@ function App() {
 
   return (
     <div className="app">
-      <aside className="sidebar">
+      <aside className={`sidebar${sidebarCollapsed ? ' collapsed' : ''}`}>
         <div className="brand">
           <div className="brand-mark">
             <TerminalIcon size={18} />
@@ -211,6 +212,13 @@ function App() {
             <span className="brand-name">KeyWisp</span>
             <span className="brand-sub">SSH Agent · 本地优先</span>
           </div>
+          <button
+            className="brand-collapse"
+            title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+            onClick={() => setSidebarCollapsed((v) => !v)}
+          >
+            <ChevronRightIcon size={18} />
+          </button>
         </div>
 
         <div className="sidebar-actions">

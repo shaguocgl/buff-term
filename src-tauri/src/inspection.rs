@@ -115,6 +115,12 @@ pub fn list_inspection_reports(
 }
 
 #[tauri::command]
+pub fn delete_inspection_report(db: State<'_, Db>, id: String) -> Result<(), String> {
+    db.delete_inspection_report(&id)
+        .map_err(|e| format!("删除巡检报告失败: {e}"))
+}
+
+#[tauri::command]
 pub fn cancel_inspection(
     state: State<'_, InspectionManager>,
     id: String,

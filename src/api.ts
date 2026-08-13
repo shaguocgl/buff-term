@@ -78,6 +78,8 @@ export const listInspectionReports = (hostId?: string, limit?: number) =>
     hostId: hostId ?? null,
     limit: limit ?? 30,
   });
+export const deleteInspectionReport = (id: string) =>
+  invoke<void>('delete_inspection_report', { id });
 export const cancelInspection = (id: string) =>
   invoke<void>('cancel_inspection', { id });
 export const onInspectionProgress = (
