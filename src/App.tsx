@@ -29,7 +29,7 @@ import MonitorPanel from './components/MonitorPanel';
 import SftpPanel from './components/SftpPanel';
 import TerminalView from './components/TerminalView';
 import ToastContainer, { type ToastItem } from './components/Toast';
-import logoUrl from './assets/keywisp-logo.png';
+import logoUrl from './assets/keywisp-logo.svg';
 import {
   BellIcon,
   ImportIcon,

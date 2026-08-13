@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="src/assets/keywisp-logo.svg" width="128" alt="KeyWisp logo" />
+</p>
+
 # KeyWisp Agent
 
 > 本地优先的桌面 SSH 管理 + AI Agent 工具
