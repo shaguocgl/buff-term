@@ -56,13 +56,17 @@ function HistoryChart({
   const W = 320;
   const H = 96;
   const PAD = 4;
-  const WINDOW = 1800; // 最近 30 分钟
+  const MAX_WINDOW = 1800; // 最多显示 30 分钟
+  const MIN_WINDOW = 60; // 数据不足时至少显示 1 分钟
   const now = Date.now() / 1000;
-  const start = now - WINDOW;
-  const visible = points.filter((p) => p.ts >= start);
+  const visible = points.filter((p) => p.ts >= now - MAX_WINDOW);
+  const earliest = visible.length > 0 ? visible[0].ts : now;
+  // 窗口动态收缩：数据少时铺满整个宽度，最多拉到 30 分钟
+  const start = Math.min(now - MIN_WINDOW, Math.max(now - MAX_WINDOW, earliest));
+  const window = Math.max(MIN_WINDOW, now - start);
   const last = visible.length > 0 ? visible[visible.length - 1] : null;
 
-  const x = (ts: number) => PAD + ((ts - start) / WINDOW) * (W - PAD * 2);
+  const x = (ts: number) => PAD + ((ts - start) / window) * (W - PAD * 2);
   const y = (v: number) => H - PAD - (Math.min(100, Math.max(0, v)) / 100) * (H - PAD * 2);
 
   const line =
@@ -78,7 +82,7 @@ function HistoryChart({
     const rect = svg.getBoundingClientRect();
     const scaleX = W / Math.max(1, rect.width);
     const xView = (e.clientX - rect.left) * scaleX;
-    const ts = start + ((xView - PAD) / (W - PAD * 2)) * WINDOW;
+    const ts = start + ((xView - PAD) / (W - PAD * 2)) * window;
     let bestIdx = 0;
     let bestDist = Infinity;
     visible.forEach((p, idx) => {
@@ -160,12 +164,18 @@ function HistoryChart({
         )}
       </div>
       <div className="monitor-chart-axis">
-        <span>30分钟前</span>
-        <span>15分钟前</span>
+        <span>{formatAgo(window)}</span>
         <span>现在</span>
       </div>
     </div>
   );
+}
+
+function formatAgo(sec: number): string {
+  const minutes = sec / 60;
+  if (minutes < 1) return '1分钟内';
+  if (minutes < 60) return `${Math.round(minutes)}分钟前`;
+  return `${Math.round(minutes / 60)}小时前`;
 }
 
 export default function MonitorPanel({ host, onClose }: Props) {
