@@ -499,7 +499,7 @@ function App() {
             </div>
           </div>
         ) : (
-          <div className="welcome">
+          <div className="welcome" onMouseDown={startWindowDrag}>
             <div className="welcome-ring">
               <TerminalIcon size={40} />
             </div>
