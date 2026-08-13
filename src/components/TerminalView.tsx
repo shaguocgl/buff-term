@@ -34,6 +34,13 @@ interface Props {
   onDisconnect: (tabKey: number) => void;
 }
 
+function normalizeDims(dims: { cols: number; rows: number } | undefined) {
+  // 过窄（<60 列）时直接回退默认宽度，避免动态输出（docker compose 等）每帧换行堆叠
+  const cols = dims && dims.cols >= 60 && dims.cols <= 400 ? dims.cols : 100;
+  const rows = dims && dims.rows >= 10 && dims.rows <= 200 ? dims.rows : 30;
+  return { cols, rows };
+}
+
 export default function TerminalView({
   host,
   tabKey,
@@ -72,15 +79,18 @@ export default function TerminalView({
     const fit = fitRef.current;
     if (sid === null || !fit) return;
     const dims = fit.proposeDimensions();
-    if (dims) resizeSession(sid, dims.cols, dims.rows).catch(() => {});
+    if (dims) {
+      const { cols, rows } = normalizeDims(dims);
+      resizeSession(sid, cols, rows).catch(() => {});
+    }
   }, []);
 
   const connect = useCallback(async () => {
     const term = termRef.current;
     const fit = fitRef.current;
     if (!term || !fit) return;
-    const dims = fit.proposeDimensions() ?? { cols: 100, rows: 30 };
-    const id = await openSession(host, dims.cols, dims.rows);
+    const { cols, rows } = normalizeDims(fit.proposeDimensions());
+    const id = await openSession(host, cols, rows);
     if (disposedRef.current) {
       closeSession(id).catch(() => {});
       return;
