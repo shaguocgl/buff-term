@@ -29,6 +29,7 @@ import MonitorPanel from './components/MonitorPanel';
 import SftpPanel from './components/SftpPanel';
 import TerminalView from './components/TerminalView';
 import ToastContainer, { type ToastItem } from './components/Toast';
+import logoUrl from './assets/keywisp-logo.png';
 import {
   BellIcon,
   ImportIcon,
@@ -221,7 +222,7 @@ function App() {
       <aside className="sidebar">
         <div className="brand" onMouseDown={startWindowDrag}>
           <div className="brand-mark">
-            <TerminalIcon size={18} />
+            <img className="brand-logo" src={logoUrl} alt="KeyWisp" />
           </div>
           <div className="brand-text">
             <span className="brand-name">KeyWisp</span>

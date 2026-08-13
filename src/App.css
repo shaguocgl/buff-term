@@ -103,6 +103,13 @@ button {
   box-shadow: 0 6px 18px rgba(109, 141, 255, 0.35);
 }
 
+.brand-logo {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
 .brand-text {
   display: flex;
   flex-direction: column;
