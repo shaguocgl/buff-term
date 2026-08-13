@@ -506,7 +506,11 @@ fn summary_from_markdown(markdown: &str) -> String {
 }
 
 fn markdown_to_html(markdown: &str) -> String {
-    let options = comrak::Options::default();
+    let mut options = comrak::Options::default();
+    options.extension.table = true;
+    options.extension.strikethrough = true;
+    options.extension.autolink = true;
+    options.extension.tasklist = true;
     comrak::markdown_to_html(markdown, &options)
 }
 
@@ -518,7 +522,9 @@ fn wrap_email_html(host_label: &str, risk: &str, body: &str) -> String {
         _ => "#8b8d98",
     };
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head>\
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+         <style>table{{border-collapse:collapse;width:100%;margin:14px 0;font-size:13px;}}th,td{{border:1px solid #dfe3e8;padding:8px 10px;text-align:left;vertical-align:top;}}th{{background:#f4f5f7;font-weight:650;}}code{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;background:#f1f3f5;padding:2px 5px;border-radius:4px;}}pre{{background:#f4f5f7;padding:12px 14px;border-radius:8px;overflow-x:auto;}}pre code{{background:transparent;padding:0;}}</style>\
+         </head>\
          <body style=\"margin:0;padding:24px;background:#f4f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2430;\">\
          <div style=\"max-width:900px;margin:0 auto;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,.08);\">\
          <div style=\"padding:24px 28px;background:linear-gradient(135deg,#2f3b52,#4f5d78);color:#ffffff;\">\

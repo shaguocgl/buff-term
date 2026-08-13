@@ -3490,6 +3490,42 @@ input::placeholder {
   padding: 14px;
 }
 
+.inspection-start {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 26px 16px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  background: var(--panel-2);
+  margin-bottom: 14px;
+}
+
+.inspection-start-icon {
+  color: var(--accent);
+}
+
+.inspection-start-text {
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.inspection-start-text strong {
+  color: var(--text);
+}
+
+.inspection-start .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.inspection-meta .btn.small {
+  margin-left: auto;
+}
+
 .inspection-running {
   display: flex;
   align-items: flex-start;

@@ -88,8 +88,7 @@ export default function InspectionPanel({ host, onClose }: Props) {
 
   useEffect(() => {
     refreshHistory().catch(() => {});
-    begin();
-  }, [begin, refreshHistory]);
+  }, [refreshHistory]);
 
   useEffect(() => {
     let cancelled = false;
@@ -171,6 +170,20 @@ export default function InspectionPanel({ host, onClose }: Props) {
       </div>
 
       <div className="inspection-body">
+        {status === null && (
+          <div className="inspection-start">
+            <div className="inspection-start-icon">
+              <InspectIcon size={28} />
+            </div>
+            <div className="inspection-start-text">
+              对 <strong>{host.name}</strong> 执行一次 AI 只读巡检
+            </div>
+            <button className="btn primary" onClick={begin}>
+              <InspectIcon size={15} /> 开始巡检
+            </button>
+          </div>
+        )}
+
         {status === 'running' && (
           <div className="inspection-running">
             <div className="spinner" />
@@ -208,6 +221,9 @@ export default function InspectionPanel({ host, onClose }: Props) {
                   : '—'}
               </span>
               <span>{report.email_sent ? '✓ 邮件已发送' : '邮件未发送'}</span>
+              <button className="btn secondary small" onClick={begin}>
+                <RefreshIcon size={13} /> 重新巡检
+              </button>
             </div>
             <ReactMarkdown remarkPlugins={[remarkGfm]}>
               {report.markdown}
