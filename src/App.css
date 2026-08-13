@@ -2982,7 +2982,7 @@ input::placeholder {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  padding: 4px 2px;
+  padding: 12px 22px 22px;
 }
 
 .mcp-section {
