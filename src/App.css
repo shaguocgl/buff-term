@@ -1617,7 +1617,6 @@ input::placeholder {
 }
 
 .gauge-label {
-  position: relative;
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -1634,14 +1633,16 @@ input::placeholder {
   color: var(--text);
 }
 
-.gauge-label:hover::after {
-  content: attr(data-tooltip);
+.gauge {
+  position: relative;
+}
+
+.monitor-tooltip {
   position: absolute;
   left: 0;
-  top: 100%;
-  margin-top: 5px;
-  max-width: 360px;
-  padding: 6px 8px;
+  z-index: 30;
+  max-width: 420px;
+  padding: 6px 9px;
   border-radius: 7px;
   background: var(--panel-3);
   border: 1px solid var(--border-strong);
@@ -1653,7 +1654,14 @@ input::placeholder {
   white-space: normal;
   word-break: break-all;
   pointer-events: none;
-  z-index: 20;
+}
+
+.gauge-tooltip {
+  top: 30px;
+}
+
+.proc-tooltip {
+  bottom: calc(100% + 4px);
 }
 
 .gauge-track {
@@ -1839,6 +1847,7 @@ input::placeholder {
 }
 
 .proc-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;

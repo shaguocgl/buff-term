@@ -23,11 +23,16 @@ function Gauge({
   value: number;
   display: string;
 }) {
+  const [tip, setTip] = useState(false);
   const color = value >= 85 ? 'red' : value >= 60 ? 'amber' : 'green';
   return (
     <div className="gauge">
       <div className="gauge-head">
-        <span className="gauge-label" data-tooltip={label}>
+        <span
+          className="gauge-label"
+          onMouseEnter={() => setTip(true)}
+          onMouseLeave={() => setTip(false)}
+        >
           {label}
         </span>
         <span className="gauge-value">{display}</span>
@@ -38,6 +43,39 @@ function Gauge({
           style={{ width: `${Math.min(100, Math.max(0, value))}%` }}
         />
       </div>
+      {tip && <div className="monitor-tooltip gauge-tooltip">{label}</div>}
+    </div>
+  );
+}
+
+function ProcRow({
+  rank,
+  user,
+  cpu,
+  mem,
+  cmd,
+}: {
+  rank: number;
+  user: string;
+  cpu: string;
+  mem: string;
+  cmd: string;
+}) {
+  const [tip, setTip] = useState(false);
+  return (
+    <div className="proc-row">
+      <span className="proc-rank">{rank}</span>
+      <span className="proc-user">{user}</span>
+      <span className="proc-cpu">{cpu}%</span>
+      <span className="proc-mem">{mem}%</span>
+      <span
+        className="proc-cmd"
+        onMouseEnter={() => setTip(true)}
+        onMouseLeave={() => setTip(false)}
+      >
+        {cmd}
+      </span>
+      {tip && <div className="monitor-tooltip proc-tooltip">{cmd}</div>}
     </div>
   );
 }
@@ -275,13 +313,14 @@ export default function MonitorPanel({ host, onClose }: Props) {
             <div className="monitor-section-title">TOP 进程（CPU）</div>
             <div className="monitor-procs">
               {snap.top.map((p, idx) => (
-                <div className="proc-row" key={idx}>
-                  <span className="proc-rank">{idx + 1}</span>
-                  <span className="proc-user">{p.user}</span>
-                  <span className="proc-cpu">{p.cpu}%</span>
-                  <span className="proc-mem">{p.mem}%</span>
-                  <span className="proc-cmd">{p.cmd}</span>
-                </div>
+                <ProcRow
+                  key={idx}
+                  rank={idx + 1}
+                  user={p.user}
+                  cpu={p.cpu}
+                  mem={p.mem}
+                  cmd={p.cmd}
+                />
               ))}
             </div>
           </>
