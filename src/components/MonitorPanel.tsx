@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
 import { monitorSnapshot } from '../api';
 import type { Host, MonitorSnapshot } from '../types';
 import { ActivityIcon, RefreshIcon, XIcon } from './Icons';
@@ -51,15 +51,18 @@ function HistoryChart({
   value: number;
   color: 'cpu' | 'mem';
 }) {
+  const [hover, setHover] = useState<{ idx: number; x: number } | null>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
   const W = 320;
   const H = 96;
   const PAD = 4;
+  const WINDOW = 1800; // 最近 30 分钟
   const now = Date.now() / 1000;
-  const start = now - 3600; // 最近 1 小时窗口
+  const start = now - WINDOW;
   const visible = points.filter((p) => p.ts >= start);
   const last = visible.length > 0 ? visible[visible.length - 1] : null;
 
-  const x = (ts: number) => PAD + ((ts - start) / 3600) * (W - PAD * 2);
+  const x = (ts: number) => PAD + ((ts - start) / WINDOW) * (W - PAD * 2);
   const y = (v: number) => H - PAD - (Math.min(100, Math.max(0, v)) / 100) * (H - PAD * 2);
 
   const line =
@@ -67,6 +70,26 @@ function HistoryChart({
       ? visible.map((p) => `${x(p.ts).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ')
       : '';
   const dot = last ? `${x(last.ts).toFixed(1)},${y(last.value).toFixed(1)}` : '';
+  const hovered = hover ? visible[hover.idx] : null;
+
+  const handleMove = (e: MouseEvent<SVGSVGElement>) => {
+    const svg = svgRef.current;
+    if (!svg || visible.length === 0) return;
+    const rect = svg.getBoundingClientRect();
+    const scaleX = W / Math.max(1, rect.width);
+    const xView = (e.clientX - rect.left) * scaleX;
+    const ts = start + ((xView - PAD) / (W - PAD * 2)) * WINDOW;
+    let bestIdx = 0;
+    let bestDist = Infinity;
+    visible.forEach((p, idx) => {
+      const d = Math.abs(p.ts - ts);
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = idx;
+      }
+    });
+    setHover({ idx: bestIdx, x: x(visible[bestIdx].ts) });
+  };
 
   return (
     <div className="monitor-chart">
@@ -76,25 +99,69 @@ function HistoryChart({
         </span>
         <span className="monitor-chart-value">{value.toFixed(1)}%</span>
       </div>
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="monitor-chart-svg">
-        {[0, 25, 50, 75, 100].map((g) => (
-          <line
-            key={g}
-            x1={PAD}
-            x2={W - PAD}
-            y1={y(g)}
-            y2={y(g)}
-            className="monitor-chart-grid"
-          />
-        ))}
-        {visible.length > 1 && (
-          <polyline points={line} className={`chart-line chart-line-${color}`} />
+      <div className="monitor-chart-plot">
+        <svg
+          ref={svgRef}
+          viewBox={`0 0 ${W} ${H}`}
+          preserveAspectRatio="none"
+          className="monitor-chart-svg"
+          onMouseMove={handleMove}
+          onMouseLeave={() => setHover(null)}
+        >
+          {[0, 25, 50, 75, 100].map((g) => (
+            <line
+              key={g}
+              x1={PAD}
+              x2={W - PAD}
+              y1={y(g)}
+              y2={y(g)}
+              className="monitor-chart-grid"
+            />
+          ))}
+          {visible.length > 1 && (
+            <polyline points={line} className={`chart-line chart-line-${color}`} />
+          )}
+          {dot && (
+            <circle
+              cx={x(last!.ts)}
+              cy={y(last!.value)}
+              r={2.5}
+              className={`chart-dot chart-dot-${color}`}
+            />
+          )}
+          {hover && hovered && (
+            <>
+              <line
+                x1={hover.x}
+                x2={hover.x}
+                y1={PAD}
+                y2={H - PAD}
+                className="chart-hover-line"
+              />
+              <circle
+                cx={x(hovered.ts)}
+                cy={y(hovered.value)}
+                r={3}
+                className={`chart-dot chart-dot-${color}`}
+              />
+            </>
+          )}
+        </svg>
+        {hover && hovered && (
+          <div
+            className="monitor-chart-tooltip"
+            style={{ left: `${(hover.x / W) * 100}%` }}
+          >
+            <span className="tooltip-time">
+              {new Date(hovered.ts * 1000).toLocaleTimeString('zh-CN', { hour12: false })}
+            </span>
+            <span className="tooltip-value">{hovered.value.toFixed(1)}%</span>
+          </div>
         )}
-        {dot && <circle cx={x(last!.ts)} cy={y(last!.value)} r={2.5} className={`chart-dot chart-dot-${color}`} />}
-      </svg>
+      </div>
       <div className="monitor-chart-axis">
-        <span>1小时前</span>
         <span>30分钟前</span>
+        <span>15分钟前</span>
         <span>现在</span>
       </div>
     </div>
@@ -115,8 +182,8 @@ export default function MonitorPanel({ host, onClose }: Props) {
       setSnap(s);
       setHistory((prev) => {
         const next = [...prev, { ts: Date.now() / 1000, cpu: s.cpu_percent, mem: s.mem.percent }];
-        // 只保留最近 1 小时
-        const cutoff = Date.now() / 1000 - 3600;
+        // 只保留最近 30 分钟
+        const cutoff = Date.now() / 1000 - 1800;
         return next.filter((p) => p.ts >= cutoff);
       });
     } catch (e) {

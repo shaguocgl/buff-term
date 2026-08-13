@@ -1711,6 +1711,10 @@ input::placeholder {
   display: block;
 }
 
+.monitor-chart-plot {
+  position: relative;
+}
+
 .monitor-chart-grid {
   stroke: rgba(148, 163, 184, 0.1);
   stroke-width: 0.8;
@@ -1743,6 +1747,43 @@ input::placeholder {
 
 .chart-dot-mem {
   fill: var(--accent-2);
+}
+
+.chart-hover-line {
+  stroke: rgba(230, 237, 246, 0.55);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.monitor-chart-tooltip {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 4px 7px;
+  border-radius: 7px;
+  background: var(--panel-3);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg);
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 2;
+}
+
+.monitor-chart-tooltip .tooltip-time {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.monitor-chart-tooltip .tooltip-value {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text);
 }
 
 .monitor-chart-axis {

@@ -70,7 +70,11 @@ pub async fn collect_russh(
 const MONITOR_SCRIPT: &str = r#"
 echo "BEGIN"
 echo "LOAD $(cat /proc/loadavg 2>/dev/null | cut -d' ' -f1-3)"
-echo "CPU $(p1=$(grep '^cpu ' /proc/stat); sleep 0.3; p2=$(grep '^cpu ' /proc/stat); awk -v a=\"$p1\" -v b=\"$p2\" 'BEGIN { split(a,A); split(b,B); u1=A[2]+A[3]+A[4]; u2=B[2]+B[3]+B[4]; d1=u1+A[5]; d2=u2+B[5]; d=d2-d1; if(d<=0){print 0; exit} printf \"%.1f\n\", (u2-u1)/d*100 }')"
+p1=$(grep '^cpu ' /proc/stat)
+sleep 0.3
+p2=$(grep '^cpu ' /proc/stat)
+CPU=$(awk -v a="$p1" -v b="$p2" 'BEGIN { split(a,A); split(b,B); u1=A[2]+A[3]+A[4]; u2=B[2]+B[3]+B[4]; d1=u1+A[5]; d2=u2+B[5]; d=d2-d1; if(d<=0){print 0; exit} printf "%.1f\n", (u2-u1)/d*100 }')
+echo "CPU $CPU"
 echo "MEM $(free -m 2>/dev/null | awk '/Mem:/{print $2, $3, $7}')"
 echo "DISK"
 df -hP 2>/dev/null | awk 'NR>1 {print $6 "|" $1 "|" $2 "|" $3}'
