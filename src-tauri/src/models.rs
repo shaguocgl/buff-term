@@ -1,15 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-/// 忽略 ssh 系统/用户配置（我们显式传入全部连接参数），
-/// 同时避免 macOS 默认 SendEnv LANG LC_* 转发 locale 导致远端 setlocale 警告
-pub fn null_config_path() -> &'static str {
-    if cfg!(windows) {
-        "NUL"
-    } else {
-        "/dev/null"
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Host {
     pub id: String,
@@ -17,7 +7,7 @@ pub struct Host {
     pub address: String,
     pub port: u16,
     pub username: String,
-    /// "key" 或 "password"，M1 阶段认证由 ssh 进程交互完成
+    /// "key" 或 "password"，认证由 russh 注入钥匙串凭据
     pub auth_type: String,
     #[serde(default)]
     pub key_path: Option<String>,
@@ -124,5 +114,4 @@ impl Host {
     pub fn label_address(&self) -> String {
         format!("{}@{}:{}", self.username, self.address, self.port)
     }
-
 }

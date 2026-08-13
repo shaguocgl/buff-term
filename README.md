@@ -22,7 +22,7 @@ KeyWisp Agent 是一款桌面端 SSH 管理工具，内置**自研的 AI Agent �
 - 密钥 / 密码认证，密码与 API Key 存入系统钥匙串（macOS Keychain / Windows 凭据管理器 / Linux Secret Service）
 - 多标签终端会话（xterm.js）、窗口尺寸自适应
 - 一键导入 `~/.ssh/config`（HostName / User / Port / IdentityFile / ProxyJump）
-- 密码自动填充：连接时检测到密码提示会自动响应，无需手动输入
+- 密码认证由后端直接注入钥匙串凭据，不经过终端提示符识别
 
 ### AI Agent
 
@@ -59,8 +59,7 @@ KeyWisp Agent 是一款桌面端 SSH 管理工具，内置**自研的 AI Agent �
 | --- | --- |
 | 桌面框架 | Tauri 2（Rust 后端） |
 | 前端 | React 19 + TypeScript + xterm.js + Vite |
-| 交互终端 / SFTP | 系统 OpenSSH + portable-pty / 系统 sftp 批处理 |
-| AI / MCP 执行 | russh（协议级 SSH、连接复用、结构化 stdout/退出码） |
+| 交互终端 / SFTP / AI / MCP / 监控 | russh + russh-sftp（协议级 SSH，全部能力走同一套连接实现） |
 | 存储 | SQLite（rusqlite）+ 系统钥匙串（keyring） |
 | AI 接入 | OpenAI 兼容协议，SSE 流式解析，自研工具调用循环 |
 | MCP 服务 | 自研 Streamable HTTP + JSON-RPC 服务器（tiny_http） |
@@ -74,7 +73,7 @@ flowchart LR
   BE --> AG["AI Agent Runtime"]
   BE --> MCP["对外 MCP 服务<br/>Streamable HTTP + token"]
   MCP --> MCPTOOL["工具层<br/>list_hosts / exec / 读文件 / 列目录 / 资源查询"]
-  SM --> SSH["交互会话<br/>系统 OpenSSH + portable-pty"]
+  SM --> SSH["交互会话<br/>russh shell channel"]
   AG --> TOOL["工具层<br/>exec / 读文件 / 列目录 / 资源查询"]
   TOOL --> RSH["russh 连接池<br/>协议级执行 / 连接复用"]
   AG --> PROV["模型适配层<br/>OpenAI 兼容协议"]
@@ -83,7 +82,7 @@ flowchart LR
   PROV --> OLL["本地 Ollama"]
   BE --> DB[("SQLite<br/>配置 / 规则 / 审计")]
   BE --> KC[("系统钥匙串<br/>密码 / API Key")]
-  BE --> MON["监控采集<br/>remote 批处理"]
+  BE --> MON["监控采集<br/>russh 连接池"]
 ```
 
 ## 🚀 快速开始
@@ -127,8 +126,7 @@ src/                   前端（React + xterm.js）
   components/          聊天面板 / 终端 / 弹窗 / 下拉框等
 src-tauri/src/         Rust 后端
   agent.rs             AI Agent 运行时（流式解析、工具循环、审批、审计）
-  session.rs           SSH 会话管理（PTY）
-  remote.rs            远程命令执行（密码自动填充、超时、ANSI 清理）
+  session.rs           SSH 交互会话（russh shell channel）
   russh.rs             russh 连接池（AI / MCP 工具执行，连接复用）
   hosts.rs             主机配置
   ai.rs                AI 平台 / 模型 / 审核规则配置
@@ -137,7 +135,7 @@ src-tauri/src/         Rust 后端
   monitor.rs           资源快照采集（CPU / 内存 / 磁盘 / 负载 / TOP 进程）
   alert.rs             告警渠道（邮件 SMTP 配置与测试）
   mcp.rs               对外 MCP 服务（HTTP + token + 权限模式）
-  sftp.rs              SFTP 文件操作
+  sftp.rs              SFTP 文件操作（russh-sftp）
   db.rs                SQLite（主机、AI 配置、规则、审计）
 docs/                  实现细节
 ```

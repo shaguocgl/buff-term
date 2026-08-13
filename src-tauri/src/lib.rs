@@ -8,7 +8,6 @@ mod hosts;
 mod mcp;
 mod models;
 mod monitor;
-mod remote;
 mod russh;
 mod session;
 mod sftp;

@@ -1,7 +1,6 @@
 use crate::credentials;
 use crate::db::Db;
 use crate::models::{AiProvider, AuditLog, Host};
-use crate::remote;
 use crate::russh::RusshManager;
 use crate::session::SessionManager;
 use futures_util::StreamExt;
@@ -26,6 +25,12 @@ pub enum Control {
         allow: bool,
     },
     Cancel,
+}
+
+struct RemoteOutput {
+    text: String,
+    exit_code: Option<i32>,
+    timed_out: bool,
 }
 
 impl AgentManager {
@@ -724,7 +729,7 @@ fn normalize_tool(name: &str) -> &str {
 }
 
 fn format_exec(out: &crate::russh::ExecResult) -> String {
-    format_output(&remote::RemoteOutput {
+    format_output(&RemoteOutput {
         text: out.text.clone(),
         exit_code: out.exit_code.map(|c| c as i32),
         timed_out: out.timed_out,
@@ -826,7 +831,7 @@ pub(crate) fn is_dangerous(command: &str) -> bool {
     PATTERNS.iter().any(|p| c.contains(p))
 }
 
-fn format_output(out: &remote::RemoteOutput) -> String {
+fn format_output(out: &RemoteOutput) -> String {
     let mut text = out.text.trim().to_string();
     const MAX: usize = 12000;
     if text.chars().count() > MAX {
