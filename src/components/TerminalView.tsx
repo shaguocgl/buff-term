@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -243,9 +250,18 @@ export default function TerminalView({
     });
   };
 
+  const startWindowDrag = (event: ReactMouseEvent<HTMLElement>) => {
+    if (event.button !== 0) return;
+    const target = event.target as HTMLElement | null;
+    if (!target) return;
+    if (target.closest('button, input, textarea, select, .tab')) return;
+    event.preventDefault();
+    getCurrentWindow().startDragging();
+  };
+
   return (
     <div className="terminal-wrap">
-      <div className="terminal-header" data-drag-region>
+      <div className="terminal-header" onMouseDown={startWindowDrag}>
         {exited && !connecting && (
           <button className="btn reconnect" onClick={handleReconnect}>
             <RefreshIcon size={13} /> 重连
