@@ -59,9 +59,11 @@ KeyWisp Agent 是一款桌面端 SSH 管理工具，内置**自研的 AI Agent �
 | --- | --- |
 | 桌面框架 | Tauri 2（Rust 后端） |
 | 前端 | React 19 + TypeScript + xterm.js + Vite |
-| SSH / PTY | 系统 OpenSSH + portable-pty（规划切换 russh） |
+| 交互终端 / SFTP | 系统 OpenSSH + portable-pty / 系统 sftp 批处理 |
+| AI / MCP 执行 | russh（协议级 SSH、连接复用、结构化 stdout/退出码） |
 | 存储 | SQLite（rusqlite）+ 系统钥匙串（keyring） |
 | AI 接入 | OpenAI 兼容协议，SSE 流式解析，自研工具调用循环 |
+| MCP 服务 | 自研 Streamable HTTP + JSON-RPC 服务器（tiny_http） |
 
 ## 🏗 架构
 
@@ -70,14 +72,18 @@ flowchart LR
   UI["React + xterm.js<br/>终端 + 聊天面板"] -->|Commands / Events| BE["Rust 后端 (Tauri)"]
   BE --> SM["Session Manager"]
   BE --> AG["AI Agent Runtime"]
-  SM --> SSH["SSH (系统 OpenSSH / portable-pty)"]
+  BE --> MCP["对外 MCP 服务<br/>Streamable HTTP + token"]
+  MCP --> MCPTOOL["工具层<br/>list_hosts / exec / 读文件 / 列目录 / 资源查询"]
+  SM --> SSH["交互会话<br/>系统 OpenSSH + portable-pty"]
   AG --> TOOL["工具层<br/>exec / 读文件 / 列目录 / 资源查询"]
+  TOOL --> RSH["russh 连接池<br/>协议级执行 / 连接复用"]
   AG --> PROV["模型适配层<br/>OpenAI 兼容协议"]
   PROV --> DS["DeepSeek"]
   PROV --> QW["通义 / Kimi / OpenAI"]
   PROV --> OLL["本地 Ollama"]
   BE --> DB[("SQLite<br/>配置 / 规则 / 审计")]
   BE --> KC[("系统钥匙串<br/>密码 / API Key")]
+  BE --> MON["监控采集<br/>remote 批处理"]
 ```
 
 ## 🚀 快速开始
@@ -107,11 +113,12 @@ npm run tauri build
 2. **连接**：点击主机卡片即可连接，首次连接按终端提示确认主机指纹。
 3. **配置 AI**：点击底部「AI Agent」卡片，选择平台预设（如 DeepSeek），填写 API Key 并「测试连接」，保存后即可使用。
 4. **AI 对话**：连接服务器后右侧出现聊天面板；底部可切换安全级别（默认智能审核）与当前模型。
-5. **操作日志**：侧边栏底部「操作日志」可查看所有 AI 工具调用记录。
+5. **MCP 服务**：侧边栏「MCP 服务」勾选要开放的服务器 → 选择权限模式 → 启动，复制生成的配置 JSON 粘贴到 Codex / Claude Desktop 即可接入。
+6. **操作日志**：侧边栏底部「操作日志」可查看所有 AI 工具调用记录。
 
 ## 📚 文档
 
-- [实现细节](docs/实现细节.md)：代码结构、核心实现与踩坑记录
+- [实现细节](docs/实现细节.md)：代码结构、核心实现与最新实现说明
 
 ## 📁 项目结构
 
@@ -122,10 +129,15 @@ src-tauri/src/         Rust 后端
   agent.rs             AI Agent 运行时（流式解析、工具循环、审批、审计）
   session.rs           SSH 会话管理（PTY）
   remote.rs            远程命令执行（密码自动填充、超时、ANSI 清理）
+  russh.rs             russh 连接池（AI / MCP 工具执行，连接复用）
   hosts.rs             主机配置
   ai.rs                AI 平台 / 模型 / 审核规则配置
   credentials.rs       系统钥匙串凭据 + 内存缓存
   audit.rs             审计日志查询
+  monitor.rs           资源快照采集（CPU / 内存 / 磁盘 / 负载 / TOP 进程）
+  alert.rs             告警渠道（邮件 SMTP 配置与测试）
+  mcp.rs               对外 MCP 服务（HTTP + token + 权限模式）
+  sftp.rs              SFTP 文件操作
   db.rs                SQLite（主机、AI 配置、规则、审计）
 docs/                  实现细节
 ```
@@ -138,7 +150,7 @@ docs/                  实现细节
 - [x] 安全级别、自定义审核规则、审计日志
 - [x] M3：多标签、断线重连、SFTP 文件面板、切换 russh
 - [x] 输出脱敏：命令输出进入模型前过滤敏感信息
-- [x] MCP 服务：KeyWisp 作为 MCP 服务器对外暴露 SSH 能力，外部 AI 可接入
+- [x] MCP 服务：KeyWisp 作为 MCP 服务器对外暴露 SSH 能力，外部 AI 可接入（只读 / 管控 / 放行）
 - [x] 监控面板：服务器资源与状态可视化
 - [x] 告警渠道：邮件（SMTP）配置与测试连接
 
