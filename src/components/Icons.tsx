@@ -126,6 +126,13 @@ export const RefreshIcon = (p: IconProps) => (
   </Svg>
 );
 
+export const InspectIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M9 3h6M10 3v5.5L4.5 17a2 2 0 0 0 1.8 3h11.4a2 2 0 0 0 1.8-3L14 8.5V3" />
+    <path d="M7 14h10" />
+  </Svg>
+);
+
 export const ListIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="M8 6h13M8 12h13M8 18h13" />

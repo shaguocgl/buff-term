@@ -15,6 +15,10 @@ import type {
   McpServiceInput,
   MonitorSnapshot,
   TestResult,
+  InspectionReport,
+  InspectionProgressPayload,
+  InspectionDonePayload,
+  InspectionErrorPayload,
 } from './types';
 
 export const listHosts = () => invoke<Host[]>('list_hosts');
@@ -64,6 +68,36 @@ export const sftpRename = (host: Host, from: string, to: string) =>
 
 export const monitorSnapshot = (host: Host) =>
   invoke<MonitorSnapshot>('monitor_snapshot', { host });
+
+export const startInspection = (host: Host) =>
+  invoke<string>('start_inspection', { host });
+export const getInspectionReport = (id: string) =>
+  invoke<InspectionReport | null>('get_inspection_report', { id });
+export const listInspectionReports = (hostId?: string, limit?: number) =>
+  invoke<InspectionReport[]>('list_inspection_reports', {
+    hostId: hostId ?? null,
+    limit: limit ?? 30,
+  });
+export const cancelInspection = (id: string) =>
+  invoke<void>('cancel_inspection', { id });
+export const onInspectionProgress = (
+  cb: (payload: InspectionProgressPayload) => void,
+) =>
+  listen<InspectionProgressPayload>('inspection:progress', (event) =>
+    cb(event.payload),
+  );
+export const onInspectionDone = (
+  cb: (payload: InspectionDonePayload) => void,
+) =>
+  listen<InspectionDonePayload>('inspection:done', (event) =>
+    cb(event.payload),
+  );
+export const onInspectionError = (
+  cb: (payload: InspectionErrorPayload) => void,
+) =>
+  listen<InspectionErrorPayload>('inspection:error', (event) =>
+    cb(event.payload),
+  );
 
 export const getAlertSettings = () =>
   invoke<AlertSettings>('get_alert_settings');

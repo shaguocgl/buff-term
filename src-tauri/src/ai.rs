@@ -37,6 +37,24 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
+pub(crate) fn resolve_active_ai(db: &Db) -> Result<(AiProvider, String), String> {
+    let providers = db
+        .list_ai_providers()
+        .map_err(|e| format!("读取 AI 配置失败: {e}"))?;
+    let provider = providers
+        .into_iter()
+        .find(|p| p.enabled)
+        .ok_or_else(|| "未配置启用的 AI 平台，请先在左侧 AI 配置中添加".to_string())?;
+    let model = provider
+        .models
+        .iter()
+        .find(|m| m.is_active)
+        .or_else(|| provider.models.first())
+        .map(|m| m.model.clone())
+        .ok_or_else(|| "该平台未配置模型，请到 AI 配置中添加".to_string())?;
+    Ok((provider, model))
+}
+
 #[tauri::command]
 pub fn list_ai_providers(db: State<'_, Db>) -> Result<Vec<AiProvider>, String> {
     db.list_ai_providers()

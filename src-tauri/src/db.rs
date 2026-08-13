@@ -1,5 +1,6 @@
 use crate::models::{
-    AiModel, AiProvider, AiRule, AlertSettings, AuditLog, Host, McpRule, McpService,
+    AiModel, AiProvider, AiRule, AlertSettings, AuditLog, Host, InspectionReport, McpRule,
+    McpService,
 };
 use rusqlite::{params, Connection, Row};
 use rusqlite::OptionalExtension;
@@ -81,6 +82,24 @@ impl Db {
                  pattern    TEXT NOT NULL,
                  enabled    INTEGER NOT NULL DEFAULT 1,
                  created_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS inspection_reports (
+                 id            TEXT PRIMARY KEY,
+                 host_id       TEXT NOT NULL,
+                 host_label    TEXT NOT NULL,
+                 provider_id   TEXT NOT NULL,
+                 provider_name TEXT NOT NULL,
+                 model         TEXT NOT NULL,
+                 status        TEXT NOT NULL,
+                 risk_level    TEXT NOT NULL DEFAULT 'unknown',
+                 summary       TEXT NOT NULL DEFAULT '',
+                 markdown      TEXT NOT NULL DEFAULT '',
+                 html          TEXT NOT NULL DEFAULT '',
+                 email_sent    INTEGER NOT NULL DEFAULT 0,
+                 error         TEXT,
+                 created_at    INTEGER NOT NULL,
+                 finished_at   INTEGER,
+                 duration_ms   INTEGER
              );",
         )?;
         Ok(Self {
@@ -432,6 +451,110 @@ impl Db {
         conn.execute("DELETE FROM mcp_rules WHERE id=?1", params![id])?;
         Ok(())
     }
+
+    pub fn insert_inspection_report(&self, report: &InspectionReport) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO inspection_reports (
+                 id, host_id, host_label, provider_id, provider_name, model, status,
+                 risk_level, summary, markdown, html, email_sent, error,
+                 created_at, finished_at, duration_ms
+             ) VALUES (
+                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+             )",
+            params![
+                report.id,
+                report.host_id,
+                report.host_label,
+                report.provider_id,
+                report.provider_name,
+                report.model,
+                report.status,
+                report.risk_level,
+                report.summary,
+                report.markdown,
+                report.html,
+                report.email_sent as i64,
+                report.error,
+                report.created_at as i64,
+                report.finished_at.map(|v| v as i64),
+                report.duration_ms.map(|v| v as i64),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_inspection_report(&self, report: &InspectionReport) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE inspection_reports SET
+                status=?2, risk_level=?3, summary=?4, markdown=?5, html=?6,
+                email_sent=?7, error=?8, finished_at=?9, duration_ms=?10
+             WHERE id=?1",
+            params![
+                report.id,
+                report.status,
+                report.risk_level,
+                report.summary,
+                report.markdown,
+                report.html,
+                report.email_sent as i64,
+                report.error,
+                report.finished_at.map(|v| v as i64),
+                report.duration_ms.map(|v| v as i64),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_inspection_report(&self, id: &str) -> rusqlite::Result<Option<InspectionReport>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, host_id, host_label, provider_id, provider_name, model, status,
+                    risk_level, summary, markdown, html, email_sent, error,
+                    created_at, finished_at, duration_ms
+             FROM inspection_reports WHERE id=?1",
+            params![id],
+            row_to_inspection_report,
+        )
+        .optional()
+    }
+
+    pub fn list_inspection_reports(
+        &self,
+        host_id: Option<&str>,
+        limit: u32,
+    ) -> rusqlite::Result<Vec<InspectionReport>> {
+        let conn = self.conn.lock().unwrap();
+        let rows = match host_id {
+            Some(host_id) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, host_id, host_label, provider_id, provider_name, model, status,
+                            risk_level, summary, markdown, html, email_sent, error,
+                            created_at, finished_at, duration_ms
+                     FROM inspection_reports WHERE host_id=?1
+                     ORDER BY created_at DESC, rowid DESC LIMIT ?2",
+                )?;
+                let rows = stmt
+                    .query_map(params![host_id, limit as i64], row_to_inspection_report)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, host_id, host_label, provider_id, provider_name, model, status,
+                            risk_level, summary, markdown, html, email_sent, error,
+                            created_at, finished_at, duration_ms
+                     FROM inspection_reports ORDER BY created_at DESC, rowid DESC LIMIT ?1",
+                )?;
+                let rows = stmt
+                    .query_map(params![limit as i64], row_to_inspection_report)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            }
+        };
+        Ok(rows)
+    }
 }
 
 fn row_to_host(row: &Row<'_>) -> rusqlite::Result<Host> {
@@ -501,5 +624,26 @@ fn row_to_audit(row: &Row<'_>) -> rusqlite::Result<AuditLog> {
         status: row.get(9)?,
         result: row.get(10)?,
         duration_ms: row.get::<_, Option<i64>>(11)?.map(|v| v as u64),
+    })
+}
+
+fn row_to_inspection_report(row: &Row<'_>) -> rusqlite::Result<InspectionReport> {
+    Ok(InspectionReport {
+        id: row.get(0)?,
+        host_id: row.get(1)?,
+        host_label: row.get(2)?,
+        provider_id: row.get(3)?,
+        provider_name: row.get(4)?,
+        model: row.get(5)?,
+        status: row.get(6)?,
+        risk_level: row.get(7)?,
+        summary: row.get(8)?,
+        markdown: row.get(9)?,
+        html: row.get(10)?,
+        email_sent: row.get::<_, i64>(11)? != 0,
+        error: row.get(12)?,
+        created_at: row.get::<_, i64>(13)? as u64,
+        finished_at: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
+        duration_ms: row.get::<_, Option<i64>>(15)?.map(|v| v as u64),
     })
 }

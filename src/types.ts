@@ -154,3 +154,46 @@ export interface McpApprovalRequest {
   host_label: string;
   command: string;
 }
+
+export type InspectionStatus =
+  | 'running'
+  | 'success'
+  | 'failed'
+  | 'cancelled';
+
+export type InspectionRiskLevel = 'low' | 'medium' | 'high' | 'unknown';
+
+export interface InspectionReport {
+  id: string;
+  host_id: string;
+  host_label: string;
+  provider_id: string;
+  provider_name: string;
+  model: string;
+  status: InspectionStatus;
+  risk_level: InspectionRiskLevel;
+  summary: string;
+  markdown: string;
+  html: string;
+  email_sent: boolean;
+  error: string | null;
+  created_at: number;
+  finished_at: number | null;
+  duration_ms: number | null;
+}
+
+export interface InspectionProgressPayload {
+  report_id: string;
+  phase: 'collect' | 'analyze' | 'exec' | 'render' | 'email';
+  message: string;
+}
+
+export interface InspectionDonePayload {
+  report_id: string;
+  status: InspectionStatus;
+}
+
+export interface InspectionErrorPayload {
+  report_id: string;
+  message: string;
+}

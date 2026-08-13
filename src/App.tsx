@@ -15,6 +15,7 @@ import AlertModal from './components/AlertModal';
 import AuditLogModal from './components/AuditLogModal';
 import ChatPanel from './components/ChatPanel';
 import HostForm from './components/HostForm';
+import InspectionPanel from './components/InspectionPanel';
 import McpApprovalModal from './components/McpApprovalModal';
 import McpServiceModal from './components/McpServiceModal';
 import MonitorPanel from './components/MonitorPanel';
@@ -54,6 +55,7 @@ function App() {
   const [chatOpen, setChatOpen] = useState(true);
   const [sftpOpen, setSftpOpen] = useState(false);
   const [monitorOpen, setMonitorOpen] = useState(false);
+  const [inspectionOpen, setInspectionOpen] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingHost, setEditingHost] = useState<Host | null>(null);
   const [tabs, setTabs] = useState<Tab[]>([]);
@@ -154,6 +156,7 @@ function App() {
     setChatOpen(true);
     setSftpOpen(false);
     setMonitorOpen(false);
+    setInspectionOpen(false);
   };
 
   const closeTab = (key: number) => {
@@ -382,16 +385,30 @@ function App() {
                     chatOpen={chatOpen}
                     sftpOpen={sftpOpen}
                     monitorOpen={monitorOpen}
-                    onToggleChat={() => setChatOpen((v) => !v)}
+                    inspectionOpen={inspectionOpen}
+                    onToggleChat={() => {
+                      setChatOpen((v) => !v);
+                      setSftpOpen(false);
+                      setMonitorOpen(false);
+                      setInspectionOpen(false);
+                    }}
                     onToggleSftp={() => {
                       setSftpOpen((v) => !v);
                       setChatOpen(false);
                       setMonitorOpen(false);
+                      setInspectionOpen(false);
                     }}
                     onToggleMonitor={() => {
                       setMonitorOpen((v) => !v);
                       setChatOpen(false);
                       setSftpOpen(false);
+                      setInspectionOpen(false);
+                    }}
+                    onToggleInspection={() => {
+                      setInspectionOpen((v) => !v);
+                      setChatOpen(false);
+                      setSftpOpen(false);
+                      setMonitorOpen(false);
                     }}
                     onOpened={(key, id) => {
                       setTabs((prev) =>
@@ -453,6 +470,14 @@ function App() {
                   key={`mon-${activeTab.sessionId}`}
                   host={activeTab.host}
                   onClose={() => setMonitorOpen(false)}
+                />
+              )}
+
+              {activeTab && activeTab.sessionId !== null && inspectionOpen && (
+                <InspectionPanel
+                  key={`inspect-${activeTab.sessionId}`}
+                  host={activeTab.host}
+                  onClose={() => setInspectionOpen(false)}
                 />
               )}
             </div>

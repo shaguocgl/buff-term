@@ -14,6 +14,7 @@ import type { Host } from '../types';
 import {
   ActivityIcon,
   FolderIcon,
+  InspectIcon,
   PowerIcon,
   RefreshIcon,
   SparklesIcon,
@@ -25,9 +26,11 @@ interface Props {
   chatOpen: boolean;
   sftpOpen: boolean;
   monitorOpen: boolean;
+  inspectionOpen: boolean;
   onToggleChat: () => void;
   onToggleSftp: () => void;
   onToggleMonitor: () => void;
+  onToggleInspection: () => void;
   onOpened: (tabKey: number, sessionId: number) => void;
   onFailed: (tabKey: number, message: string) => void;
   onExited: (tabKey: number) => void;
@@ -48,9 +51,11 @@ export default function TerminalView({
   chatOpen,
   sftpOpen,
   monitorOpen,
+  inspectionOpen,
   onToggleChat,
   onToggleSftp,
   onToggleMonitor,
+  onToggleInspection,
   onOpened,
   onFailed,
   onExited,
@@ -269,6 +274,12 @@ export default function TerminalView({
             onClick={onToggleMonitor}
           >
             <ActivityIcon size={14} /> 监控
+          </button>
+          <button
+            className={`btn ai-toggle${inspectionOpen ? ' active' : ''}`}
+            onClick={onToggleInspection}
+          >
+            <InspectIcon size={14} /> 巡检
           </button>
           <button className="btn disconnect" onClick={handleDisconnect}>
             <PowerIcon size={14} /> 断开

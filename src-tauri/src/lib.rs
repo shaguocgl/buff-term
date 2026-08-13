@@ -5,6 +5,7 @@ mod audit;
 mod credentials;
 mod db;
 mod hosts;
+mod inspection;
 mod mcp;
 mod models;
 mod monitor;
@@ -37,6 +38,7 @@ pub fn run() {
                 io::Error::new(io::ErrorKind::Other, format!("打开数据库失败: {e}"))
             })?;
             app.manage(db);
+            app.manage(inspection::InspectionManager::default());
             app.manage(mcp::McpServiceManager::default());
             app.manage(mcp::ApprovalRegistry::default());
             // 若上次退出前开启了 MCP 服务，启动时自动恢复
@@ -79,6 +81,10 @@ pub fn run() {
             sftp::sftp_mkdir,
             sftp::sftp_rename,
             monitor::monitor_snapshot,
+            inspection::start_inspection,
+            inspection::get_inspection_report,
+            inspection::list_inspection_reports,
+            inspection::cancel_inspection,
             alert::get_alert_settings,
             alert::save_alert_settings,
             alert::test_alert_settings,

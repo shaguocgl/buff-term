@@ -76,6 +76,26 @@ pub struct AuditLog {
     pub duration_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InspectionReport {
+    pub id: String,
+    pub host_id: String,
+    pub host_label: String,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub model: String,
+    pub status: String,
+    pub risk_level: String,
+    pub summary: String,
+    pub markdown: String,
+    pub html: String,
+    pub email_sent: bool,
+    pub error: Option<String>,
+    pub created_at: u64,
+    pub finished_at: Option<u64>,
+    pub duration_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AlertSettings {
     pub smtp_host: Option<String>,
