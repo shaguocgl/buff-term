@@ -48,9 +48,9 @@ impl SessionManager {
         cols: u16,
         rows: u16,
     ) -> Result<u32, String> {
-        // 防御：异常/过窄尺寸会导致动态输出（docker compose 等）每帧换行堆叠
-        let cols = cols.clamp(20, 400);
-        let rows = rows.clamp(5, 200);
+        // 防御：最小 100 列，避免动态输出（docker compose 等）在窄列下换行堆叠
+        let cols = cols.clamp(100, 400);
+        let rows = rows.clamp(10, 200);
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -261,8 +261,8 @@ impl SessionManager {
     }
 
     pub fn resize(&self, id: u32, cols: u16, rows: u16) -> Result<(), String> {
-        let cols = cols.clamp(20, 400);
-        let rows = rows.clamp(5, 200);
+        let cols = cols.clamp(100, 400);
+        let rows = rows.clamp(10, 200);
         let sessions = self.sessions.lock().unwrap();
         let session = sessions.get(&id).ok_or("会话不存在")?;
         session

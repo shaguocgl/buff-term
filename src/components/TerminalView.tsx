@@ -35,8 +35,9 @@ interface Props {
 }
 
 function normalizeDims(dims: { cols: number; rows: number } | undefined) {
-  // 过窄（<60 列）时直接回退默认宽度，避免动态输出（docker compose 等）每帧换行堆叠
-  const cols = dims && dims.cols >= 60 && dims.cols <= 400 ? dims.cols : 100;
+  // docker compose 动态进度单行约 100 字符，列宽不足会换行堆叠，
+  // 因此最小列宽固定为 100（窄窗口下内容不换行，超出部分裁剪）
+  const cols = dims && dims.cols >= 100 && dims.cols <= 400 ? dims.cols : 100;
   const rows = dims && dims.rows >= 10 && dims.rows <= 200 ? dims.rows : 30;
   return { cols, rows };
 }
@@ -74,15 +75,17 @@ export default function TerminalView({
   onExitedRef.current = onExited;
   onDisconnectRef.current = onDisconnect;
 
-  const sendSize = useCallback(() => {
-    const sid = sessionIdRef.current;
+  const applyDims = useCallback(() => {
+    const term = termRef.current;
     const fit = fitRef.current;
-    if (sid === null || !fit) return;
-    const dims = fit.proposeDimensions();
-    if (dims) {
-      const { cols, rows } = normalizeDims(dims);
-      resizeSession(sid, cols, rows).catch(() => {});
+    if (!term || !fit) return;
+    const { cols, rows } = normalizeDims(fit.proposeDimensions());
+    // 保持 xterm 与 PTY 列宽一致，避免窄容器下 fit 把 term 缩到 100 以下
+    if (term.cols !== cols || term.rows !== rows) {
+      term.resize(cols, rows);
     }
+    const sid = sessionIdRef.current;
+    if (sid !== null) resizeSession(sid, cols, rows).catch(() => {});
   }, []);
 
   const connect = useCallback(async () => {
@@ -99,8 +102,8 @@ export default function TerminalView({
     setConnecting(false);
     setExited(false);
     onOpenedRef.current(tabKey, id);
-    sendSize();
-  }, [host, tabKey, sendSize]);
+    applyDims();
+  }, [host, tabKey, applyDims]);
 
   const connectRef = useRef(connect);
   connectRef.current = connect;
@@ -124,6 +127,7 @@ export default function TerminalView({
     term.loadAddon(fit);
     term.open(container);
     fit.fit();
+    applyDims();
     term.focus();
     termRef.current = term;
     fitRef.current = fit;
@@ -150,11 +154,11 @@ export default function TerminalView({
       inputBufRef.current.push(...bytes);
     });
     const inputTimer = window.setInterval(flushInput, 16);
-    term.onResize(sendSize);
+    term.onResize(applyDims);
 
     const observer = new ResizeObserver(() => {
       fit.fit();
-      sendSize();
+      applyDims();
     });
     observer.observe(container);
 
@@ -212,7 +216,7 @@ export default function TerminalView({
       termRef.current = null;
       fitRef.current = null;
     };
-  }, [host, tabKey, sendSize]);
+  }, [host, tabKey, applyDims]);
 
   const handleDisconnect = () => {
     const sid = sessionIdRef.current;
