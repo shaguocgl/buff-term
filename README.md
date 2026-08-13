@@ -114,6 +114,25 @@ npm run tauri dev
 npm run tauri build
 ```
 
+常用安装包快捷命令：
+
+```bash
+# macOS DMG
+npm run build:mac
+
+# Windows NSIS EXE
+npm run build:win
+```
+
+产物位置：
+
+```text
+src-tauri/target/release/bundle/dmg/
+src-tauri/target/release/bundle/nsis/
+```
+
+> DMG 需要在 macOS 上构建，EXE 建议在 Windows 上构建；打包前会先执行前端构建与 Rust 编译。
+
 ## 📖 使用说明
 
 1. **添加主机**：左侧「新建主机」，填写地址、用户名，选择密钥或密码认证（密码会存入系统钥匙串）；也可以点「导入 ~/.ssh/config」一键导入。
