@@ -509,6 +509,8 @@ button {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  container-type: inline-size;
+  container-name: terminal;
 }
 
 .terminal-header {
@@ -2350,6 +2352,17 @@ input::placeholder {
 .btn.disconnect:hover {
   color: var(--danger);
   border-color: rgba(248, 113, 113, 0.35);
+}
+
+@container terminal (max-width: 720px) {
+  .terminal-header .btn {
+    width: 38px;
+    padding: 6px 0;
+  }
+
+  .toolbar-label {
+    display: none;
+  }
 }
 
 @media (max-width: 1180px) {

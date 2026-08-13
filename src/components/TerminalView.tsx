@@ -245,7 +245,7 @@ export default function TerminalView({
 
   return (
     <div className="terminal-wrap">
-      <div className="terminal-header" data-tauri-drag-region>
+      <div className="terminal-header" data-drag-region>
         {exited && !connecting && (
           <button className="btn reconnect" onClick={handleReconnect}>
             <RefreshIcon size={13} /> 重连

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   deleteHost,
   importSshConfig,
@@ -105,6 +106,20 @@ function App() {
   }, [showToast]);
 
   useEffect(() => {
+    const onMouseDown = (event: MouseEvent) => {
+      if (event.button !== 0) return;
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+      if (target.closest('button, input, textarea, select, .tab')) return;
+      if (target.closest('[data-drag-region]')) {
+        getCurrentWindow().startDragging();
+      }
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    return () => document.removeEventListener('mousedown', onMouseDown);
+  }, []);
+
+  useEffect(() => {
     let un: (() => void) | undefined;
     let cancelled = false;
     onMcpApprovalRequest((req) => setMcpApproval(req)).then((fn) => {
@@ -203,7 +218,7 @@ function App() {
   return (
     <div className="app">
       <aside className="sidebar">
-        <div className="brand" data-tauri-drag-region>
+        <div className="brand" data-drag-region>
           <div className="brand-mark">
             <TerminalIcon size={18} />
           </div>
@@ -333,7 +348,7 @@ function App() {
       <main className="main">
         {tabs.length > 0 ? (
           <div className="workbench">
-            <div className="tab-bar" data-tauri-drag-region>
+            <div className="tab-bar" data-drag-region>
               {tabs.map((tab) => (
                 <div
                   key={tab.key}
