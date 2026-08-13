@@ -335,6 +335,16 @@ async fn run_agent_loop(
             }
         }
 
+        // 丢弃空壳工具调用：既没有工具名也没有任何有效参数（部分模型会输出空的占位调用），
+        // 这类调用既无法推断也不能执行，直接忽略，避免回填“未知工具”错误让模型原地打转
+        tool_calls.retain(|_, acc| {
+            let has_name = !acc.name.trim().is_empty();
+            let has_args = serde_json::from_str::<serde_json::Value>(&acc.args)
+                .map(|v| v.as_object().map(|m| !m.is_empty()).unwrap_or(false))
+                .unwrap_or(false);
+            has_name || has_args
+        });
+
         if tool_calls.is_empty() {
             if content.is_empty() {
                 content = "（模型未返回内容）".to_string();
