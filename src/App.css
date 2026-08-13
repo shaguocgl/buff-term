@@ -1651,6 +1651,107 @@ input::placeholder {
   background: linear-gradient(90deg, #f87171, #ef4444);
 }
 
+.monitor-charts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.monitor-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+
+.monitor-chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.monitor-chart-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.monitor-chart-label i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.monitor-chart-label i.dot-cpu {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(109, 141, 255, 0.18);
+}
+
+.monitor-chart-label i.dot-mem {
+  background: var(--accent-2);
+  box-shadow: 0 0 0 3px rgba(56, 200, 232, 0.18);
+}
+
+.monitor-chart-value {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.monitor-chart-svg {
+  width: 100%;
+  height: 72px;
+  display: block;
+}
+
+.monitor-chart-grid {
+  stroke: rgba(148, 163, 184, 0.1);
+  stroke-width: 0.8;
+  vector-effect: non-scaling-stroke;
+}
+
+.chart-line {
+  fill: none;
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.chart-line-cpu {
+  stroke: var(--accent);
+}
+
+.chart-line-mem {
+  stroke: var(--accent-2);
+}
+
+.chart-dot {
+  vector-effect: non-scaling-stroke;
+}
+
+.chart-dot-cpu {
+  fill: var(--accent);
+}
+
+.chart-dot-mem {
+  fill: var(--accent-2);
+}
+
+.monitor-chart-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
 .monitor-section-title {
   font-size: 12px;
   font-weight: 600;

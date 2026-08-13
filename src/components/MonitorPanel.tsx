@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { monitorSnapshot } from '../api';
 import type { Host, MonitorSnapshot } from '../types';
 import { ActivityIcon, RefreshIcon, XIcon } from './Icons';
@@ -6,6 +6,12 @@ import { ActivityIcon, RefreshIcon, XIcon } from './Icons';
 interface Props {
   host: Host;
   onClose: () => void;
+}
+
+interface HistoryPoint {
+  ts: number;
+  cpu: number;
+  mem: number;
 }
 
 function Gauge({
@@ -34,17 +40,89 @@ function Gauge({
   );
 }
 
+function HistoryChart({
+  label,
+  points,
+  value,
+  color,
+}: {
+  label: string;
+  points: { ts: number; value: number }[];
+  value: number;
+  color: 'cpu' | 'mem';
+}) {
+  const W = 320;
+  const H = 96;
+  const PAD = 4;
+  const now = Date.now() / 1000;
+  const start = now - 3600; // 最近 1 小时窗口
+  const visible = points.filter((p) => p.ts >= start);
+  const last = visible.length > 0 ? visible[visible.length - 1] : null;
+
+  const x = (ts: number) => PAD + ((ts - start) / 3600) * (W - PAD * 2);
+  const y = (v: number) => H - PAD - (Math.min(100, Math.max(0, v)) / 100) * (H - PAD * 2);
+
+  const line =
+    visible.length > 1
+      ? visible.map((p) => `${x(p.ts).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ')
+      : '';
+  const dot = last ? `${x(last.ts).toFixed(1)},${y(last.value).toFixed(1)}` : '';
+
+  return (
+    <div className="monitor-chart">
+      <div className="monitor-chart-head">
+        <span className="monitor-chart-label">
+          <i className={`dot-${color}`} /> {label}
+        </span>
+        <span className="monitor-chart-value">{value.toFixed(1)}%</span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="monitor-chart-svg">
+        {[0, 25, 50, 75, 100].map((g) => (
+          <line
+            key={g}
+            x1={PAD}
+            x2={W - PAD}
+            y1={y(g)}
+            y2={y(g)}
+            className="monitor-chart-grid"
+          />
+        ))}
+        {visible.length > 1 && (
+          <polyline points={line} className={`chart-line chart-line-${color}`} />
+        )}
+        {dot && <circle cx={x(last!.ts)} cy={y(last!.value)} r={2.5} className={`chart-dot chart-dot-${color}`} />}
+      </svg>
+      <div className="monitor-chart-axis">
+        <span>1小时前</span>
+        <span>30分钟前</span>
+        <span>现在</span>
+      </div>
+    </div>
+  );
+}
+
 export default function MonitorPanel({ host, onClose }: Props) {
   const [snap, setSnap] = useState<MonitorSnapshot | null>(null);
+  const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const firstLoad = useRef(true);
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      setSnap(await monitorSnapshot(host));
+      const s = await monitorSnapshot(host);
+      setSnap(s);
+      setHistory((prev) => {
+        const next = [...prev, { ts: Date.now() / 1000, cpu: s.cpu_percent, mem: s.mem.percent }];
+        // 只保留最近 1 小时
+        const cutoff = Date.now() / 1000 - 3600;
+        return next.filter((p) => p.ts >= cutoff);
+      });
     } catch (e) {
       setError(String(e));
+    } finally {
+      firstLoad.current = false;
     }
   }, [host]);
 
@@ -89,19 +167,22 @@ export default function MonitorPanel({ host, onClose }: Props) {
               </span>
             </div>
 
-            <div className="gauges">
-              <Gauge
+            <div className="monitor-charts">
+              <HistoryChart
                 label="CPU"
+                points={history.map((p) => ({ ts: p.ts, value: p.cpu }))}
                 value={snap.cpu_percent}
-                display={`${snap.cpu_percent.toFixed(1)}%`}
+                color="cpu"
               />
-              <Gauge
+              <HistoryChart
                 label="内存"
+                points={history.map((p) => ({ ts: p.ts, value: p.mem }))}
                 value={snap.mem.percent}
-                display={`${(snap.mem.used_mb / 1024).toFixed(1)}G / ${(
-                  snap.mem.total_mb / 1024
-                ).toFixed(1)}G`}
+                color="mem"
               />
+            </div>
+
+            <div className="gauges">
               {snap.disks.map((d) => (
                 <Gauge
                   key={d.mount}

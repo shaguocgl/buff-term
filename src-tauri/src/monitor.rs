@@ -70,8 +70,8 @@ pub async fn collect_russh(
 const MONITOR_SCRIPT: &str = r#"
 echo "BEGIN"
 echo "LOAD $(cat /proc/loadavg 2>/dev/null | cut -d' ' -f1-3)"
-echo "CPU $(p1=$(grep '^cpu ' /proc/stat); sleep 0.3; p2=$(grep '^cpu ' /proc/stat); awk -v a=\"$p1\" -v b=\"$p2\" 'BEGIN { split(a,A); split(b,B); t1=0; t2=0; for(i=2;i<=9;i++){t1+=A[i]; t2+=B[i]} u1=t1-A[5]-A[6]; u2=t2-B[5]-B[6]; d=t2-t1; if(d<=0){print 0; exit} printf \"%.1f\n\", (u2-u1)/d*100 }')"
-echo "MEM $(free -m 2>/dev/null | awk '/Mem:/{print $2, $3}')"
+echo "CPU $(p1=$(grep '^cpu ' /proc/stat); sleep 0.3; p2=$(grep '^cpu ' /proc/stat); awk -v a=\"$p1\" -v b=\"$p2\" 'BEGIN { split(a,A); split(b,B); u1=A[2]+A[3]+A[4]; u2=B[2]+B[3]+B[4]; d1=u1+A[5]; d2=u2+B[5]; d=d2-d1; if(d<=0){print 0; exit} printf \"%.1f\n\", (u2-u1)/d*100 }')"
+echo "MEM $(free -m 2>/dev/null | awk '/Mem:/{print $2, $3, $7}')"
 echo "DISK"
 df -hP 2>/dev/null | awk 'NR>1 {print $6 "|" $1 "|" $2 "|" $3}'
 echo "TOP"
@@ -135,15 +135,17 @@ fn parse(text: &str, host: &Host) -> Result<MonitorSnapshot, String> {
                     snap.cpu_percent = v.trim().parse().unwrap_or(0.0);
                 } else if let Some(v) = line.strip_prefix("MEM ") {
                     let nums: Vec<&str> = v.split_whitespace().collect();
-                    if nums.len() == 2 {
-                        if let (Ok(t), Ok(u)) =
-                            (nums[0].parse::<u64>(), nums[1].parse::<u64>())
+                    // free -m 输出：total used ... available；used 采用 total - available（htop 口径）
+                    if nums.len() >= 3 {
+                        if let (Ok(t), Ok(a)) =
+                            (nums[0].parse::<u64>(), nums[2].parse::<u64>())
                         {
+                            let used = t.saturating_sub(a);
                             snap.mem = MemInfo {
                                 total_mb: t,
-                                used_mb: u,
+                                used_mb: used,
                                 percent: if t > 0 {
-                                    (u as f64 / t as f64) * 100.0
+                                    (used as f64 / t as f64) * 100.0
                                 } else {
                                     0.0
                                 },
