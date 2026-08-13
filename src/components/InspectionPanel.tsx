@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   cancelInspection,
+  getAlertSettings,
   getInspectionReport,
   listInspectionReports,
   onInspectionDone,
@@ -39,7 +40,9 @@ export default function InspectionPanel({ host, onClose }: Props) {
   const [report, setReport] = useState<InspectionReport | null>(null);
   const [history, setHistory] = useState<InspectionReport[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [emailConfigured, setEmailConfigured] = useState<boolean | null>(null);
   const currentIdRef = useRef<string | null>(null);
+  const runningRef = useRef(false);
 
   const refreshHistory = useCallback(async () => {
     try {
@@ -71,6 +74,8 @@ export default function InspectionPanel({ host, onClose }: Props) {
   );
 
   const begin = useCallback(async () => {
+    if (runningRef.current) return;
+    runningRef.current = true;
     setStatus('running');
     setReport(null);
     setError(null);
@@ -83,11 +88,20 @@ export default function InspectionPanel({ host, onClose }: Props) {
     } catch (e) {
       setStatus('failed');
       setError(String(e));
+    } finally {
+      runningRef.current = false;
     }
   }, [host]);
 
   useEffect(() => {
     refreshHistory().catch(() => {});
+    getAlertSettings()
+      .then((s) => {
+        setEmailConfigured(
+          !!s.smtp_host?.trim() && !!s.smtp_to?.trim(),
+        );
+      })
+      .catch(() => setEmailConfigured(false));
   }, [refreshHistory]);
 
   useEffect(() => {
@@ -160,9 +174,22 @@ export default function InspectionPanel({ host, onClose }: Props) {
               <StopIcon size={14} />
             </button>
           )}
-          <button className="icon-btn" title="重新巡检" onClick={begin}>
-            <RefreshIcon size={14} />
-          </button>
+          <div
+            className={`inspection-mail-state${emailConfigured === false ? ' warn' : ''}`}
+            title={
+              emailConfigured === false
+                ? '未配置邮件通知，巡检完成后不会发送邮件报告'
+                : emailConfigured === true
+                  ? '邮件通知已配置'
+                  : '正在检查邮件通知配置'
+            }
+          >
+            {emailConfigured === false
+              ? '未配置邮件通知'
+              : emailConfigured === true
+                ? '邮件通知已配置'
+                : '邮件通知检查中'}
+          </div>
           <button className="icon-btn" title="关闭" onClick={onClose}>
             <XIcon size={14} />
           </button>

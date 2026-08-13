@@ -56,10 +56,10 @@ KeyWisp Agent 是一款桌面端 SSH 管理工具，内置**自研的 AI Agent �
 - 输出脱敏：命令输出进入模型前过滤 AK/SK、密钥、口令、私钥块等敏感信息
 - 私钥与 API Key 永不进入模型上下文，认证由后端注入
 
-### 监控与告警
+### 监控与通知
 
 - 监控面板：CPU / 内存 / 磁盘仪表盘 + 负载 + TOP 进程，每 5 秒自动刷新
-- 告警渠道：邮件（SMTP）发送渠道配置，支持测试连接
+- 通知配置：邮件（SMTP）发送渠道配置，支持测试连接
 
 ## 🧱 技术栈
 
@@ -141,7 +141,7 @@ src-tauri/src/         Rust 后端
   credentials.rs       系统钥匙串凭据 + 内存缓存
   audit.rs             审计日志查询
   monitor.rs           资源快照采集（CPU / 内存 / 磁盘 / 负载 / TOP 进程）
-  alert.rs             告警渠道（邮件 SMTP 配置与测试）
+  alert.rs             通知配置（邮件 SMTP 配置与测试）
   mcp.rs               对外 MCP 服务（HTTP + token + 权限模式）
   sftp.rs              SFTP 文件操作（russh-sftp）
   db.rs                SQLite（主机、AI 配置、规则、审计）

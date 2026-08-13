@@ -68,7 +68,7 @@ export default function AlertModal({ onClose }: Props) {
 
   return (
     <Modal
-      title="告警渠道"
+      title="通知配置"
       subtitle="当前支持邮件（SMTP）渠道，配置后可发送通知邮件"
       className="modal-wide"
       onClose={onClose}

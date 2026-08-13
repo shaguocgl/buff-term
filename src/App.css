@@ -3483,6 +3483,23 @@ input::placeholder {
   gap: 2px;
 }
 
+.inspection-mail-state {
+  margin-right: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  color: var(--success);
+  background: rgba(52, 211, 153, 0.08);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.inspection-mail-state.warn {
+  color: var(--warn);
+  border-color: rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.08);
+}
+
 .inspection-body {
   flex: 1;
   min-height: 0;

@@ -308,7 +308,7 @@ function App() {
             <WrenchIcon size={15} /> MCP 服务
           </button>
           <button className="log-entry" onClick={() => setShowAlerts(true)}>
-            <BellIcon size={15} /> 告警渠道
+            <BellIcon size={15} /> 通知配置
           </button>
           <button className="log-entry" onClick={() => setShowLogs(true)}>
             <ListIcon size={15} /> 操作日志

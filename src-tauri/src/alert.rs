@@ -1,4 +1,4 @@
-//! 告警渠道：当前仅支持邮件（SMTP）配置与测试连接。
+//! 通知配置：当前仅支持邮件（SMTP）配置与测试连接。
 
 use crate::db::Db;
 use crate::models::AlertSettings;
