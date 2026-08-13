@@ -151,7 +151,7 @@ async fn connect(host: &Host) -> Result<Handle<ClientHandler>, String> {
         .map_err(|_| "SSH 连接超时（15 秒）".to_string())?
 }
 
-async fn do_connect(
+pub(crate) async fn do_connect(
     host: &Host,
     password_override: Option<String>,
 ) -> Result<Handle<ClientHandler>, String> {

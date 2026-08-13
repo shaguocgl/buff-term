@@ -125,37 +125,4 @@ impl Host {
         format!("{}@{}:{}", self.username, self.address, self.port)
     }
 
-    /// 构造系统 OpenSSH 参数（M1 阶段）
-    pub fn ssh_args(&self) -> Vec<String> {
-        let mut args = vec![
-            "-F".to_string(),
-            null_config_path().to_string(),
-            "-tt".to_string(),
-            "-o".to_string(),
-            // 不转发本地 locale 变量，避免远端缺少 C.UTF-8 等 locale 时产生警告
-            "SendEnv -LC_* -LANG".to_string(),
-            "-o".to_string(),
-            "ConnectTimeout=10".to_string(),
-            "-o".to_string(),
-            "ServerAliveInterval=15".to_string(),
-            "-o".to_string(),
-            "ServerAliveCountMax=3".to_string(),
-            "-p".to_string(),
-            self.port.to_string(),
-        ];
-        if let Some(key) = &self.key_path {
-            if !key.trim().is_empty() {
-                args.push("-i".to_string());
-                args.push(key.clone());
-            }
-        }
-        if let Some(jump) = &self.proxy_jump {
-            if !jump.trim().is_empty() {
-                args.push("-J".to_string());
-                args.push(jump.clone());
-            }
-        }
-        args.push(format!("{}@{}", self.username, self.address));
-        args
-    }
 }
