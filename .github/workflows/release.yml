@@ -1,0 +1,68 @@
+name: Publish desktop app
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS universal
+            os: macos-latest
+            args: --target universal-apple-darwin --bundles dmg
+          - name: Windows x64
+            os: windows-latest
+            args: --bundles nsis
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add macOS targets
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Cache Rust build artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Ensure the tag matches the app version
+        if: github.ref_type == 'tag'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          node -e "const fs=require('fs'); const version=JSON.parse(fs.readFileSync('package.json')).version; const tauri=JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json')).version; const expected='v'+version; if (version !== tauri || process.env.RELEASE_TAG !== expected) { throw new Error('Tag must be '+expected+' and package.json / tauri.conf.json versions must match.'); }"
+
+      - name: Build installers and publish GitHub Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: KeyWisp Agent v__VERSION__
+          releaseBody: See the assets below to download and install this version.
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

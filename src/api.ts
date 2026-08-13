@@ -15,6 +15,7 @@ import type {
   McpServiceInput,
   MonitorSnapshot,
   TestResult,
+  UpdateInfo,
   InspectionReport,
   InspectionProgressPayload,
   InspectionDonePayload,
@@ -47,6 +48,8 @@ export const deleteAiRule = (id: string) =>
   invoke<void>('delete_ai_rule', { id });
 export const listAuditLogs = (limit?: number) =>
   invoke<AuditLog[]>('list_audit_logs', { limit });
+export const checkForUpdate = () => invoke<UpdateInfo>('check_for_update');
+export const getAppVersion = () => invoke<string>('get_app_version');
 
 export interface SftpResult {
   ok: boolean;

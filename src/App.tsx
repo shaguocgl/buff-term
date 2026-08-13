@@ -7,7 +7,9 @@ import {
 } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
+  checkForUpdate,
   deleteHost,
+  getAppVersion,
   importSshConfig,
   listAiProviders,
   listHosts,
@@ -16,7 +18,7 @@ import {
   onSessionNotice,
 } from './api';
 import './App.css';
-import type { AiProvider, Host, McpApprovalRequest } from './types';
+import type { AiProvider, Host, McpApprovalRequest, UpdateInfo } from './types';
 import AIConfigModal from './components/AIConfigModal';
 import AlertModal from './components/AlertModal';
 import AuditLogModal from './components/AuditLogModal';
@@ -39,6 +41,7 @@ import {
   PencilIcon,
   ServerIcon,
   SparklesIcon,
+  RefreshIcon,
   TerminalIcon,
   TrashIcon,
   WrenchIcon,
@@ -70,6 +73,9 @@ function App() {
   const [activeKey, setActiveKey] = useState<number | null>(null);
   const [loadingHostId, setLoadingHostId] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
   const toastSeq = useRef(0);
   const tabSeq = useRef(0);
 
@@ -98,6 +104,10 @@ function App() {
     refresh().catch((e) => showToast('error', String(e)));
     refreshAi().catch(() => {});
   }, [refresh, refreshAi, showToast]);
+
+  useEffect(() => {
+    getAppVersion().then(setAppVersion).catch(() => {});
+  }, []);
 
   useEffect(() => {
     let un: (() => void) | undefined;
@@ -217,6 +227,31 @@ function App() {
     }
   };
 
+  const handleUpdateCheck = async () => {
+    if (updateInfo?.update_available) {
+      window.open(updateInfo.release_url, '_blank', 'noopener,noreferrer');
+      return;
+    }
+    setCheckingUpdate(true);
+    try {
+      const next = await checkForUpdate();
+      setUpdateInfo(next);
+      setAppVersion(next.current_version);
+      showToast(
+        'info',
+        !next.release_found
+          ? 'GitHub 尚未发布可下载版本。'
+          : next.update_available
+          ? `发现新版本 v${next.latest_version}，点击“下载更新”前往 GitHub。`
+          : '当前已是最新版本。',
+      );
+    } catch (e) {
+      showToast('error', String(e));
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -330,6 +365,33 @@ function App() {
           <button className="log-entry" onClick={() => setShowLogs(true)}>
             <ListIcon size={15} /> 操作日志
           </button>
+          <div className="version-entry">
+            <button
+              className={`log-entry version-check${
+                updateInfo?.update_available ? ' update-ready' : ''
+              }`}
+              onClick={handleUpdateCheck}
+              disabled={checkingUpdate}
+              title={
+                updateInfo?.update_available
+                  ? `下载 v${updateInfo.latest_version}`
+                  : '检查 GitHub 最新发布版本'
+              }
+            >
+              <RefreshIcon size={15} />
+              <span>
+                {checkingUpdate
+                  ? '正在检查更新…'
+                  : updateInfo?.update_available
+                    ? `下载更新 v${updateInfo.latest_version}`
+                    : '检查更新'}
+              </span>
+            </button>
+            <span className="version-current">
+              当前版本 v{appVersion ?? '—'}
+              {updateInfo?.release_found && !updateInfo.update_available && ' · 已是最新'}
+            </span>
+          </div>
           <button className="ai-entry" onClick={() => setShowAi(true)}>
             <span className="ai-entry-icon">
               <SparklesIcon size={16} />

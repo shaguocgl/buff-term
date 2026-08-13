@@ -13,6 +13,7 @@ mod russh;
 mod session;
 mod sftp;
 mod sshconfig;
+mod update;
 
 use db::Db;
 use agent::AgentManager;
@@ -106,7 +107,9 @@ pub fn run() {
             session::open_session,
             session::close_session,
             session::session_input,
-            session::session_resize
+            session::session_resize,
+            update::check_for_update,
+            update::get_app_version
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
