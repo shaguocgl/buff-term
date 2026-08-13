@@ -1617,12 +1617,43 @@ input::placeholder {
 }
 
 .gauge-label {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--muted);
 }
 
 .gauge-value {
+  flex: none;
+  margin-left: 10px;
+  white-space: nowrap;
   font-family: var(--mono);
   color: var(--text);
+}
+
+.gauge-label:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 0;
+  top: 100%;
+  margin-top: 5px;
+  max-width: 360px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  background: var(--panel-3);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: normal;
+  word-break: break-all;
+  pointer-events: none;
+  z-index: 20;
 }
 
 .gauge-track {

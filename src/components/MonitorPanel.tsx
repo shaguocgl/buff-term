@@ -27,7 +27,9 @@ function Gauge({
   return (
     <div className="gauge">
       <div className="gauge-head">
-        <span className="gauge-label">{label}</span>
+        <span className="gauge-label" data-tooltip={label}>
+          {label}
+        </span>
         <span className="gauge-value">{display}</span>
       </div>
       <div className="gauge-track">
