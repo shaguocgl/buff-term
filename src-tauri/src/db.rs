@@ -31,7 +31,6 @@ impl Db {
                  id         TEXT PRIMARY KEY,
                  name       TEXT NOT NULL,
                  base_url   TEXT NOT NULL,
-                 model      TEXT NOT NULL DEFAULT '',
                  protocol   TEXT NOT NULL DEFAULT 'openai-compatible',
                  enabled    INTEGER NOT NULL DEFAULT 0,
                  created_at INTEGER NOT NULL
@@ -64,14 +63,10 @@ impl Db {
                  result         TEXT,
                  duration_ms    INTEGER
              );
-             DROP TABLE IF EXISTS alerts;
              CREATE TABLE IF NOT EXISTS settings (
                  key   TEXT PRIMARY KEY,
                  value TEXT NOT NULL
              );
-             DROP TABLE IF EXISTS inspections;
-             DROP TABLE IF EXISTS inspection_runs;
-             DROP TABLE IF EXISTS mcp_servers;
              CREATE TABLE IF NOT EXISTS mcp_service (
                  id             INTEGER PRIMARY KEY CHECK (id = 1),
                  enabled        INTEGER NOT NULL DEFAULT 0,
@@ -88,7 +83,6 @@ impl Db {
                  created_at INTEGER NOT NULL
              );",
         )?;
-        migrate_ai_models(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -182,8 +176,8 @@ impl Db {
     pub fn insert_ai_provider(&self, p: &AiProvider) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO ai_providers (id, name, base_url, model, protocol, enabled, created_at)
-             VALUES (?1, ?2, ?3, '', ?4, ?5, ?6)",
+            "INSERT INTO ai_providers (id, name, base_url, protocol, enabled, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 p.id,
                 p.name,
@@ -438,37 +432,6 @@ impl Db {
         conn.execute("DELETE FROM mcp_rules WHERE id=?1", params![id])?;
         Ok(())
     }
-}
-
-/// 旧版本只有一个 model 字段，迁移到 ai_models 表
-fn migrate_ai_models(conn: &Connection) -> rusqlite::Result<()> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM ai_models",
-        [],
-        |row| row.get(0),
-    )?;
-    if count > 0 {
-        return Ok(());
-    }
-    let mut stmt = conn.prepare(
-        "SELECT id, model FROM ai_providers WHERE model IS NOT NULL AND model != ''",
-    )?;
-    let rows: Vec<(String, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    for (provider_id, model) in rows {
-        conn.execute(
-            "INSERT INTO ai_models (id, provider_id, label, model, is_active, sort)
-             VALUES (?1, ?2, ?3, ?4, 1, 0)",
-            params![
-                uuid::Uuid::new_v4().to_string(),
-                provider_id,
-                model,
-                model,
-            ],
-        )?;
-    }
-    Ok(())
 }
 
 fn row_to_host(row: &Row<'_>) -> rusqlite::Result<Host> {

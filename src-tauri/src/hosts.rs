@@ -5,7 +5,7 @@ use crate::models::Host;
 use crate::sshconfig;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 #[derive(Debug, Deserialize)]
 pub struct HostInput {
@@ -63,33 +63,6 @@ pub fn delete(db: &Db, id: String) -> Result<(), String> {
     db.delete(&id).map_err(|e| format!("删除主机失败: {e}"))?;
     credentials::delete_password(&id);
     Ok(())
-}
-
-/// 首次运行时把旧版 hosts.json 迁移到 SQLite
-pub fn migrate_json(db: &Db, app: &AppHandle) -> Result<usize, String> {
-    let existing = db
-        .list()
-        .map_err(|e| format!("读取主机列表失败: {e}"))?;
-    if !existing.is_empty() {
-        return Ok(0);
-    }
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("无法定位应用数据目录: {e}"))?;
-    let path = dir.join("hosts.json");
-    if !path.exists() {
-        return Ok(0);
-    }
-    let raw = fs::read_to_string(&path).map_err(|e| format!("读取 hosts.json 失败: {e}"))?;
-    let hosts: Vec<Host> =
-        serde_json::from_str(&raw).map_err(|e| format!("解析 hosts.json 失败: {e}"))?;
-    let mut n = 0;
-    for host in hosts {
-        db.insert(&host).map_err(|e| format!("迁移主机失败: {e}"))?;
-        n += 1;
-    }
-    Ok(n)
 }
 
 #[derive(Debug, Serialize)]

@@ -36,7 +36,6 @@ pub fn run() {
             let db = Db::open(&dir.join("keywisp.db")).map_err(|e| {
                 io::Error::new(io::ErrorKind::Other, format!("打开数据库失败: {e}"))
             })?;
-            let _ = hosts::migrate_json(&db, app.handle());
             app.manage(db);
             app.manage(mcp::McpServiceManager::default());
             app.manage(mcp::ApprovalRegistry::default());
