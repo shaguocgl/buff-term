@@ -32,10 +32,18 @@ KeyWisp Agent 是一款桌面端 SSH 管理工具，内置**自研的 AI Agent �
 - 单个厂商支持配置多个模型，聊天窗口底部可随时切换
 - 流式回复，Markdown 渲染（代码块 / 表格 / 列表）
 - 工具调用：`exec_command`、`read_file`、`list_dir`、`resource_usage`
-- **MCP 服务（对外）**：KeyWisp 作为 MCP 服务器（Streamable HTTP + token），
-  把勾选的服务器能力开放给 Codex、Claude Desktop 等外部 AI；支持只读模式（禁止写操作）、
-  管控模式（自定义规则命中需确认）、全部放行三种权限模式
 - 会话内多轮上下文，可随时中断 / 清空
+
+### MCP 服务
+
+- **KeyWisp 作为 MCP 服务器对外提供服务**：基于 Streamable HTTP + JSON-RPC + token 认证
+- 把勾选的服务器能力开放给 Codex、Claude Desktop 等外部 AI 工具
+- 提供 `list_hosts`、命令执行、文件读取、目录列表、资源查询等 SSH 工具
+- 支持三种权限模式：
+  - **只读模式**：禁止写操作，适合安全查询场景
+  - **管控模式**：系统预置 + 自定义危险命令规则，命中后需人工确认
+  - **全部放行**：可执行任意命令，适合完全信任场景
+- 启动后自动生成外部 AI 的 MCP 配置 JSON，支持 token 轮换与吊销
 
 ### 安全体系
 
