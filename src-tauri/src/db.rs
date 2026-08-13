@@ -24,7 +24,6 @@ impl Db {
                  username    TEXT NOT NULL,
                  auth_type   TEXT NOT NULL DEFAULT 'key',
                  key_path    TEXT,
-                 proxy_jump  TEXT,
                  notes       TEXT,
                  created_at  INTEGER NOT NULL
              );
@@ -98,7 +97,7 @@ impl Db {
     pub fn list(&self) -> rusqlite::Result<Vec<Host>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, address, port, username, auth_type, key_path, proxy_jump, notes, created_at
+            "SELECT id, name, address, port, username, auth_type, key_path, notes, created_at
              FROM hosts ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], row_to_host)?;
@@ -108,8 +107,8 @@ impl Db {
     pub fn insert(&self, host: &Host) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO hosts (id, name, address, port, username, auth_type, key_path, proxy_jump, notes, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO hosts (id, name, address, port, username, auth_type, key_path, notes, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 host.id,
                 host.name,
@@ -118,7 +117,6 @@ impl Db {
                 host.username,
                 host.auth_type,
                 host.key_path,
-                host.proxy_jump,
                 host.notes,
                 host.created_at as i64,
             ],
@@ -130,7 +128,7 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE hosts SET name=?2, address=?3, port=?4, username=?5, auth_type=?6,
-                    key_path=?7, proxy_jump=?8, notes=?9
+                    key_path=?7, notes=?8
              WHERE id=?1",
             params![
                 host.id,
@@ -140,7 +138,6 @@ impl Db {
                 host.username,
                 host.auth_type,
                 host.key_path,
-                host.proxy_jump,
                 host.notes,
             ],
         )?;
@@ -483,9 +480,8 @@ fn row_to_host(row: &Row<'_>) -> rusqlite::Result<Host> {
         username: row.get(4)?,
         auth_type: row.get(5)?,
         key_path: row.get(6)?,
-        proxy_jump: row.get(7)?,
-        notes: row.get(8)?,
-        created_at: row.get::<_, i64>(9)? as u64,
+        notes: row.get(7)?,
+        created_at: row.get::<_, i64>(8)? as u64,
     })
 }
 

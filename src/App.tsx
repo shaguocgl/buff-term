@@ -266,9 +266,6 @@ function App() {
                     <span className={`tag tag-${host.auth_type}`}>
                       {host.auth_type === 'key' ? '密钥' : '密码'}
                     </span>
-                    {host.proxy_jump && (
-                      <span className="tag tag-proxy">⤳ {host.proxy_jump.split('@')[0]}</span>
-                    )}
                   </div>
                 </div>
                 {loadingHostId === host.id ? (
@@ -467,7 +464,7 @@ function App() {
             </div>
             <h2>选择左侧主机开始连接</h2>
             <p>
-              支持密钥 / 密码认证与 ProxyJump 跳板，多标签并行连接
+              支持密钥 / 密码认证，多标签并行连接
               <br />
               首次连接请按终端提示确认主机指纹
             </p>

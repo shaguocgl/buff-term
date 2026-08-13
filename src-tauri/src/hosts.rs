@@ -19,8 +19,6 @@ pub struct HostInput {
     #[serde(default)]
     pub key_path: Option<String>,
     #[serde(default)]
-    pub proxy_jump: Option<String>,
-    #[serde(default)]
     pub notes: Option<String>,
 }
 
@@ -41,7 +39,6 @@ pub fn host_from_input(input: HostInput) -> Host {
         username: input.username,
         auth_type: input.auth_type,
         key_path: input.key_path,
-        proxy_jump: input.proxy_jump,
         notes: input.notes,
         created_at: now(),
     }

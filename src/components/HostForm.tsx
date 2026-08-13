@@ -3,7 +3,7 @@ import type { FormEvent } from 'react';
 import { createHost, saveHostPassword, testHostConnection, updateHost } from '../api';
 import type { Host, HostInput, TestResult } from '../types';
 import Modal from './Modal';
-import { EyeIcon, EyeOffIcon, KeyIcon, LinkIcon, ShieldIcon } from './Icons';
+import { EyeIcon, EyeOffIcon, KeyIcon, ShieldIcon } from './Icons';
 
 interface Props {
   initial?: Host | null;
@@ -22,7 +22,6 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
   const [keyPath, setKeyPath] = useState(initial?.key_path ?? '');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [proxyJump, setProxyJump] = useState(initial?.proxy_jump ?? '');
   const [notes, setNotes] = useState(initial?.notes ?? '');
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -49,7 +48,6 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
       username: username.trim(),
       auth_type: authType,
       key_path: authType === 'key' && keyPath.trim() ? keyPath.trim() : null,
-      proxy_jump: proxyJump.trim() || null,
       notes: null,
       created_at: 0,
     };
@@ -90,9 +88,6 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
     if (authType === 'key' && keyPath.trim()) {
       input.key_path = keyPath.trim();
     }
-    if (proxyJump.trim()) {
-      input.proxy_jump = proxyJump.trim();
-    }
 
     setSaving(true);
     try {
@@ -105,7 +100,6 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
           username: input.username,
           auth_type: input.auth_type,
           key_path: input.key_path ?? null,
-          proxy_jump: input.proxy_jump ?? null,
           notes: input.notes ?? null,
         });
       } else {
@@ -228,18 +222,6 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
             </div>
           </label>
         )}
-
-        <label>
-          跳板机（ProxyJump）
-          <div className="input-with-icon">
-            <LinkIcon size={15} />
-            <input
-              value={proxyJump}
-              onChange={(e) => setProxyJump(e.target.value)}
-              placeholder="user@jump-host:22"
-            />
-          </div>
-        </label>
 
         <label>
           备注

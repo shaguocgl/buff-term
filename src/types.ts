@@ -6,7 +6,6 @@ export interface Host {
   username: string;
   auth_type: 'key' | 'password';
   key_path?: string | null;
-  proxy_jump?: string | null;
   notes?: string | null;
   created_at: number;
 }
@@ -18,7 +17,6 @@ export interface HostInput {
   username: string;
   auth_type: 'key' | 'password';
   key_path?: string;
-  proxy_jump?: string;
   notes?: string;
 }
 

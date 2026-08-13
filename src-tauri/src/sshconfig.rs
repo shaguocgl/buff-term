@@ -34,7 +34,6 @@ pub fn parse(content: &str) -> Vec<HostInput> {
                         username: String::new(),
                         auth_type: "key".to_string(),
                         key_path: None,
-                        proxy_jump: None,
                         notes: Some("来自 ~/.ssh/config".to_string()),
                     });
                 }
@@ -57,11 +56,6 @@ pub fn parse(content: &str) -> Vec<HostInput> {
             "identityfile" => {
                 if let Some(h) = current.as_mut() {
                     h.key_path = Some(expand_tilde(value));
-                }
-            }
-            "proxyjump" => {
-                if let Some(h) = current.as_mut() {
-                    h.proxy_jump = Some(value.to_string());
                 }
             }
             _ => {}

@@ -12,8 +12,6 @@ pub struct Host {
     #[serde(default)]
     pub key_path: Option<String>,
     #[serde(default)]
-    pub proxy_jump: Option<String>,
-    #[serde(default)]
     pub notes: Option<String>,
     #[serde(default)]
     pub created_at: u64,

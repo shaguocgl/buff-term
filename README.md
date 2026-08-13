@@ -18,10 +18,10 @@ KeyWisp Agent 是一款桌面端 SSH 管理工具，内置**自研的 AI Agent �
 
 ### SSH 基础管理
 
-- 主机配置增删改查（名称、地址、端口、用户名、认证方式、跳板机）
+- 主机配置增删改查（名称、地址、端口、用户名、认证方式）
 - 密钥 / 密码认证，密码与 API Key 存入系统钥匙串（macOS Keychain / Windows 凭据管理器 / Linux Secret Service）
 - 多标签终端会话（xterm.js）、窗口尺寸自适应
-- 一键导入 `~/.ssh/config`（HostName / User / Port / IdentityFile / ProxyJump）
+- 一键导入 `~/.ssh/config`（HostName / User / Port / IdentityFile）
 - 密码认证由后端直接注入钥匙串凭据，不经过终端提示符识别
 
 ### AI Agent
