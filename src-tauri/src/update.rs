@@ -66,6 +66,7 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
 
 fn is_newer(candidate: &str, current: &str) -> bool {
     let parse = |version: &str| {
+        let version = version.trim_start_matches('v');
         version
             .split_once('-')
             .map_or(version, |(stable, _)| stable)
@@ -93,7 +94,14 @@ mod tests {
     fn compares_semantic_versions() {
         assert!(is_newer("0.1.1", "0.1.0"));
         assert!(is_newer("v1.0.0", "0.9.9"));
+        assert!(is_newer("1.0.0", "0.9.9"));
         assert!(!is_newer("0.1.0", "0.1.0"));
         assert!(!is_newer("0.1.0", "0.1.1"));
+    }
+
+    #[test]
+    fn compares_numeric_components() {
+        assert!(!is_newer("1.2.0", "1.10.0"));
+        assert!(is_newer("1.10.0", "1.2.0"));
     }
 }

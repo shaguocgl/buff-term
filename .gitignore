@@ -20,6 +20,10 @@ src-tauri/gen
 .codex/
 .agents/
 
+# Claude 工作区
+CLAUDE.md
+.claude/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -1,5 +1,6 @@
 use crate::models::Host;
 use crate::russh::RusshManager;
+use crate::util::now;
 use serde::Serialize;
 use std::time::Duration;
 use tauri::State;
@@ -37,13 +38,6 @@ pub struct MonitorSnapshot {
     pub mem: MemInfo,
     pub disks: Vec<DiskInfo>,
     pub top: Vec<TopProc>,
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// 采集 Linux 服务器的资源快照（CPU / 内存 / 磁盘 / 负载 / TOP 进程）

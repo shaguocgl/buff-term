@@ -6,6 +6,7 @@ import type {
   AiRule,
   AlertSettings,
   AuditLog,
+  HistoryEntry,
   Host,
   HostInput,
   ImportResult,
@@ -152,8 +153,10 @@ export const agentApprove = (sessionId: number, toolCallId: string, allow: boole
   invoke<void>('agent_approve', { sessionId, toolCallId, allow });
 export const agentCancel = (sessionId: number) =>
   invoke<void>('agent_cancel', { sessionId });
-export const agentReset = (sessionId: number) =>
-  invoke<void>('agent_reset', { sessionId });
+export const agentReset = (sessionId: number, hostId: string) =>
+  invoke<void>('agent_reset', { sessionId, hostId });
+export const getHistory = (hostId: string) =>
+  invoke<HistoryEntry[]>('get_history', { hostId });
 
 export interface AiStreamPayload {
   session_id: number;

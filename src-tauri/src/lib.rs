@@ -10,10 +10,12 @@ mod mcp;
 mod models;
 mod monitor;
 mod russh;
+mod safety;
 mod session;
 mod sftp;
 mod sshconfig;
 mod update;
+mod util;
 
 use db::Db;
 use agent::AgentManager;
@@ -74,6 +76,7 @@ pub fn run() {
             agent::agent_approve,
             agent::agent_cancel,
             agent::agent_reset,
+            agent::get_history,
             audit::list_audit_logs,
             sftp::sftp_list,
             sftp::sftp_download,

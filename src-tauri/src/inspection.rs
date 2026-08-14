@@ -1,6 +1,8 @@
 use crate::db::Db;
 use crate::models::{AlertSettings, Host, InspectionReport};
 use crate::russh::RusshManager;
+use crate::safety::{sanitize, validate_readonly_command};
+use crate::util::{extract_error, now, truncate, truncate_output};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -200,7 +202,7 @@ async fn run_inspection_inner(
     let baseline = russh
         .exec(host, BASELINE_SCRIPT, Duration::from_secs(50))
         .await?;
-    let baseline_text = crate::agent::sanitize(&truncate(&baseline.text, 32000));
+    let baseline_text = sanitize(&truncate_output(&baseline.text, 32000));
 
     if cancelled(flag) {
         report.status = "cancelled".to_string();
@@ -378,7 +380,7 @@ async fn run_ai_inspection(
                 .state::<RusshManager>()
                 .exec(&host, command, Duration::from_secs(20))
                 .await
-                .map(|o| truncate(&o.text, 8000))
+                .map(|o| truncate_output(&o.text, 8000))
                 .unwrap_or_else(|e| format!("执行失败: {e}"));
             messages.push(tool_message(&id, &out));
         }
@@ -402,61 +404,8 @@ fn cancelled(flag: &Arc<AtomicBool>) -> bool {
     flag.load(Ordering::SeqCst)
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        s.to_string()
-    } else {
-        let head: String = chars[..max].iter().collect();
-        format!("{head}\n...[输出过长，已截断]")
-    }
-}
-
 fn tool_message(id: &str, content: &str) -> serde_json::Value {
     serde_json::json!({"role": "tool", "tool_call_id": id, "content": content})
-}
-
-fn validate_readonly_command(command: &str) -> Result<(), String> {
-    let c = command.trim();
-    if c.is_empty() || c.chars().count() > 500 {
-        return Err("命令为空或过长".to_string());
-    }
-    const FORBIDDEN: &[&str] = &[
-        ";", "&&", "||", "|", ">", ">>", "<", "<<", "$(", "`", "\n", "\r", "rm ", "mv ",
-        "cp ", "touch ", "mkdir ", "chmod", "chown", "systemctl start", "systemctl stop",
-        "systemctl restart", "systemctl enable", "systemctl disable", "shutdown", "reboot",
-        "kill", "dd ", "iptables", "ufw ", "firewall-cmd --add", "mount ", "umount",
-    ];
-    for token in FORBIDDEN {
-        if c.contains(token) {
-            return Err(format!("包含不允许的操作或字符: {token}"));
-        }
-    }
-    let first = c
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .rsplit('/')
-        .next()
-        .unwrap_or("");
-    const ALLOWED: &[&str] = &[
-        "cat", "grep", "head", "tail", "awk", "sed", "find", "ls", "ps", "df", "du", "free",
-        "uptime", "uname", "hostname", "ss", "netstat", "systemctl", "journalctl", "docker",
-        "podman", "sshd", "ufw", "firewall-cmd", "fail2ban-client", "last", "lastb", "who",
-        "w", "id", "getent", "stat", "lsof", "sysctl", "hostnamectl", "timedatectl", "rpm",
-        "dpkg", "apt", "yum", "dnf", "zypper", "pacman", "brew", "locale", "env",
-    ];
-    if !ALLOWED.contains(&first) {
-        return Err(format!("命令不在只读白名单内: {first}"));
-    }
-    Ok(())
 }
 
 fn inspection_system_prompt(host: &Host) -> String {
@@ -542,14 +491,6 @@ fn wrap_email_html(host_label: &str, risk: &str, body: &str) -> String {
          </div></body></html>",
         host_label, risk_color, risk, body
     )
-}
-
-fn extract_error(text: &str, status: reqwest::StatusCode) -> String {
-    let detail = serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .and_then(|v| v["error"]["message"].as_str().map(String::from))
-        .unwrap_or_else(|| text.chars().take(200).collect());
-    format!("AI 平台返回 HTTP {}: {}", status.as_u16(), detail)
 }
 
 const BASELINE_SCRIPT: &str = r#"

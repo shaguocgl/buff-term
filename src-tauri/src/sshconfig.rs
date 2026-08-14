@@ -1,4 +1,5 @@
 use crate::hosts::HostInput;
+use crate::models::AuthType;
 
 /// 解析 ~/.ssh/config 的常用字段，返回可导入的主机列表。
 pub fn parse(content: &str) -> Vec<HostInput> {
@@ -32,7 +33,7 @@ pub fn parse(content: &str) -> Vec<HostInput> {
                         address: String::new(),
                         port: 22,
                         username: String::new(),
-                        auth_type: "key".to_string(),
+                        auth_type: AuthType::Key,
                         key_path: None,
                         notes: Some("来自 ~/.ssh/config".to_string()),
                     });
@@ -81,4 +82,49 @@ fn expand_tilde(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_host_blocks_and_skips_wildcards() {
+        let content = r#"
+Host myserver
+    HostName 192.168.1.10
+    User root
+    Port 2222
+    IdentityFile ~/.ssh/id_ed25519
+
+Host wildcard*
+    HostName example.com
+
+Host another
+    HostName another.example.com
+"#;
+        let hosts = parse(content);
+        assert_eq!(hosts.len(), 2);
+
+        let a = &hosts[0];
+        assert_eq!(a.name, "myserver");
+        assert_eq!(a.address, "192.168.1.10");
+        assert_eq!(a.username, "root");
+        assert_eq!(a.port, 2222);
+        assert_eq!(a.auth_type, AuthType::Key);
+        assert!(a.key_path.as_deref().is_some_and(|p| p.ends_with("id_ed25519")));
+
+        let b = &hosts[1];
+        assert_eq!(b.name, "another");
+        assert_eq!(b.address, "another.example.com");
+    }
+
+    #[test]
+    fn ignores_comments_and_blank_lines() {
+        let content = "# a comment\n\nHost simple\n    HostName 10.0.0.1\n";
+        let hosts = parse(content);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].name, "simple");
+        assert_eq!(hosts[0].address, "10.0.0.1");
+    }
 }

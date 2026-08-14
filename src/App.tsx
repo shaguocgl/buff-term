@@ -521,6 +521,7 @@ function App() {
                 <ChatPanel
                   key={activeTab.sessionId}
                   sessionId={activeTab.sessionId}
+                  hostId={activeTab.host.id}
                   hostName={activeTab.title}
                   providerLabel={
                     activeProvider

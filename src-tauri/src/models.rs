@@ -1,5 +1,81 @@
 use serde::{Deserialize, Serialize};
 
+/// SSH 认证方式：`key`（密钥）或 `password`（密码）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthType {
+    Key,
+    Password,
+}
+
+impl AuthType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AuthType::Key => "key",
+            AuthType::Password => "password",
+        }
+    }
+}
+
+impl std::str::FromStr for AuthType {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "password" => Ok(AuthType::Password),
+            _ => Ok(AuthType::Key),
+        }
+    }
+}
+
+/// 内置 AI Agent 的安全级别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionMode {
+    All,
+    Smart,
+    None,
+}
+
+impl PermissionMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PermissionMode::All => "all",
+            PermissionMode::Smart => "smart",
+            PermissionMode::None => "none",
+        }
+    }
+}
+
+/// 对外 MCP 服务的权限模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpPermissionMode {
+    Readonly,
+    Confirm,
+    Allow,
+}
+
+impl McpPermissionMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            McpPermissionMode::Readonly => "readonly",
+            McpPermissionMode::Confirm => "confirm",
+            McpPermissionMode::Allow => "allow",
+        }
+    }
+}
+
+impl std::str::FromStr for McpPermissionMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "readonly" => Ok(McpPermissionMode::Readonly),
+            "allow" => Ok(McpPermissionMode::Allow),
+            _ => Ok(McpPermissionMode::Confirm),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Host {
     pub id: String,
@@ -7,8 +83,8 @@ pub struct Host {
     pub address: String,
     pub port: u16,
     pub username: String,
-    /// "key" 或 "password"，认证由 russh 注入钥匙串凭据
-    pub auth_type: String,
+    /// 认证方式，凭据由 russh 从系统钥匙串注入
+    pub auth_type: AuthType,
     #[serde(default)]
     pub key_path: Option<String>,
     #[serde(default)]
@@ -115,7 +191,7 @@ pub struct McpService {
     pub host_ids: Vec<String>,
     /// readonly（只读）/ confirm（危险命令需确认）/ allow（全部放行）
     #[serde(default = "default_mcp_permission")]
-    pub permission_mode: String,
+    pub permission_mode: McpPermissionMode,
     #[serde(default)]
     pub token: Option<String>,
     #[serde(default)]
@@ -124,8 +200,8 @@ pub struct McpService {
     pub updated_at: u64,
 }
 
-fn default_mcp_permission() -> String {
-    "confirm".to_string()
+fn default_mcp_permission() -> McpPermissionMode {
+    McpPermissionMode::Confirm
 }
 
 impl Host {

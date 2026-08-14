@@ -1,22 +1,23 @@
 use crate::credentials;
 use crate::db::Db;
-use crate::models::{AiProvider, AuditLog, Host};
+use crate::models::{AiProvider, AuditLog, Host, PermissionMode};
 use crate::russh::RusshManager;
+use crate::safety::{is_dangerous, normalize_tool, sanitize};
 use crate::session::SessionManager;
+use crate::util::{extract_error, format_exec_output, now, shq, truncate};
 use futures_util::StreamExt;
-use regex::Regex;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::mpsc;
 use std::sync::Mutex;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::sync::mpsc;
 
 #[derive(Default)]
 pub struct AgentManager {
     controls: Mutex<HashMap<u32, mpsc::Sender<Control>>>,
-    histories: Mutex<HashMap<u32, Vec<serde_json::Value>>>,
+    histories: Mutex<HashMap<String, Vec<serde_json::Value>>>,
+    generations: Mutex<HashMap<String, u64>>,
 }
 
 pub enum Control {
@@ -25,12 +26,6 @@ pub enum Control {
         allow: bool,
     },
     Cancel,
-}
-
-struct RemoteOutput {
-    text: String,
-    exit_code: Option<i32>,
-    timed_out: bool,
 }
 
 impl AgentManager {
@@ -42,21 +37,33 @@ impl AgentManager {
         self.controls.lock().unwrap().remove(&id);
     }
 
-    fn history(&self, id: u32) -> Vec<serde_json::Value> {
+    fn history(&self, host_id: &str) -> Vec<serde_json::Value> {
         self.histories
             .lock()
             .unwrap()
-            .get(&id)
+            .get(host_id)
             .cloned()
             .unwrap_or_default()
     }
 
-    fn save_history(&self, id: u32, history: Vec<serde_json::Value>) {
-        self.histories.lock().unwrap().insert(id, history);
+    fn save_history(&self, host_id: &str, history: Vec<serde_json::Value>) {
+        self.histories
+            .lock()
+            .unwrap()
+            .insert(host_id.to_string(), history);
     }
 
-    fn clear_history(&self, id: u32) {
-        self.histories.lock().unwrap().remove(&id);
+    pub(crate) fn clear_history(&self, host_id: &str) {
+        self.histories.lock().unwrap().remove(host_id);
+    }
+
+    /// 当前主机的历史代数：每次 reset 递增，用于让正在运行的循环在结束时放弃写回旧历史。
+    fn generation(&self, host_id: &str) -> u64 {
+        *self.generations.lock().unwrap().get(host_id).unwrap_or(&0)
+    }
+
+    fn bump_generation(&self, host_id: &str) {
+        *self.generations.lock().unwrap().entry(host_id.to_string()).or_insert(0) += 1;
     }
 }
 
@@ -102,11 +109,8 @@ pub async fn agent_chat(
     agents: State<'_, AgentManager>,
     session_id: u32,
     message: String,
-    permission_mode: String,
+    permission_mode: PermissionMode,
 ) -> Result<(), String> {
-    if !matches!(permission_mode.as_str(), "all" | "smart" | "none") {
-        return Err("无效的安全级别".to_string());
-    }
     let host = sessions
         .host(session_id)
         .ok_or_else(|| "会话不存在或已断开".to_string())?;
@@ -121,8 +125,9 @@ pub async fn agent_chat(
         .map(|r| r.pattern)
         .collect();
     let russh = app.state::<RusshManager>();
-    let (tx, rx) = mpsc::channel::<Control>();
+    let (tx, rx) = mpsc::channel::<Control>(8);
     agents.set_control(session_id, tx);
+    let generation = agents.generation(&host.id);
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
@@ -130,7 +135,7 @@ pub async fn agent_chat(
         .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
     let url = format!("{}/chat/completions", provider.base_url.trim_end_matches('/'));
 
-    let mut history = agents.history(session_id);
+    let mut history = agents.history(&host.id);
     let system = system_prompt(&host, &provider, &model);
     if history.is_empty() {
         history.push(serde_json::json!({
@@ -153,7 +158,7 @@ pub async fn agent_chat(
         &model,
         &host,
         session_id,
-        &permission_mode,
+        permission_mode,
         &danger_rules,
         &db,
         &russh,
@@ -162,7 +167,10 @@ pub async fn agent_chat(
     )
     .await;
 
-    agents.save_history(session_id, history);
+    if agents.generation(&host.id) == generation {
+        trim_history(&mut history, MAX_HISTORY_ROUNDS);
+        agents.save_history(&host.id, history);
+    }
     agents.clear_control(session_id);
     result
 }
@@ -181,7 +189,7 @@ pub fn agent_approve(
         .get(&session_id)
         .cloned()
         .ok_or_else(|| "当前没有等待审批的工具调用".to_string())?;
-    tx.send(Control::Approve {
+    tx.try_send(Control::Approve {
         tool_call_id,
         allow,
     })
@@ -191,15 +199,32 @@ pub fn agent_approve(
 #[tauri::command]
 pub fn agent_cancel(agents: State<'_, AgentManager>, session_id: u32) -> Result<(), String> {
     if let Some(tx) = agents.controls.lock().unwrap().get(&session_id).cloned() {
-        let _ = tx.send(Control::Cancel);
+        let _ = tx.try_send(Control::Cancel);
     }
     Ok(())
 }
 
 #[tauri::command]
-pub fn agent_reset(agents: State<'_, AgentManager>, session_id: u32) -> Result<(), String> {
-    agents.clear_history(session_id);
+pub fn agent_reset(
+    agents: State<'_, AgentManager>,
+    session_id: u32,
+    host_id: String,
+) -> Result<(), String> {
+    // 停止正在运行的 agent 循环（若有），并递增代数使旧循环在结束时放弃写回历史
+    if let Some(tx) = agents.controls.lock().unwrap().get(&session_id).cloned() {
+        let _ = tx.try_send(Control::Cancel);
+    }
+    agents.bump_generation(&host_id);
+    agents.clear_history(&host_id);
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_history(
+    agents: State<'_, AgentManager>,
+    host_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    Ok(agents.history(&host_id))
 }
 
 async fn run_agent_loop(
@@ -210,11 +235,11 @@ async fn run_agent_loop(
     model: &str,
     host: &Host,
     session_id: u32,
-    permission_mode: &str,
+    permission_mode: PermissionMode,
     danger_rules: &[String],
     db: &Db,
     russh: &RusshManager,
-    rx: mpsc::Receiver<Control>,
+    mut rx: mpsc::Receiver<Control>,
     history: &mut Vec<serde_json::Value>,
 ) -> Result<(), String> {
     let mut iterations = 0;
@@ -368,9 +393,9 @@ async fn run_agent_loop(
             let args = parse_args(&acc.args);
 
             let need_approval = match permission_mode {
-                "all" => true,
-                "none" => false,
-                _ => {
+                PermissionMode::All => true,
+                PermissionMode::None => false,
+                PermissionMode::Smart => {
                     if acc.name != "exec_command" {
                         false
                     } else {
@@ -406,19 +431,24 @@ async fn run_agent_loop(
                 );
 
                 let decision = loop {
-                    match rx.recv_timeout(Duration::from_secs(600)) {
+                    match tokio::time::timeout(Duration::from_secs(600), rx.recv()).await {
                         Err(_) => {
                             let msg = "等待审批超时".to_string();
                             let _ = app.emit("ai:error", AiError { session_id, message: msg.clone() });
                             return Err(msg);
                         }
-                        Ok(Control::Cancel) => return Ok(()),
-                        Ok(Control::Approve { tool_call_id, allow })
+                        Ok(None) => {
+                            let msg = "会话已结束".to_string();
+                            let _ = app.emit("ai:error", AiError { session_id, message: msg.clone() });
+                            return Err(msg);
+                        }
+                        Ok(Some(Control::Cancel)) => return Ok(()),
+                        Ok(Some(Control::Approve { tool_call_id, allow }))
                             if tool_call_id == acc.id =>
                         {
                             break allow;
                         }
-                        Ok(Control::Approve { .. }) => continue,
+                        Ok(Some(Control::Approve { .. })) => continue,
                     }
                 };
 
@@ -429,7 +459,7 @@ async fn run_agent_loop(
                         host,
                         &acc,
                         &args,
-                        permission_mode,
+                        permission_mode.as_str(),
                         "denied",
                         "denied",
                         None,
@@ -477,7 +507,7 @@ async fn run_agent_loop(
                         host,
                         &acc,
                         &args,
-                        permission_mode,
+                        permission_mode.as_str(),
                         approval_label,
                         "executed",
                         Some(output.clone()),
@@ -507,7 +537,7 @@ async fn run_agent_loop(
                         host,
                         &acc,
                         &args,
-                        permission_mode,
+                        permission_mode.as_str(),
                         approval_label,
                         "error",
                         Some(err.clone()),
@@ -571,23 +601,6 @@ fn insert_audit(
         .map_err(|e| format!("写入操作日志失败: {e}"))
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        s.to_string()
-    } else {
-        let head: String = chars[..max].iter().collect();
-        format!("{head}…")
-    }
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 fn apply_delta(
     delta: &serde_json::Value,
     content: &mut String,
@@ -647,7 +660,7 @@ async fn execute_tool(
             let out = russh
                 .exec(host, command, std::time::Duration::from_secs(timeout))
                 .await?;
-            Ok(sanitize(&format_exec(&out)))
+            Ok(sanitize(&format_exec_output(&out)))
         }
         "read_file" => {
             let path = args
@@ -657,21 +670,21 @@ async fn execute_tool(
             let out = russh
                 .exec(host, &format!("cat {}", shq(path)), std::time::Duration::from_secs(15))
                 .await?;
-            Ok(sanitize(&format_exec(&out)))
+            Ok(sanitize(&format_exec_output(&out)))
         }
         "list_dir" => {
             let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
             let out = russh
                 .exec(host, &format!("ls -lah {}", shq(path)), std::time::Duration::from_secs(15))
                 .await?;
-            Ok(sanitize(&format_exec(&out)))
+            Ok(sanitize(&format_exec_output(&out)))
         }
         "resource_usage" => {
             let script = "echo '-- 磁盘 --'; df -h; echo; echo '-- 内存 --'; (free -h 2>/dev/null || vm_stat); echo; echo '-- 负载 --'; uptime; echo; echo '-- TOP 进程 --'; (ps aux --sort=-%mem 2>/dev/null || ps aux) | head -8";
             let out = russh
                 .exec(host, script, std::time::Duration::from_secs(25))
                 .await?;
-            Ok(sanitize(&format_exec(&out)))
+            Ok(sanitize(&format_exec_output(&out)))
         }
         _ => {
             let mut effective = name;
@@ -702,158 +715,11 @@ async fn execute_tool(
     }
 }
 
-/// 常见工具名别名归一化，降低模型幻觉导致的调用失败
-fn normalize_tool(name: &str) -> &str {
-    match name {
-        "exec" | "shell" | "run_command" | "run" | "command" | "execute" => "exec_command",
-        "read" | "cat" | "readfile" | "read_file_content" => "read_file",
-        "ls" | "list" | "listdir" | "dir" | "list_directory" => "list_dir",
-        "resources" | "usage" | "system_status" | "monitor" | "resource_usage_show" => {
-            "resource_usage"
-        }
-        _ => name,
-    }
-}
-
-fn format_exec(out: &crate::russh::ExecResult) -> String {
-    format_output(&RemoteOutput {
-        text: out.text.clone(),
-        exit_code: out.exit_code.map(|c| c as i32),
-        timed_out: out.timed_out,
-    })
-}
-
-/// 命令输出进入模型上下文前过滤敏感信息
-pub(crate) fn sanitize(text: &str) -> String {
-    struct Rule {
-        re: Regex,
-        keep_key: bool,
-    }
-    static RE: OnceLock<Vec<Rule>> = OnceLock::new();
-    let res = RE.get_or_init(|| {
-        vec![
-            // 常见密钥/口令键值对：password=xxx / token: "xxx"
-            Rule {
-                re: Regex::new(
-                    r#"(?i)(password|passwd|pwd|secret|token|api[_-]?key)(\s*[:=]\s*["']?)[^\s"',;]{6,}"#,
-                )
-                .unwrap(),
-                keep_key: true,
-            },
-            // AWS Access Key
-            Rule { re: Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(), keep_key: false },
-            // OpenAI / DeepSeek 风格 sk- 密钥
-            Rule { re: Regex::new(r"sk-[A-Za-z0-9_\-]{16,}").unwrap(), keep_key: false },
-            // PEM 私钥块
-            Rule {
-                re: Regex::new(
-                    r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
-                )
-                .unwrap(),
-                keep_key: false,
-            },
-            // Bearer / Basic 认证头
-            Rule {
-                re: Regex::new(r"(?i)authorization:\s*(basic|bearer)\s+[^\r\n]+").unwrap(),
-                keep_key: false,
-            },
-            Rule {
-                re: Regex::new(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{20,}").unwrap(),
-                keep_key: false,
-            },
-            // 常见云厂商密钥片段
-            Rule {
-                re: Regex::new(
-                    r#"(?i)(access[_-]?key[_-]?id|secret[_-]?access[_-]?key)(\s*[:=]\s*["']?)[^\s"',;]{10,}"#,
-                )
-                .unwrap(),
-                keep_key: true,
-            },
-        ]
-    });
-    let mut out = text.to_string();
-    for rule in res {
-        out = if rule.keep_key {
-            rule.re.replace_all(&out, "${1}${2}***").to_string()
-        } else {
-            rule.re.replace_all(&out, "***").to_string()
-        };
-    }
-    out
-}
-
-/// 智能审核模式下判断命令是否有风险
-pub(crate) fn is_dangerous(command: &str) -> bool {
-    let c = command.to_ascii_lowercase();
-    const PATTERNS: &[&str] = &[
-        "rm -rf",
-        "rm -fr",
-        "rm -r",
-        "mkfs",
-        "dd if=",
-        "iptables",
-        "ufw ",
-        "systemctl stop",
-        "systemctl restart",
-        "systemctl disable",
-        "systemctl mask",
-        "shutdown",
-        "reboot",
-        "poweroff",
-        "chmod -r",
-        "chown -r",
-        "fdisk",
-        "parted",
-        "pvremove",
-        "vgremove",
-        "lvremove",
-        "userdel",
-        "groupdel",
-        "drop database",
-        "truncate table",
-        "delete from",
-        "kill -9",
-        ">/dev/sd",
-    ];
-    PATTERNS.iter().any(|p| c.contains(p))
-}
-
-fn format_output(out: &RemoteOutput) -> String {
-    let mut text = out.text.trim().to_string();
-    const MAX: usize = 12000;
-    if text.chars().count() > MAX {
-        let head: String = text.chars().take(8000).collect();
-        let tail: String = text.chars().skip(text.chars().count() - 4000).collect();
-        text = format!("{head}\n...[输出过长，已截断]...\n{tail}");
-    }
-    if out.timed_out {
-        text.push_str("\n[命令执行超时，输出可能不完整]");
-    }
-    if let Some(code) = out.exit_code {
-        if code != 0 {
-            text.push_str(&format!("\n[退出码 {code}]"));
-        }
-    }
-    text
-}
-
 fn parse_args(raw: &str) -> serde_json::Value {
     match serde_json::from_str::<serde_json::Value>(raw) {
         Ok(v) if v.is_object() => v,
         _ => serde_json::json!({ "command": raw.trim() }),
     }
-}
-
-fn shq(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn extract_error(text: &str, status: reqwest::StatusCode) -> String {
-    let detail = serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .and_then(|v| v["error"]["message"].as_str().map(String::from))
-        .unwrap_or_else(|| text.chars().take(200).collect());
-    format!("AI 平台返回 HTTP {}: {}", status.as_u16(), detail)
 }
 
 fn system_prompt(host: &Host, provider: &AiProvider, model: &str) -> String {
@@ -937,4 +803,30 @@ fn tools_schema() -> serde_json::Value {
             }
         },
     ])
+}
+
+/// 每台主机最多保留的对话轮数（一轮 = 一次用户提问）。
+const MAX_HISTORY_ROUNDS: usize = 20;
+
+/// 裁剪对话历史，最多保留最近 `max_rounds` 轮（一轮 = 一次 user 消息及其后续 assistant/tool 消息），
+/// 始终保留首条 system 提示词。
+fn trim_history(history: &mut Vec<serde_json::Value>, max_rounds: usize) {
+    if history.is_empty() {
+        return;
+    }
+    let start = if history[0]["role"].as_str() == Some("system") {
+        1
+    } else {
+        0
+    };
+    let user_indices: Vec<usize> = (start..history.len())
+        .filter(|&i| history[i]["role"].as_str() == Some("user"))
+        .collect();
+    if user_indices.len() <= max_rounds {
+        return;
+    }
+    let keep_from = user_indices[user_indices.len() - max_rounds];
+    let mut kept = history.split_off(keep_from);
+    history.truncate(start);
+    history.append(&mut kept);
 }

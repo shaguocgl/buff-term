@@ -205,3 +205,16 @@ export interface InspectionErrorPayload {
   report_id: string;
   message: string;
 }
+
+export interface HistoryToolCall {
+  id: string;
+  type: string;
+  function: { name: string; arguments: string };
+}
+
+export interface HistoryEntry {
+  role: string;
+  content?: string;
+  tool_calls?: HistoryToolCall[];
+  tool_call_id?: string;
+}

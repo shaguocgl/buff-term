@@ -9,8 +9,10 @@
 //! - 所有命令输出复用脱敏规则，外部调用同样写入审计日志。
 
 use crate::db::Db;
-use crate::models::{Host, McpRule, McpService};
+use crate::models::{Host, McpPermissionMode, McpRule, McpService};
 use crate::russh::RusshManager;
+use crate::safety::{is_write_operation, sanitize};
+use crate::util::{format_exec_output, generate_token, now, shq};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -31,11 +33,11 @@ pub struct McpServiceInput {
     #[serde(default)]
     pub host_ids: Vec<String>,
     #[serde(default = "default_permission")]
-    pub permission_mode: String,
+    pub permission_mode: McpPermissionMode,
 }
 
-fn default_permission() -> String {
-    "confirm".to_string()
+fn default_permission() -> McpPermissionMode {
+    McpPermissionMode::Confirm
 }
 
 #[derive(Serialize, Clone)]
@@ -112,9 +114,6 @@ pub async fn save_mcp_service(
     manager: State<'_, McpServiceManager>,
     input: McpServiceInput,
 ) -> Result<McpServiceView, String> {
-    if !["readonly", "confirm", "allow"].contains(&input.permission_mode.as_str()) {
-        return Err("权限模式不合法".to_string());
-    }
     if input.enabled && input.host_ids.is_empty() {
         return Err("启用 MCP 服务前，请至少勾选一台服务器".to_string());
     }
@@ -644,7 +643,7 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
                 .and_then(|t| t.as_u64())
                 .unwrap_or(30);
             let mut approval: Option<bool> = None;
-            if config.permission_mode == "readonly" {
+            if config.permission_mode == McpPermissionMode::Readonly {
                 // 只读模式：允许只读命令，拒绝任何写操作
                 if is_write_operation(&command) {
                     let _ = write_audit(app, host, "mcp:exec_command", &command, "denied");
@@ -653,7 +652,9 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
                             .to_string(),
                     );
                 }
-            } else if config.permission_mode == "confirm" && check_mcp_rule_match(app, &command) {
+            } else if config.permission_mode == McpPermissionMode::Confirm
+                && check_mcp_rule_match(app, &command)
+            {
                 // 管控模式：仅自定义管控规则命中时弹窗审批
                 approval = Some(request_approval(app, host, &command).await?);
                 if approval == Some(false) {
@@ -690,7 +691,7 @@ async fn run_and_log(
     let out = russh
         .exec(host, command, Duration::from_secs(timeout_secs))
         .await?;
-    Ok(crate::agent::sanitize(&format_cmd_output(&out)))
+    Ok(sanitize(&format_exec_output(&out)))
 }
 
 fn check_mcp_rule_match(app: &AppHandle, command: &str) -> bool {
@@ -703,47 +704,6 @@ fn check_mcp_rule_match(app: &AppHandle, command: &str) -> bool {
             let pattern = r.pattern.trim();
             !pattern.is_empty() && c.contains(&pattern.to_ascii_lowercase())
         })
-}
-
-/// 只读模式下判断命令是否包含写操作（修改 / 删除 / 安装 / 网络传输 / 重定向写文件等）
-fn is_write_operation(command: &str) -> bool {
-    let c = command.to_ascii_lowercase();
-    // 预置危险命令（删除、格式化、关机等）一律视为写操作
-    if crate::agent::is_dangerous(&c) {
-        return true;
-    }
-    // 重定向写文件：排除 /dev/null 丢弃与 fd 复制等无害写法
-    let cleaned = c
-        .replace("2>/dev/null", "")
-        .replace(">/dev/null", "")
-        .replace("1>/dev/null", "")
-        .replace("2>&1", "")
-        .replace(">&2", "")
-        .replace(">&1", "")
-        .replace("2>&-", "");
-    if cleaned.contains('>') {
-        return true;
-    }
-    // 常见写类命令关键词（子串匹配，宁可多拦）
-    const WRITE_CMDS: &[&str] = &[
-        "touch ", "mkdir ", "rmdir ", "rm ", "mv ", "cp ", "ln ", "tee ",
-        "chmod", "chown", "chattr", "chgrp", "dd ",
-        "mkfs", "mount ", "umount", "fdisk", "parted", "swapoff", "swapon",
-        "useradd", "userdel", "usermod", "groupadd", "groupdel", "passwd ", "chage",
-        "systemctl", "service ", "kill ", "pkill", "killall", "nohup ",
-        "reboot", "shutdown", "poweroff", "halt ", "init ",
-        "install ", "sed -i", "perl -i", "awk -i", "vim ", "vi ", "nano ", "ed ",
-        "crontab", "at ", "batch ",
-        "apt ", "apt-get", "yum ", "dnf ", "brew ", "zypper", "pacman ",
-        "pip install", "pip3 install", "npm install", "pnpm install", "yarn add", "go install",
-        "curl -o", "curl -o-", "wget -o", "scp ", "rsync ", "sftp ",
-        "tar -x", "tar -zxf", "tar -xjf", "unzip ", "zip ", "gzip ", "bzip2 ", "xz ",
-        "git add", "git commit", "git push", "git reset", "git checkout", "git merge",
-        "git rebase", "git clean", "git rm", "git mv", "git stash",
-        "echo >", "printf >", "cat >", "tee >", "dd if=",
-        "docker ", "podman ", "kubectl ", "helm ",
-    ];
-    WRITE_CMDS.iter().any(|w| c.contains(w))
 }
 
 async fn request_approval(
@@ -806,40 +766,3 @@ fn resolve_host<'a>(hosts: &'a [Host], key: Option<&str>) -> Result<&'a Host, St
         .ok_or_else(|| format!("未找到主机 {key}，请先调用 list_hosts 查看可用主机"))
 }
 
-fn format_cmd_output(out: &crate::russh::ExecResult) -> String {
-    let mut text = out.text.trim().to_string();
-    const MAX: usize = 12000;
-    if text.chars().count() > MAX {
-        let head: String = text.chars().take(8000).collect();
-        let tail: String = text.chars().skip(text.chars().count() - 4000).collect();
-        text = format!("{head}\n...[输出过长，已截断]...\n{tail}");
-    }
-    if out.timed_out {
-        text.push_str("\n[命令执行超时，输出可能不完整]");
-    }
-    if let Some(code) = out.exit_code {
-        if code != 0 {
-            text.push_str(&format!("\n[退出码 {code}]"));
-        }
-    }
-    text
-}
-
-fn shq(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn generate_token() -> String {
-    format!(
-        "{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    )
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}

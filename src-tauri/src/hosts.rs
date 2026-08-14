@@ -1,8 +1,9 @@
 use crate::credentials;
 use crate::ai::TestResult;
 use crate::db::Db;
-use crate::models::Host;
+use crate::models::{AuthType, Host};
 use crate::sshconfig;
+use crate::util::now;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use tauri::{AppHandle, State};
@@ -15,7 +16,7 @@ pub struct HostInput {
     pub port: u16,
     pub username: String,
     #[serde(default = "default_auth_type")]
-    pub auth_type: String,
+    pub auth_type: AuthType,
     #[serde(default)]
     pub key_path: Option<String>,
     #[serde(default)]
@@ -26,8 +27,8 @@ fn default_port() -> u16 {
     22
 }
 
-fn default_auth_type() -> String {
-    "key".to_string()
+fn default_auth_type() -> AuthType {
+    AuthType::Key
 }
 
 pub fn host_from_input(input: HostInput) -> Host {
@@ -103,13 +104,6 @@ fn default_ssh_config_path() -> String {
     }
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 #[tauri::command]
 pub fn list_hosts(db: State<'_, Db>) -> Result<Vec<Host>, String> {
     list(&db)
@@ -126,8 +120,15 @@ pub fn update_host(db: State<'_, Db>, host: Host) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn delete_host(db: State<'_, Db>, id: String) -> Result<(), String> {
-    delete(&db, id)
+pub fn delete_host(
+    db: State<'_, Db>,
+    agents: State<'_, crate::agent::AgentManager>,
+    id: String,
+) -> Result<(), String> {
+    // 先清理该主机的 AI 会话历史（借用 id），再删除主机（move id）
+    agents.clear_history(&id);
+    delete(&db, id)?;
+    Ok(())
 }
 
 #[tauri::command]

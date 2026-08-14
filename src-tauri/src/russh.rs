@@ -1,4 +1,4 @@
-use crate::models::Host;
+use crate::models::{AuthType, Host};
 use russh::client::{self, Config, Handle};
 use russh::keys::{self, key::PrivateKeyWithHashAlg};
 use russh::{Channel, ChannelMsg};
@@ -183,7 +183,7 @@ pub(crate) async fn do_connect(
         }
     })?;
 
-    let success = if host.auth_type == "password" {
+    let success = if host.auth_type == AuthType::Password {
         let password = password_override
             .filter(|p| !p.trim().is_empty())
             .or_else(|| crate::credentials::get_password(&host.id))

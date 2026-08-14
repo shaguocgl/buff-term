@@ -4,13 +4,14 @@ import {
   agentCancel,
   agentChat,
   agentReset,
+  getHistory,
   onAiDone,
   onAiError,
   onAiStream,
   onAiTool,
   setActiveAiModel,
 } from '../api';
-import type { AiModel } from '../types';
+import type { AiModel, HistoryEntry } from '../types';
 import Select, { type SelectOption } from './Select';
 import {
   RefreshIcon,
@@ -42,6 +43,7 @@ interface ChatMsg {
 
 interface Props {
   sessionId: number;
+  hostId: string;
   hostName: string;
   providerLabel: string;
   providerConfigured: boolean;
@@ -58,8 +60,53 @@ const PERMISSION_OPTIONS: SelectOption<'all' | 'smart' | 'none'>[] = [
   { value: 'none', label: '全部放行' },
 ];
 
+function safeParseArgs(raw: string): Record<string, unknown> {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+/// 把后端 OpenAI 格式的扁平历史还原成「user 一条 + assistant 一条（含工具卡片）」的展示结构。
+function historyToMessages(history: HistoryEntry[]): ChatMsg[] {
+  const result: ChatMsg[] = [];
+  let seq = 0;
+  let currentAssistant: ChatMsg | null = null;
+  for (const entry of history) {
+    if (entry.role === 'system') continue;
+    if (entry.role === 'user') {
+      currentAssistant = null;
+      result.push({ id: ++seq, role: 'user', content: entry.content ?? '', tools: [] });
+    } else if (entry.role === 'assistant') {
+      if (!currentAssistant) {
+        currentAssistant = { id: ++seq, role: 'assistant', content: '', tools: [] };
+        result.push(currentAssistant);
+      }
+      if (entry.content) currentAssistant.content += entry.content;
+      if (entry.tool_calls) {
+        for (const tc of entry.tool_calls) {
+          currentAssistant.tools.push({
+            id: tc.id,
+            name: tc.function.name,
+            args: safeParseArgs(tc.function.arguments),
+            state: 'result',
+          });
+        }
+      }
+    } else if (entry.role === 'tool') {
+      if (currentAssistant && entry.tool_call_id) {
+        const tool = currentAssistant.tools.find((t) => t.id === entry.tool_call_id);
+        if (tool) tool.output = entry.content;
+      }
+    }
+  }
+  return result;
+}
+
 export default function ChatPanel({
   sessionId,
+  hostId,
   hostName,
   providerLabel,
   providerConfigured,
@@ -104,20 +151,12 @@ export default function ChatPanel({
 
   const updateLastAssistant = useCallback(
     (updater: (m: ChatMsg) => ChatMsg) => {
+      const targetId = activeAssistantId.current;
+      // 清空对话后 activeAssistantId 为 null，此时忽略迟到的流式事件，避免旧内容残留
+      if (targetId === null) return;
       setMessages((prev) => {
-        const targetId = activeAssistantId.current;
-        const idx =
-          targetId !== null ? prev.findIndex((m) => m.id === targetId) : -1;
-        if (idx === -1) {
-          const msg: ChatMsg = {
-            id: nextSeq(),
-            role: 'assistant',
-            content: '',
-            tools: [],
-          };
-          activeAssistantId.current = msg.id;
-          return [...prev, updater(msg)];
-        }
+        const idx = prev.findIndex((m) => m.id === targetId);
+        if (idx === -1) return prev;
         const next = [...prev];
         next[idx] = updater(next[idx]);
         return next;
@@ -125,6 +164,20 @@ export default function ChatPanel({
     },
     [],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    getHistory(hostId)
+      .then((history) => {
+        if (cancelled) return;
+        setMessages(historyToMessages(history));
+        activeAssistantId.current = null;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [hostId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -284,9 +337,11 @@ export default function ChatPanel({
             className="icon-btn"
             title="清空对话"
             onClick={() => {
+              // 后端 agent_reset 会同时停止运行中的循环并清空历史
+              agentReset(sessionId, hostId).catch(() => {});
               setMessages([]);
               activeAssistantId.current = null;
-              agentReset(sessionId).catch(() => {});
+              setBusy(false);
             }}
           >
             <RefreshIcon size={15} />

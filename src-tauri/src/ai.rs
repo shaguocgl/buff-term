@@ -1,6 +1,7 @@
 use crate::credentials;
 use crate::db::Db;
 use crate::models::{AiModel, AiProvider, AiRule};
+use crate::util::now;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -28,13 +29,6 @@ pub struct AiProviderInput {
 
 fn default_protocol() -> String {
     "openai-compatible".to_string()
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 pub(crate) fn resolve_active_ai(db: &Db) -> Result<(AiProvider, String), String> {

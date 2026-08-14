@@ -1,6 +1,6 @@
 use crate::models::{
-    AiModel, AiProvider, AiRule, AlertSettings, AuditLog, Host, InspectionReport, McpRule,
-    McpService,
+    AiModel, AiProvider, AiRule, AlertSettings, AuditLog, AuthType, Host, InspectionReport,
+    McpPermissionMode, McpRule, McpService,
 };
 use rusqlite::{params, Connection, Row};
 use rusqlite::OptionalExtension;
@@ -128,7 +128,7 @@ impl Db {
                 host.address,
                 host.port as i64,
                 host.username,
-                host.auth_type,
+                host.auth_type.as_str(),
                 host.key_path,
                 host.notes,
                 host.created_at as i64,
@@ -149,7 +149,7 @@ impl Db {
                 host.address,
                 host.port as i64,
                 host.username,
-                host.auth_type,
+                host.auth_type.as_str(),
                 host.key_path,
                 host.notes,
             ],
@@ -381,26 +381,31 @@ impl Db {
 
     pub fn get_mcp_service(&self) -> rusqlite::Result<McpService> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT enabled, host_ids, permission_mode, token, port, updated_at
-             FROM mcp_service WHERE id=1",
-            [],
-            |row| {
-                Ok(McpService {
-                    enabled: row.get::<_, i64>(0)? != 0,
-                    host_ids: serde_json::from_str(&row.get::<_, String>(1)?)
-                        .unwrap_or_default(),
-                    permission_mode: row.get(2)?,
-                    token: row.get(3)?,
-                    port: row.get(4)?,
-                    updated_at: row.get::<_, i64>(5)? as u64,
-                })
-            },
-        )
-        .or(Ok(McpService {
+        let row = conn
+            .query_row(
+                "SELECT enabled, host_ids, permission_mode, token, port, updated_at
+                 FROM mcp_service WHERE id=1",
+                [],
+                |row| {
+                    Ok(McpService {
+                        enabled: row.get::<_, i64>(0)? != 0,
+                        host_ids: serde_json::from_str(&row.get::<_, String>(1)?)
+                            .unwrap_or_default(),
+                        permission_mode: row
+                            .get::<_, String>(2)?
+                            .parse()
+                            .unwrap_or(McpPermissionMode::Confirm),
+                        token: row.get(3)?,
+                        port: row.get(4)?,
+                        updated_at: row.get::<_, i64>(5)? as u64,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row.unwrap_or(McpService {
             enabled: false,
             host_ids: Vec::new(),
-            permission_mode: "confirm".to_string(),
+            permission_mode: McpPermissionMode::Confirm,
             token: None,
             port: None,
             updated_at: 0,
@@ -417,7 +422,7 @@ impl Db {
             params![
                 s.enabled as i64,
                 serde_json::to_string(&s.host_ids).unwrap_or_else(|_| "[]".to_string()),
-                s.permission_mode,
+                s.permission_mode.as_str(),
                 s.token,
                 s.port.map(|p| p as i64),
                 s.updated_at as i64,
@@ -570,7 +575,7 @@ fn row_to_host(row: &Row<'_>) -> rusqlite::Result<Host> {
         address: row.get(2)?,
         port: row.get::<_, i64>(3)? as u16,
         username: row.get(4)?,
-        auth_type: row.get(5)?,
+        auth_type: row.get::<_, String>(5)?.parse().unwrap_or(AuthType::Key),
         key_path: row.get(6)?,
         notes: row.get(7)?,
         created_at: row.get::<_, i64>(8)? as u64,
