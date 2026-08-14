@@ -22,7 +22,7 @@ KeyWisp Agent 是一款桌面端 SSH 管理工具，内置**自研的 AI Agent �
 
 请前往 [GitHub Releases](https://github.com/shaguocgl/keywisp-agent/releases) 下载最新安装包：
 
-- macOS：下载 `.dmg`
+- macOS：下载 `.dmg`（Universal，同时支持 Apple Silicon 与 Intel）
 - Windows：下载 `.exe`
 
 > ⚠️ macOS 版本目前未做 Apple 公证。连接使用密码认证的主机时，系统可能会弹出“keywisp-agent 想从钥匙串获取机密信息”的提示，并可能要求输入 macOS 钥匙串密码；这是 macOS 对未公证应用访问 Keychain 的正常授权提示。
@@ -45,7 +45,7 @@ KeyWisp Agent 是一款桌面端 SSH 管理工具，内置**自研的 AI Agent �
 - 单个厂商支持配置多个模型，聊天窗口底部可随时切换
 - 流式回复，Markdown 渲染（代码块 / 表格 / 列表）
 - 工具调用：`exec_command`、`read_file`、`list_dir`、`resource_usage`
-- 会话内多轮上下文，可随时中断 / 清空
+- 每台主机独立会话历史，切换标签或重开聊天面板自动恢复，可随时中断 / 清空
 
 ### MCP 服务
 
@@ -154,11 +154,11 @@ src-tauri/target/release/bundle/nsis/
 
 ### 自动发布
 
-推送与应用版本一致的 Git 标签（例如当前版本使用 `v0.1.0`）会触发 GitHub Actions：自动构建 macOS 通用 DMG（Intel + Apple Silicon）与 Windows x64 NSIS 安装包，并上传至同名 GitHub Release。发布前请确保 `package.json` 与 `src-tauri/tauri.conf.json` 中的版本号一致。
+推送与应用版本一致的 Git 标签（例如当前版本使用 `v0.1.1`）会触发 GitHub Actions：自动构建 macOS 通用 DMG（Intel + Apple Silicon）与 Windows x64 NSIS 安装包，并上传至同名 GitHub Release。发布前请确保 `package.json`、`src-tauri/tauri.conf.json` 与 `src-tauri/Cargo.toml` 中的版本号一致。
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 ## 📖 使用说明
@@ -183,6 +183,8 @@ src/                   前端（React + xterm.js）
   assets/              KeyWisp 界面与文档 logo
 src-tauri/src/         Rust 后端
   agent.rs             AI Agent 运行时（流式解析、工具循环、审批、审计）
+  safety.rs            安全判定与脱敏（危险命令 / 只读检测 / 输出脱敏）
+  util.rs              通用工具函数（时间戳 / 截断 / shell 转义 / token）
   session.rs           SSH 交互会话（russh shell channel）
   russh.rs             russh 连接池（AI / MCP 工具执行，连接复用）
   hosts.rs             主机配置

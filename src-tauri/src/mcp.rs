@@ -457,7 +457,7 @@ async fn handle_jsonrpc(app: &AppHandle, body: &str) -> String {
             serde_json::json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": { "name": "keywisp-ssh", "version": "0.1.0" }
+                "serverInfo": { "name": "keywisp-ssh", "version": env!("CARGO_PKG_VERSION") }
             }),
         ),
         "notifications/initialized" => String::new(),
@@ -765,4 +765,3 @@ fn resolve_host<'a>(hosts: &'a [Host], key: Option<&str>) -> Result<&'a Host, St
         .find(|h| h.id == key || h.name == key || h.address == key)
         .ok_or_else(|| format!("未找到主机 {key}，请先调用 list_hosts 查看可用主机"))
 }
-
