@@ -18,6 +18,15 @@ KeyWisp Agent 是一款桌面端 SSH 管理工具，内置**自研的 AI Agent �
 
 > 🤖 **Agent 编排层完全自研**：核心工具调用循环（SSE 流式解析 → 工具执行 → 结果回填）由本项目手写实现，**不依赖 LangChain / OpenAI Agents SDK / Vercel AI SDK 等框架**——审批拦截、安全策略、审计留痕全部自己掌控。详细设计见 [实现细节](docs/实现细节.md)。
 
+## 📥 下载
+
+请前往 [GitHub Releases](https://github.com/shaguocgl/keywisp-agent/releases) 下载最新安装包：
+
+- macOS：下载 `.dmg`
+- Windows：下载 `.exe`
+
+> ⚠️ macOS 版本目前未做 Apple 公证。连接使用密码认证的主机时，系统可能会弹出“keywisp-agent 想从钥匙串获取机密信息”的提示，并可能要求输入 macOS 钥匙串密码；这是 macOS 对未公证应用访问 Keychain 的正常授权提示。
+
 ## ✨ 功能特性
 
 ### SSH 基础管理
