@@ -3065,7 +3065,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "keywisp-agent"
+name = "keywisp-agent-ops"
 version = "0.1.1"
 dependencies = [
  "base64 0.22.1",

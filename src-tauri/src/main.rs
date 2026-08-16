@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    keywisp_agent_lib::run()
+    keywisp_agent_ops_lib::run()
 }

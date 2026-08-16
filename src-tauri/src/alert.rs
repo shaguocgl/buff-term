@@ -119,7 +119,7 @@ fn test_email_html() -> String {
       .badge{display:inline-block;margin-top:12px;padding:5px 12px;border-radius:999px;background:#34d399;color:#fff;font-weight:700;font-size:12px;}
       code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#f1f3f5;padding:2px 6px;border-radius:5px;}
     </style></head><body><div class="card">
-      <div class="hero"><h1>KeyWisp Agent</h1><p>通知配置测试邮件</p></div>
+      <div class="hero"><h1>KeyWisp Agent Ops</h1><p>通知配置测试邮件</p></div>
       <div class="body">
         <p>这是一封测试邮件，说明你的 <strong>邮件通知配置</strong> 已生效。</p>
         <p>后续执行 <strong>AI 巡检</strong> 时，KeyWisp 会通过这个 SMTP 渠道自动发送巡检报告。</p>

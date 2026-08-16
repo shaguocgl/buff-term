@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "KeyWisp Agent",
+  "productName": "KeyWisp Agent Ops",
   "version": "0.1.1",
   "identifier": "com.keywisp.agent",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "KeyWisp Agent",
+        "title": "KeyWisp Agent Ops",
         "width": 1200,
         "height": 800,
         "minWidth": 900,

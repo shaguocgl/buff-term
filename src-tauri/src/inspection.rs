@@ -410,7 +410,7 @@ fn tool_message(id: &str, content: &str) -> serde_json::Value {
 
 fn inspection_system_prompt(host: &Host) -> String {
     format!(
-        "你是 KeyWisp Agent 的服务器巡检专家，负责对当前连接的服务器生成专业、可执行的中文巡检报告。\n\
+        "你是 KeyWisp Agent Ops 的服务器巡检专家，负责对当前连接的服务器生成专业、可执行的中文巡检报告。\n\
          当前服务器：{}（{}@{}:{}）\n\
          你只能调用 inspect_exec 工具执行只读检查；不得执行任何写操作。\n\
          报告必须包含以下四个模块：\n\
@@ -483,7 +483,7 @@ fn wrap_email_html(host_label: &str, risk: &str, body: &str) -> String {
          <body style=\"margin:0;padding:24px;background:#f4f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2430;\">\
          <div style=\"max-width:900px;margin:0 auto;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,.08);\">\
          <div style=\"padding:24px 28px;background:linear-gradient(135deg,#2f3b52,#4f5d78);color:#ffffff;\">\
-         <div style=\"font-size:13px;opacity:.75;\">KeyWisp Agent · AI 巡检报告</div>\
+         <div style=\"font-size:13px;opacity:.75;\">KeyWisp Agent Ops · AI 巡检报告</div>\
          <div style=\"font-size:22px;font-weight:700;margin-top:4px;\">{}</div>\
          <div style=\"margin-top:10px;font-size:13px;\">风险等级：<span style=\"display:inline-block;padding:2px 10px;border-radius:999px;background:{};color:#fff;\">{}</span></div>\
          </div>\
