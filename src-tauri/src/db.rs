@@ -1,6 +1,6 @@
 use crate::models::{
     AiModel, AiProvider, AiRule, AlertSettings, AuditLog, AuthType, Host, InspectionReport,
-    McpPermissionMode, McpRule, McpService,
+    McpPermissionMode, McpRule, McpService, Remediation,
 };
 use rusqlite::{params, Connection, Row};
 use rusqlite::OptionalExtension;
@@ -100,6 +100,24 @@ impl Db {
                  created_at    INTEGER NOT NULL,
                  finished_at   INTEGER,
                  duration_ms   INTEGER
+             );
+             CREATE TABLE IF NOT EXISTS remediations (
+                 id             TEXT PRIMARY KEY,
+                 report_id      TEXT NOT NULL UNIQUE,
+                 host_id        TEXT NOT NULL,
+                 host_label     TEXT NOT NULL,
+                 provider_id    TEXT NOT NULL,
+                 provider_name  TEXT NOT NULL,
+                 model          TEXT NOT NULL,
+                 intervention   TEXT NOT NULL DEFAULT '',
+                 plan_markdown  TEXT NOT NULL DEFAULT '',
+                 steps_json     TEXT NOT NULL DEFAULT '[]',
+                 status         TEXT NOT NULL DEFAULT 'draft',
+                 error          TEXT,
+                 created_at     INTEGER NOT NULL,
+                 started_at     INTEGER,
+                 finished_at    INTEGER,
+                 duration_ms    INTEGER
              );",
         )?;
         Ok(Self {
@@ -115,6 +133,17 @@ impl Db {
         )?;
         let rows = stmt.query_map([], row_to_host)?;
         rows.collect()
+    }
+
+    pub fn get_host(&self, id: &str) -> rusqlite::Result<Option<Host>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, name, address, port, username, auth_type, key_path, notes, created_at
+             FROM hosts WHERE id=?1",
+            params![id],
+            row_to_host,
+        )
+        .optional()
     }
 
     pub fn insert(&self, host: &Host) -> rusqlite::Result<()> {
@@ -566,6 +595,108 @@ impl Db {
         conn.execute("DELETE FROM inspection_reports WHERE id=?1", params![id])?;
         Ok(())
     }
+
+    pub fn upsert_remediation(&self, remediation: &Remediation) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let steps_json = serde_json::to_string(&remediation.steps)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        conn.execute(
+            "INSERT INTO remediations (
+                 id, report_id, host_id, host_label, provider_id, provider_name, model,
+                 intervention, plan_markdown, steps_json, status, error,
+                 created_at, started_at, finished_at, duration_ms
+             ) VALUES (
+                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+             )
+             ON CONFLICT(report_id) DO UPDATE SET
+                 id=excluded.id,
+                 host_id=excluded.host_id,
+                 host_label=excluded.host_label,
+                 provider_id=excluded.provider_id,
+                 provider_name=excluded.provider_name,
+                 model=excluded.model,
+                 intervention=excluded.intervention,
+                 plan_markdown=excluded.plan_markdown,
+                 steps_json=excluded.steps_json,
+                 status=excluded.status,
+                 error=excluded.error,
+                 created_at=excluded.created_at,
+                 started_at=excluded.started_at,
+                 finished_at=excluded.finished_at,
+                 duration_ms=excluded.duration_ms",
+            params![
+                remediation.id,
+                remediation.report_id,
+                remediation.host_id,
+                remediation.host_label,
+                remediation.provider_id,
+                remediation.provider_name,
+                remediation.model,
+                remediation.intervention,
+                remediation.plan_markdown,
+                steps_json,
+                remediation.status,
+                remediation.error,
+                remediation.created_at as i64,
+                remediation.started_at.map(|v| v as i64),
+                remediation.finished_at.map(|v| v as i64),
+                remediation.duration_ms.map(|v| v as i64),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_remediation(&self, remediation: &Remediation) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let steps_json = serde_json::to_string(&remediation.steps)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        conn.execute(
+            "UPDATE remediations SET
+                 plan_markdown=?2, steps_json=?3, status=?4, error=?5,
+                 started_at=?6, finished_at=?7, duration_ms=?8
+             WHERE id=?1",
+            params![
+                remediation.id,
+                remediation.plan_markdown,
+                steps_json,
+                remediation.status,
+                remediation.error,
+                remediation.started_at.map(|v| v as i64),
+                remediation.finished_at.map(|v| v as i64),
+                remediation.duration_ms.map(|v| v as i64),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_remediation(&self, id: &str) -> rusqlite::Result<Option<Remediation>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, report_id, host_id, host_label, provider_id, provider_name, model,
+                    intervention, plan_markdown, steps_json, status, error,
+                    created_at, started_at, finished_at, duration_ms
+             FROM remediations WHERE id=?1",
+            params![id],
+            row_to_remediation,
+        )
+        .optional()
+    }
+
+    pub fn get_remediation_by_report(
+        &self,
+        report_id: &str,
+    ) -> rusqlite::Result<Option<Remediation>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, report_id, host_id, host_label, provider_id, provider_name, model,
+                    intervention, plan_markdown, steps_json, status, error,
+                    created_at, started_at, finished_at, duration_ms
+             FROM remediations WHERE report_id=?1",
+            params![report_id],
+            row_to_remediation,
+        )
+        .optional()
+    }
 }
 
 fn row_to_host(row: &Row<'_>) -> rusqlite::Result<Host> {
@@ -654,6 +785,29 @@ fn row_to_inspection_report(row: &Row<'_>) -> rusqlite::Result<InspectionReport>
         email_sent: row.get::<_, i64>(11)? != 0,
         error: row.get(12)?,
         created_at: row.get::<_, i64>(13)? as u64,
+        finished_at: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
+        duration_ms: row.get::<_, Option<i64>>(15)?.map(|v| v as u64),
+    })
+}
+
+fn row_to_remediation(row: &Row<'_>) -> rusqlite::Result<Remediation> {
+    let steps_json: String = row.get(9)?;
+    let steps = serde_json::from_str(&steps_json).unwrap_or_default();
+    Ok(Remediation {
+        id: row.get(0)?,
+        report_id: row.get(1)?,
+        host_id: row.get(2)?,
+        host_label: row.get(3)?,
+        provider_id: row.get(4)?,
+        provider_name: row.get(5)?,
+        model: row.get(6)?,
+        intervention: row.get(7)?,
+        plan_markdown: row.get(8)?,
+        steps,
+        status: row.get(10)?,
+        error: row.get(11)?,
+        created_at: row.get::<_, i64>(12)? as u64,
+        started_at: row.get::<_, Option<i64>>(13)?.map(|v| v as u64),
         finished_at: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
         duration_ms: row.get::<_, Option<i64>>(15)?.map(|v| v as u64),
     })

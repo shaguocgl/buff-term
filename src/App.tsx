@@ -31,7 +31,7 @@ import MonitorPanel from './components/MonitorPanel';
 import SftpPanel from './components/SftpPanel';
 import TerminalView from './components/TerminalView';
 import ToastContainer, { type ToastItem } from './components/Toast';
-import logoUrl from './assets/keywisp-logo.svg';
+import logoUrl from './assets/keywisp-logo.png';
 import {
   BellIcon,
   ImportIcon,
@@ -171,6 +171,9 @@ function App() {
     if (existing) {
       setActiveKey(existing.key);
       setChatOpen(true);
+      setSftpOpen(false);
+      setMonitorOpen(false);
+      setInspectionOpen(false);
       return;
     }
     const key = ++tabSeq.current;
@@ -499,6 +502,9 @@ function App() {
                       );
                       setLoadingHostId(null);
                       setChatOpen(true);
+                      setSftpOpen(false);
+                      setMonitorOpen(false);
+                      setInspectionOpen(false);
                     }}
                     onFailed={(key, message) => {
                       setTabs((prev) =>

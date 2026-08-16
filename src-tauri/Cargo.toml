@@ -1,6 +1,6 @@
 [package]
 name = "keywisp-agent-ops"
-version = "0.1.1"
+version = "1.0.0"
 description = "桌面端 SSH 管理 + AI Agent 工具"
 authors = ["KeyWisp"]
 edition = "2021"

@@ -21,6 +21,11 @@ import type {
   InspectionProgressPayload,
   InspectionDonePayload,
   InspectionErrorPayload,
+  Remediation,
+  RemediationProgressPayload,
+  RemediationDonePayload,
+  RemediationErrorPayload,
+  RemediationStepInput,
 } from './types';
 
 export const listHosts = () => invoke<Host[]>('list_hosts');
@@ -102,6 +107,37 @@ export const onInspectionError = (
   cb: (payload: InspectionErrorPayload) => void,
 ) =>
   listen<InspectionErrorPayload>('inspection:error', (event) =>
+    cb(event.payload),
+  );
+
+export const startRemediationPlanning = (reportId: string, intervention: string) =>
+  invoke<string>('start_remediation_planning', { reportId, intervention });
+export const getRemediation = (reportId: string) =>
+  invoke<Remediation | null>('get_remediation', { reportId });
+export const executeRemediation = (
+  remediationId: string,
+  steps: RemediationStepInput[],
+) => invoke<void>('execute_remediation', { remediationId, steps });
+export const cancelRemediation = (remediationId: string) =>
+  invoke<void>('cancel_remediation', { remediationId });
+export const retryRemediation = (remediationId: string) =>
+  invoke<void>('retry_remediation', { remediationId });
+export const onRemediationProgress = (
+  cb: (payload: RemediationProgressPayload) => void,
+) =>
+  listen<RemediationProgressPayload>('remediation:progress', (event) =>
+    cb(event.payload),
+  );
+export const onRemediationDone = (
+  cb: (payload: RemediationDonePayload) => void,
+) =>
+  listen<RemediationDonePayload>('remediation:done', (event) =>
+    cb(event.payload),
+  );
+export const onRemediationError = (
+  cb: (payload: RemediationErrorPayload) => void,
+) =>
+  listen<RemediationErrorPayload>('remediation:error', (event) =>
     cb(event.payload),
   );
 

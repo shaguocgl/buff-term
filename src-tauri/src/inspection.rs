@@ -202,7 +202,7 @@ async fn run_inspection_inner(
     let baseline = russh
         .exec(host, BASELINE_SCRIPT, Duration::from_secs(50))
         .await?;
-    let baseline_text = sanitize(&truncate_output(&baseline.text, 32000));
+    let baseline_text = sanitize(&truncate_output(&baseline.text, 52000));
 
     if cancelled(flag) {
         report.status = "cancelled".to_string();
@@ -417,8 +417,15 @@ fn inspection_system_prompt(host: &Host) -> String {
          1. 资源使用情况\n\
          2. 运行服务\n\
          3. 安全基线\n\
-         4. 登录与风险事件\n\
-         最后给出总体风险等级（低/中/高）和优先级明确的整改建议。",
+         4. 木马与挖矿风险\n\
+         5. 登录与风险事件\n\
+         最后给出总体风险等级（低/中/高）和优先级明确的整改建议。\n\
+         整改建议必须严格基于采集结果中的实际配置与数值，禁止凭空猜测或套用模板：\n\
+         - 若某项配置已经满足推荐阈值（例如 fail2ban maxretry 已小于等于 3、bantime 已大于等于 3600 秒），\
+         不要再次建议“降低/提高”该值；应明确说明“已满足，无需整改”，并引用实际数值。\n\
+         - 若采集结果中缺少某项配置数据，不要臆造当前值，应说明“未采集到，建议人工确认”。\n\
+         木马与挖矿判断只依据采集到的高 CPU 进程、/tmp|/dev/shm 可疑可执行文件、异常对外连接、\
+         cron/systemd timer、SSH 授权文件变动等证据；只报告可疑点和证据，并建议人工确认，不要仅凭进程名就断定已感染。",
         host.name,
         host.username,
         host.address,
@@ -511,10 +518,36 @@ docker ps --format '{{.Names}} {{.Image}} {{.Status}} {{.Ports}}' 2>/dev/null | 
 echo "==SECURITY=="
 sshd -T 2>/dev/null | grep -E '^(permitrootlogin|passwordauthentication|pubkeyauthentication|permitemptypasswords|x11forwarding)'
 for s in ufw firewalld fail2ban; do echo "$s=$(systemctl is-active "$s" 2>/dev/null || echo unknown)"; done
+echo "==FAIL2BAN=="
+fail2ban-client status 2>/dev/null || true
+for f in /etc/fail2ban/jail.local /etc/fail2ban/jail.conf /etc/fail2ban/jail.d/*.conf /etc/fail2ban/jail.d/*.local; do
+  [ -f "$f" ] || continue
+  echo "--- $f ---"
+  grep -Ei '^\s*(maxretry|bantime|findtime|enabled|backend|banaction|ignoreip)' "$f" 2>/dev/null | head -n 80
+done
 ufw status verbose 2>/dev/null | head -n 30
 firewall-cmd --state 2>/dev/null || true
 getent passwd 2>/dev/null | awk -F: '$7 ~ /sh$/ {print $1":"$3":"$7}' | head -n 120
 grep -RhE '^(root|%sudo|%wheel)[[:space:]]' /etc/sudoers /etc/sudoers.d 2>/dev/null | head -n 80
+echo "==MALWARE=="
+ps -eo pid,user,%cpu,%mem,args 2>/dev/null | grep -Ei 'xmrig|kdevtmpfsi|kinsing|minergate|cgminer|bfgminer|ethminer|t-rex|phoenixminer|nbminer|gminer|/tmp/|/dev/shm/' | grep -v grep | head -n 80
+ss -tunp 2>/dev/null | head -n 120 || true
+for c in /var/spool/cron/crontabs/* /var/spool/cron/*; do
+  [ -f "$c" ] || continue
+  echo "--- $c ---"
+  head -n 60 "$c" 2>/dev/null
+done
+crontab -l 2>/dev/null | head -n 80 || true
+for f in /etc/crontab /etc/cron.d/* /etc/cron.daily/* /etc/cron.hourly/* /etc/cron.weekly/* /etc/cron.monthly/*; do
+  [ -f "$f" ] || continue
+  echo "--- $f ---"
+  head -n 40 "$f" 2>/dev/null
+done
+systemctl list-timers --all --no-pager --no-legend 2>/dev/null | head -n 80
+echo "-- tmp-shm-executables --"
+find /tmp /dev/shm /var/tmp -maxdepth 2 -type f \( -perm -u+x -o -perm -g+x -o -perm -o+x \) -ls 2>/dev/null | head -n 80
+echo "-- recent-authorized-keys --"
+find /root /home -maxdepth 4 -type f -name 'authorized_keys' -mtime -14 -ls 2>/dev/null | head -n 60
 echo "==EVENTS=="
 last -20 2>/dev/null || true
 lastb -20 2>/dev/null || true

@@ -9,6 +9,7 @@ mod inspection;
 mod mcp;
 mod models;
 mod monitor;
+mod remediation;
 mod russh;
 mod safety;
 mod session;
@@ -42,6 +43,7 @@ pub fn run() {
             })?;
             app.manage(db);
             app.manage(inspection::InspectionManager::default());
+            app.manage(remediation::RemediationManager::default());
             app.manage(mcp::McpServiceManager::default());
             app.manage(mcp::ApprovalRegistry::default());
             // 若上次退出前开启了 MCP 服务，启动时自动恢复
@@ -90,6 +92,11 @@ pub fn run() {
             inspection::list_inspection_reports,
             inspection::delete_inspection_report,
             inspection::cancel_inspection,
+            remediation::start_remediation_planning,
+            remediation::get_remediation,
+            remediation::execute_remediation,
+            remediation::cancel_remediation,
+            remediation::retry_remediation,
             alert::get_alert_settings,
             alert::save_alert_settings,
             alert::test_alert_settings,

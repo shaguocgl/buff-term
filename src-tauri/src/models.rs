@@ -172,6 +172,44 @@ pub struct InspectionReport {
     pub duration_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemediationStep {
+    pub id: String,
+    pub description: String,
+    pub command: String,
+    pub timeout_secs: u64,
+    pub dangerous: bool,
+    pub status: String,
+    pub output: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemediationStepInput {
+    pub description: String,
+    pub command: String,
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Remediation {
+    pub id: String,
+    pub report_id: String,
+    pub host_id: String,
+    pub host_label: String,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub model: String,
+    pub intervention: String,
+    pub plan_markdown: String,
+    pub steps: Vec<RemediationStep>,
+    pub status: String,
+    pub error: Option<String>,
+    pub created_at: u64,
+    pub started_at: Option<u64>,
+    pub finished_at: Option<u64>,
+    pub duration_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AlertSettings {
     pub smtp_host: Option<String>,

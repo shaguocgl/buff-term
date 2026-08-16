@@ -206,6 +206,70 @@ export interface InspectionErrorPayload {
   message: string;
 }
 
+export type RemediationStatus =
+  | 'draft'
+  | 'planning'
+  | 'plan_ready'
+  | 'executing'
+  | 'success'
+  | 'failed'
+  | 'cancelled';
+
+export type RemediationStepStatus = 'pending' | 'running' | 'success' | 'error';
+
+export interface RemediationStep {
+  id: string;
+  description: string;
+  command: string;
+  timeout_secs: number;
+  dangerous: boolean;
+  status: RemediationStepStatus;
+  output: string | null;
+}
+
+export interface RemediationStepInput {
+  description: string;
+  command: string;
+  timeout_secs: number;
+}
+
+export interface Remediation {
+  id: string;
+  report_id: string;
+  host_id: string;
+  host_label: string;
+  provider_id: string;
+  provider_name: string;
+  model: string;
+  intervention: string;
+  plan_markdown: string;
+  steps: RemediationStep[];
+  status: RemediationStatus;
+  error: string | null;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+  duration_ms: number | null;
+}
+
+export interface RemediationProgressPayload {
+  remediation_id: string;
+  phase: 'planning' | 'step_start' | 'step_success' | 'step_error';
+  message: string;
+  step_index?: number | null;
+  total?: number | null;
+}
+
+export interface RemediationDonePayload {
+  remediation_id: string;
+  status: RemediationStatus;
+}
+
+export interface RemediationErrorPayload {
+  remediation_id: string;
+  message: string;
+}
+
 export interface HistoryToolCall {
   id: string;
   type: string;
