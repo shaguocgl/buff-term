@@ -62,7 +62,19 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: KeyWisp Agent Ops v__VERSION__
-          releaseBody: See the assets below to download and install this version.
+          releaseBody: |
+            ## 升级内容
+
+            - 新增巡检报告「一键整改」：输入整改干预意见 → AI 生成详细整改步骤 → 用户确认后自动执行，支持步骤编辑、执行进度、失败重试与全程审计。
+            - 整改完成或失败后自动发送邮件通知，包含整改步骤与执行结果。
+            - 巡检新增「木马 / 挖矿风险」模块，覆盖可疑进程、异常连接、crontab / systemd timer、临时目录可执行文件与 SSH 授权文件变动。
+            - 巡检采集补充 fail2ban 实际配置，整改建议基于真实数值，避免对已达标项重复建议。
+            - 修复 AI 与巡检侧边栏可能同时展开的问题，保证最多展开一个侧边栏。
+            - 更新应用 Logo 与安装包图标。
+
+            ## 安装包
+
+            请根据操作系统下载对应的 DMG 或 NSIS 安装包。
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
