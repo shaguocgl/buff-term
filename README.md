@@ -73,8 +73,11 @@ KeyWisp Agent Ops 是一款桌面端 SSH 管理工具，内置**自研的 AI Age
 
 - 监控面板：CPU / 内存 / 磁盘仪表盘 + 负载 + TOP 进程，每 5 秒自动刷新
 - AI 巡检：采集服务器基线数据后由 AI 生成中文 Markdown 报告；仅允许白名单内的只读命令，支持取消、历史报告与风险等级
+- 巡检新增「木马 / 挖矿风险」模块：覆盖可疑进程、对外连接、crontab / systemd timer、临时目录可执行文件与 SSH 授权文件变动
+- 一键整改：输入整改干预意见后，AI 结合巡检报告生成详细整改步骤；用户确认后自动执行，支持步骤编辑、失败重试、全程审计
 - 通知配置：邮件（SMTP）发送渠道配置，支持测试连接
 - 巡检报告可自动转为 HTML 并发送至已配置的邮件收件人
+- 整改完成后自动发送邮件，包含整改步骤与执行结果
 - 版本检查：侧边栏可显示当前版本并检查 GitHub Releases 的最新正式版本，发现更新后可跳转下载
 
 ## 🧱 技术栈
@@ -167,7 +170,7 @@ git push origin v1.0.0
 2. **连接**：点击主机卡片即可连接，首次连接按终端提示确认主机指纹。
 3. **配置 AI**：点击底部「AI Agent」卡片，选择平台预设（如 DeepSeek），填写 API Key 并「测试连接」，保存后即可使用。
 4. **AI 对话**：连接服务器后右侧出现聊天面板；底部可切换安全级别（默认智能审核）与当前模型。
-5. **AI 巡检**：连接服务器后点击终端工具栏的「巡检」，系统采集只读基线数据并生成报告；配置 SMTP 后会自动发送 HTML 报告。
+5. **AI 巡检**：连接服务器后点击终端工具栏的「巡检」，系统采集只读基线数据并生成报告；配置 SMTP 后会自动发送 HTML 报告。报告生成后可直接「一键整改」，输入干预意见、确认步骤后自动执行整改。
 6. **MCP 服务**：侧边栏「MCP 服务」勾选要开放的服务器 → 选择权限模式 → 启动，复制生成的配置 JSON 粘贴到 Codex / Claude Desktop 即可接入。
 7. **操作日志与更新**：侧边栏底部可查看所有 AI / MCP 工具调用记录；「检查更新」会查询 GitHub 最新正式 Release，发现版本后可跳转下载。
 
@@ -193,11 +196,12 @@ src-tauri/src/         Rust 后端
   audit.rs             审计日志查询
   monitor.rs           资源快照采集（CPU / 内存 / 磁盘 / 负载 / TOP 进程）
   alert.rs             通知配置（邮件 SMTP 配置与测试）
-  inspection.rs        AI 只读巡检、报告生成与邮件投递
+  inspection.rs        AI 只读巡检（含木马 / 挖矿风险采集）、报告生成与邮件投递
+  remediation.rs       一键整改（整改步骤生成、执行、重试、审计与邮件通知）
   mcp.rs               对外 MCP 服务（HTTP + token + 权限模式）
   sftp.rs              SFTP 文件操作（russh-sftp）
   update.rs            GitHub Release 版本检查
-  db.rs                SQLite（主机、AI 配置、规则、审计）
+  db.rs                SQLite（主机、AI 配置、规则、审计、巡检与整改）
 src-tauri/icons/       桌面应用图标（PNG / ICNS / ICO）
 .github/workflows/     GitHub Actions 自动构建与发布
 docs/                  实现细节
