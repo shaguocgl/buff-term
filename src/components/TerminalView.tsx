@@ -161,8 +161,9 @@ export default function TerminalView({
     termRef.current = term;
     fitRef.current = fit;
 
-    // WKWebView 下 xterm.js 的 input/keypress 路径在快速输入时可能丢失字符。
-    // 对于普通可打印字符，直接从原生 keydown 截获并发送，绕开 xterm 的文本区差异。
+    // 开发模式下 WKWebView 的 xterm.js input/keypress 路径可能丢字，
+    // 普通可打印字符直接从原生 keydown 截获发送；发布构建中 xterm 输入正常，
+    // 若再走该路径会与 onData 重复发送导致字符双显，因此仅开发模式启用。
     const handleKeyDownCapture = (event: KeyboardEvent) => {
       if (
         event.isComposing ||
@@ -179,7 +180,9 @@ export default function TerminalView({
         sendInput(Array.from(new TextEncoder().encode(event.key)));
       }
     };
-    container.addEventListener('keydown', handleKeyDownCapture, true);
+    if (import.meta.env.DEV) {
+      container.addEventListener('keydown', handleKeyDownCapture, true);
+    }
 
     term.onData((data) => {
       sendInput(Array.from(new TextEncoder().encode(data)));
@@ -233,7 +236,9 @@ export default function TerminalView({
       disposed = true;
       disposedRef.current = true;
       observer.disconnect();
-      container.removeEventListener('keydown', handleKeyDownCapture, true);
+      if (import.meta.env.DEV) {
+        container.removeEventListener('keydown', handleKeyDownCapture, true);
+      }
       unData?.();
       unStatus?.();
       const sid = sessionIdRef.current;
