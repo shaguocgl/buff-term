@@ -68,19 +68,23 @@ function safeParseArgs(raw: string): Record<string, unknown> {
   }
 }
 
+// 消息 ID 使用模块级单调递增序列，避免组件重新挂载后从 0 重新计数，
+// 与恢复出来的历史消息 ID 发生冲突。
+let chatMessageSeq = 0;
+const nextChatMessageId = () => ++chatMessageSeq;
+
 /// 把后端 OpenAI 格式的扁平历史还原成「user 一条 + assistant 一条（含工具卡片）」的展示结构。
-function historyToMessages(history: HistoryEntry[]): ChatMsg[] {
+function historyToMessages(history: HistoryEntry[], nextId: () => number): ChatMsg[] {
   const result: ChatMsg[] = [];
-  let seq = 0;
   let currentAssistant: ChatMsg | null = null;
   for (const entry of history) {
     if (entry.role === 'system') continue;
     if (entry.role === 'user') {
       currentAssistant = null;
-      result.push({ id: ++seq, role: 'user', content: entry.content ?? '', tools: [] });
+      result.push({ id: nextId(), role: 'user', content: entry.content ?? '', tools: [] });
     } else if (entry.role === 'assistant') {
       if (!currentAssistant) {
-        currentAssistant = { id: ++seq, role: 'assistant', content: '', tools: [] };
+        currentAssistant = { id: nextId(), role: 'assistant', content: '', tools: [] };
         result.push(currentAssistant);
       }
       if (entry.content) currentAssistant.content += entry.content;
@@ -124,10 +128,10 @@ export default function ChatPanel({
       (localStorage.getItem('keywisp.permissionMode') as 'all' | 'smart' | 'none') ||
       'smart',
   );
-  const seq = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const activeAssistantId = useRef<number | null>(null);
   const composingRef = useRef(false);
+  const hasSentRef = useRef(false);
 
   const changePermissionMode = (mode: 'all' | 'smart' | 'none') => {
     setPermissionMode(mode);
@@ -146,8 +150,6 @@ export default function ChatPanel({
       updateLastAssistant((m) => ({ ...m, error: String(err) }));
     }
   };
-
-  const nextSeq = () => ++seq.current;
 
   const updateLastAssistant = useCallback(
     (updater: (m: ChatMsg) => ChatMsg) => {
@@ -170,7 +172,9 @@ export default function ChatPanel({
     getHistory(hostId)
       .then((history) => {
         if (cancelled) return;
-        setMessages(historyToMessages(history));
+        // 历史加载返回前用户已经发出新消息时，不要用旧历史覆盖当前对话。
+        if (hasSentRef.current) return;
+        setMessages(historyToMessages(history, nextChatMessageId));
         activeAssistantId.current = null;
       })
       .catch(() => {});
@@ -253,17 +257,21 @@ export default function ChatPanel({
   const handleSend = () => {
     const text = input.trim();
     if (!text || busy || !providerConfigured) return;
-    setMessages((prev) => {
-      const userMsg: ChatMsg = { id: nextSeq(), role: 'user', content: text, tools: [] };
-      const assistantMsg: ChatMsg = {
-        id: nextSeq(),
-        role: 'assistant',
-        content: '',
-        tools: [],
-      };
-      activeAssistantId.current = assistantMsg.id;
-      return [...prev, userMsg, assistantMsg];
-    });
+    const userMsg: ChatMsg = {
+      id: nextChatMessageId(),
+      role: 'user',
+      content: text,
+      tools: [],
+    };
+    const assistantMsg: ChatMsg = {
+      id: nextChatMessageId(),
+      role: 'assistant',
+      content: '',
+      tools: [],
+    };
+    activeAssistantId.current = assistantMsg.id;
+    hasSentRef.current = true;
+    setMessages((prev) => [...prev, userMsg, assistantMsg]);
     setInput('');
     setBusy(true);
     agentChat(sessionId, text, permissionMode).catch((err) => {
@@ -341,6 +349,7 @@ export default function ChatPanel({
               agentReset(sessionId, hostId).catch(() => {});
               setMessages([]);
               activeAssistantId.current = null;
+              hasSentRef.current = false;
               setBusy(false);
             }}
           >

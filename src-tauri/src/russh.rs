@@ -156,6 +156,7 @@ pub(crate) async fn do_connect(
     password_override: Option<String>,
 ) -> Result<Handle<ClientHandler>, String> {
     let mut config = Config::default();
+    config.nodelay = true; // 禁用 Nagle，降低交互输入回显延迟
     config.keepalive_interval = Some(Duration::from_secs(15));
     config.keepalive_max = 3;
     config.inactivity_timeout = None; // 禁用空闲回收，避免连接刚建立就被判定超时

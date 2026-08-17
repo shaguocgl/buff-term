@@ -45,10 +45,9 @@ interface Props {
 }
 
 function normalizeDims(dims: { cols: number; rows: number } | undefined) {
-  // docker compose 动态进度单行约 100 字符，列宽不足会换行堆叠，
-  // 因此最小列宽固定为 100（窄窗口下内容不换行，超出部分裁剪）
-  const cols = dims && dims.cols >= 100 && dims.cols <= 400 ? dims.cols : 100;
-  const rows = dims && dims.rows >= 10 && dims.rows <= 200 ? dims.rows : 30;
+  // 按实际可视区域计算列宽，避免强制 100 列导致右侧被裁剪、输入字符“看不到”
+  const cols = Math.max(2, Math.min(400, dims?.cols ?? 100));
+  const rows = Math.max(10, Math.min(200, dims?.rows ?? 30));
   return { cols, rows };
 }
 
@@ -70,7 +69,7 @@ export default function TerminalView({
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sessionIdRef = useRef<number | null>(null);
-  const inputBufRef = useRef<number[]>([]);
+  const pendingInputRef = useRef<number[]>([]);
   const inputChainRef = useRef<Promise<void>>(Promise.resolve());
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -92,12 +91,26 @@ export default function TerminalView({
     const fit = fitRef.current;
     if (!term || !fit) return;
     const { cols, rows } = normalizeDims(fit.proposeDimensions());
-    // 保持 xterm 与 PTY 列宽一致，避免窄容器下 fit 把 term 缩到 100 以下
+    // 保持 xterm 与 PTY 列宽一致，并让终端跟随实际可视区域
     if (term.cols !== cols || term.rows !== rows) {
       term.resize(cols, rows);
     }
     const sid = sessionIdRef.current;
     if (sid !== null) resizeSession(sid, cols, rows).catch(() => {});
+  }, []);
+
+  const sendInput = useCallback((data: number[]) => {
+    inputChainRef.current = inputChainRef.current
+      .then(() => {
+        const sid = sessionIdRef.current;
+        if (sid === null) {
+          // 连接建立前用户已经开始输入时，先放入待发送队列，连接成功后统一补发
+          pendingInputRef.current.push(...data);
+          return;
+        }
+        return sessionInput(sid, data);
+      })
+      .catch(() => {});
   }, []);
 
   const connect = useCallback(async () => {
@@ -114,8 +127,12 @@ export default function TerminalView({
     setConnecting(false);
     setExited(false);
     onOpenedRef.current(tabKey, id);
+    const pending = pendingInputRef.current.splice(0);
+    if (pending.length > 0) {
+      sendInput(pending);
+    }
     applyDims();
-  }, [host, tabKey, applyDims]);
+  }, [host, tabKey, applyDims, sendInput]);
 
   const connectRef = useRef(connect);
   connectRef.current = connect;
@@ -144,28 +161,29 @@ export default function TerminalView({
     termRef.current = term;
     fitRef.current = fit;
 
-    const flushInput = () => {
-      const buf = inputBufRef.current;
-      if (buf.length === 0) return;
-      inputBufRef.current = [];
-      const data = buf.splice(0);
-      inputChainRef.current = inputChainRef.current
-        .then(() => {
-          const sid = sessionIdRef.current;
-          if (sid === null) return;
-          return sessionInput(sid, data);
-        })
-        .catch(() => {});
+    // WKWebView 下 xterm.js 的 input/keypress 路径在快速输入时可能丢失字符。
+    // 对于普通可打印字符，直接从原生 keydown 截获并发送，绕开 xterm 的文本区差异。
+    const handleKeyDownCapture = (event: KeyboardEvent) => {
+      if (
+        event.isComposing ||
+        event.key === 'Process' ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.altKey
+      ) {
+        return;
+      }
+      if (event.key.length === 1) {
+        event.preventDefault();
+        event.stopPropagation();
+        sendInput(Array.from(new TextEncoder().encode(event.key)));
+      }
     };
+    container.addEventListener('keydown', handleKeyDownCapture, true);
 
     term.onData((data) => {
-      const bytes = Array.from(new TextEncoder().encode(data));
-      if (inputBufRef.current.length + bytes.length > 512) {
-        flushInput();
-      }
-      inputBufRef.current.push(...bytes);
+      sendInput(Array.from(new TextEncoder().encode(data)));
     });
-    const inputTimer = window.setInterval(flushInput, 16);
     term.onResize(applyDims);
 
     const observer = new ResizeObserver(() => {
@@ -214,9 +232,8 @@ export default function TerminalView({
     return () => {
       disposed = true;
       disposedRef.current = true;
-      window.clearInterval(inputTimer);
-      flushInput();
       observer.disconnect();
+      container.removeEventListener('keydown', handleKeyDownCapture, true);
       unData?.();
       unStatus?.();
       const sid = sessionIdRef.current;
@@ -228,7 +245,7 @@ export default function TerminalView({
       termRef.current = null;
       fitRef.current = null;
     };
-  }, [host, tabKey, applyDims]);
+  }, [host, tabKey, applyDims, sendInput]);
 
   const handleDisconnect = () => {
     const sid = sessionIdRef.current;
