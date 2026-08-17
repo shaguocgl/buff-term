@@ -71,7 +71,6 @@ export default function TerminalView({
   const sessionIdRef = useRef<number | null>(null);
   const pendingInputRef = useRef<number[]>([]);
   const inputChainRef = useRef<Promise<void>>(Promise.resolve());
-  const nativeSentRef = useRef<{ key: string; ts: number }[]>([]);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const disposedRef = useRef(false);
@@ -163,7 +162,7 @@ export default function TerminalView({
     fitRef.current = fit;
 
     // 普通可打印字符直接从原生 keydown 截获发送（避免 WKWebView 丢字），
-    // onData 收到同一字符时按序去重，避免 xterm 补发导致双显。
+    // onData 收到对应单字节 ASCII 时直接忽略，避免 xterm 补发导致双显。
     const handleKeyDownCapture = (event: KeyboardEvent) => {
       if (
         event.isComposing ||
@@ -177,31 +176,19 @@ export default function TerminalView({
       if (event.key.length === 1) {
         event.preventDefault();
         event.stopPropagation();
-        const now = Date.now();
-        nativeSentRef.current = nativeSentRef.current.filter(
-          (item) => now - item.ts < 2000,
-        );
-        nativeSentRef.current.push({ key: event.key, ts: now });
         sendInput(Array.from(new TextEncoder().encode(event.key)));
       }
     };
     container.addEventListener('keydown', handleKeyDownCapture, true);
 
     term.onData((data) => {
-      const now = Date.now();
-      const queue = nativeSentRef.current.filter(
-        (item) => now - item.ts < 2000,
-      );
-      nativeSentRef.current = queue;
-      const chars = Array.from(data);
-      if (queue.length >= chars.length && chars.length > 0) {
-        const matched = chars.every((ch, i) => queue[i]?.key === ch);
-        if (matched) {
-          nativeSentRef.current = queue.slice(chars.length);
-          return;
-        }
+      const bytes = Array.from(new TextEncoder().encode(data));
+      // 可打印 ASCII 单字节由原生 keydown 直发，这里忽略 xterm 的补发；
+      // 控制键、粘贴、输入法等多字节/特殊输入仍走 onData。
+      if (bytes.length === 1 && bytes[0] >= 0x20 && bytes[0] <= 0x7e) {
+        return;
       }
-      sendInput(Array.from(new TextEncoder().encode(data)));
+      sendInput(bytes);
     });
     term.onResize(applyDims);
 
