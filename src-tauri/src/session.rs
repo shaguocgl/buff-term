@@ -13,8 +13,8 @@ pub struct Session {
     pub host: Host,
     _handle: Handle<ClientHandler>,
     write_half: Arc<ChannelWriteHalf<russh::client::Msg>>,
-    input_tx: mpsc::Sender<Vec<u8>>,
-    resize_tx: mpsc::Sender<(u16, u16)>,
+    input_tx: mpsc::UnboundedSender<Vec<u8>>,
+    resize_tx: mpsc::UnboundedSender<(u16, u16)>,
 }
 
 #[derive(Default)]
@@ -43,7 +43,7 @@ impl SessionManager {
         cols: u16,
         rows: u16,
     ) -> Result<u32, String> {
-        let cols = cols.clamp(100, 400);
+        let cols = cols.clamp(2, 400);
         let rows = rows.clamp(10, 200);
 
         let handle = do_connect(&host, None).await?;
@@ -62,35 +62,16 @@ impl SessionManager {
 
         let (mut read_half, write_half) = channel.split();
         let write_half = Arc::new(write_half);
-        let (input_tx, mut input_rx) = mpsc::channel::<Vec<u8>>(256);
-        let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(16);
+        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (resize_tx, mut resize_rx) = mpsc::unbounded_channel::<(u16, u16)>();
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
-        let app_for_io = app.clone();
         let write_input = write_half.clone();
         let write_resize = write_half.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    msg = read_half.wait() => {
-                        match msg {
-                            Some(ChannelMsg::Data { data }) => {
-                                let _ = app_for_io.emit(
-                                    "terminal:data",
-                                    TerminalData { session_id: id, data: data.to_vec() },
-                                );
-                            }
-                            Some(ChannelMsg::ExtendedData { data, ext }) if ext == 1 => {
-                                let _ = app_for_io.emit(
-                                    "terminal:data",
-                                    TerminalData { session_id: id, data: data.to_vec() },
-                                );
-                            }
-                            Some(ChannelMsg::Close) | None => break,
-                            _ => {}
-                        }
-                    }
                     input = input_rx.recv() => {
                         match input {
                             Some(data) => {
@@ -100,12 +81,37 @@ impl SessionManager {
                         }
                     }
                     resize = resize_rx.recv() => {
-                        if let Some((cols, rows)) = resize {
-                            let _ = write_resize
-                                .window_change(cols as u32, rows as u32, 0, 0)
-                                .await;
+                        match resize {
+                            Some((cols, rows)) => {
+                                let _ = write_resize
+                                    .window_change(cols as u32, rows as u32, 0, 0)
+                                    .await;
+                            }
+                            None => break,
                         }
                     }
+                }
+            }
+        });
+
+        let app_for_io = app.clone();
+        tokio::spawn(async move {
+            loop {
+                match read_half.wait().await {
+                    Some(ChannelMsg::Data { data }) => {
+                        let _ = app_for_io.emit(
+                            "terminal:data",
+                            TerminalData { session_id: id, data: data.to_vec() },
+                        );
+                    }
+                    Some(ChannelMsg::ExtendedData { data, ext }) if ext == 1 => {
+                        let _ = app_for_io.emit(
+                            "terminal:data",
+                            TerminalData { session_id: id, data: data.to_vec() },
+                        );
+                    }
+                    Some(ChannelMsg::Close) | None => break,
+                    _ => {}
                 }
             }
             let _ = app_for_io.emit(
@@ -162,18 +168,18 @@ impl SessionManager {
         let session = sessions.get(&id).ok_or("会话不存在")?;
         session
             .input_tx
-            .try_send(data)
+            .send(data)
             .map_err(|_| "会话已关闭".to_string())
     }
 
     pub fn resize(&self, id: u32, cols: u16, rows: u16) -> Result<(), String> {
-        let cols = cols.clamp(100, 400);
+        let cols = cols.clamp(2, 400);
         let rows = rows.clamp(10, 200);
         let sessions = self.sessions.lock().unwrap();
         let session = sessions.get(&id).ok_or("会话不存在")?;
         session
             .resize_tx
-            .try_send((cols, rows))
+            .send((cols, rows))
             .map_err(|_| "会话已关闭".to_string())
     }
 }
