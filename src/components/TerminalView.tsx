@@ -71,6 +71,7 @@ export default function TerminalView({
   const sessionIdRef = useRef<number | null>(null);
   const pendingInputRef = useRef<number[]>([]);
   const inputChainRef = useRef<Promise<void>>(Promise.resolve());
+  const nativeSentRef = useRef<{ key: string; ts: number }[]>([]);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const disposedRef = useRef(false);
@@ -161,9 +162,8 @@ export default function TerminalView({
     termRef.current = term;
     fitRef.current = fit;
 
-    // 开发模式下 WKWebView 的 xterm.js input/keypress 路径可能丢字，
-    // 普通可打印字符直接从原生 keydown 截获发送；发布构建中 xterm 输入正常，
-    // 若再走该路径会与 onData 重复发送导致字符双显，因此仅开发模式启用。
+    // 普通可打印字符直接从原生 keydown 截获发送（避免 WKWebView 丢字），
+    // onData 收到同一字符时按序去重，避免 xterm 补发导致双显。
     const handleKeyDownCapture = (event: KeyboardEvent) => {
       if (
         event.isComposing ||
@@ -177,14 +177,30 @@ export default function TerminalView({
       if (event.key.length === 1) {
         event.preventDefault();
         event.stopPropagation();
+        const now = Date.now();
+        nativeSentRef.current = nativeSentRef.current.filter(
+          (item) => now - item.ts < 2000,
+        );
+        nativeSentRef.current.push({ key: event.key, ts: now });
         sendInput(Array.from(new TextEncoder().encode(event.key)));
       }
     };
-    if (import.meta.env.DEV) {
-      container.addEventListener('keydown', handleKeyDownCapture, true);
-    }
+    container.addEventListener('keydown', handleKeyDownCapture, true);
 
     term.onData((data) => {
+      const now = Date.now();
+      const queue = nativeSentRef.current.filter(
+        (item) => now - item.ts < 2000,
+      );
+      nativeSentRef.current = queue;
+      const chars = Array.from(data);
+      if (queue.length >= chars.length && chars.length > 0) {
+        const matched = chars.every((ch, i) => queue[i]?.key === ch);
+        if (matched) {
+          nativeSentRef.current = queue.slice(chars.length);
+          return;
+        }
+      }
       sendInput(Array.from(new TextEncoder().encode(data)));
     });
     term.onResize(applyDims);
@@ -236,9 +252,7 @@ export default function TerminalView({
       disposed = true;
       disposedRef.current = true;
       observer.disconnect();
-      if (import.meta.env.DEV) {
-        container.removeEventListener('keydown', handleKeyDownCapture, true);
-      }
+      container.removeEventListener('keydown', handleKeyDownCapture, true);
       unData?.();
       unStatus?.();
       const sid = sessionIdRef.current;
