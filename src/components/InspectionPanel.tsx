@@ -43,6 +43,7 @@ import Modal from './Modal';
 
 interface Props {
   host: Host;
+  panelWidth?: number;
   onClose: () => void;
 }
 
@@ -53,7 +54,7 @@ const RISK_LABEL: Record<string, string> = {
   unknown: '未知',
 };
 
-export default function InspectionPanel({ host, onClose }: Props) {
+export default function InspectionPanel({ host, panelWidth = 620, onClose }: Props) {
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [status, setStatus] = useState<InspectionStatus | null>(null);
   const [progress, setProgress] =
@@ -433,7 +434,7 @@ export default function InspectionPanel({ host, onClose }: Props) {
   };
 
   return (
-    <aside className="inspection-panel">
+    <aside className="inspection-panel" style={{ width: panelWidth }}>
       <div className="inspection-header">
         <div className="inspection-title">
           <InspectIcon size={16} />

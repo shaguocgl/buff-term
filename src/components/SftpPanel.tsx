@@ -29,6 +29,7 @@ interface Entry {
 
 interface Props {
   host: Host;
+  panelWidth?: number;
   onClose: () => void;
 }
 
@@ -63,7 +64,7 @@ function parseListing(text: string): Entry[] {
   return entries;
 }
 
-export default function SftpPanel({ host, onClose }: Props) {
+export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
   const [cwd, setCwd] = useState('/');
   const [entries, setEntries] = useState<Entry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -152,7 +153,7 @@ export default function SftpPanel({ host, onClose }: Props) {
   };
 
   return (
-    <aside className="sftp-panel">
+    <aside className="sftp-panel" style={{ width: panelWidth }}>
       <div className="sftp-header">
         <div className="sftp-path" title={cwd}>
           {cwd}

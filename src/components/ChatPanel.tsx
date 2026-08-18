@@ -49,6 +49,7 @@ interface Props {
   providerConfigured: boolean;
   models: AiModel[];
   providerId: string | null;
+  panelWidth?: number;
   onOpenConfig: () => void;
   onModelSwitched: () => void;
   onClose: () => void;
@@ -116,6 +117,7 @@ export default function ChatPanel({
   providerConfigured,
   models,
   providerId,
+  panelWidth = 384,
   onOpenConfig,
   onModelSwitched,
   onClose,
@@ -327,7 +329,7 @@ export default function ChatPanel({
   );
 
   return (
-    <aside className="chat-panel">
+    <aside className="chat-panel" style={{ width: panelWidth }}>
       <div className="chat-header">
         <div className="chat-header-left">
           <span className="chat-ai-icon">
@@ -434,7 +436,7 @@ export default function ChatPanel({
             />
           </div>
           {models.length > 0 && providerId && (
-            <div className="chat-control">
+            <div className="chat-control chat-control-model">
               <span className="chat-control-label">模型</span>
               <Select
                 className="select-up"

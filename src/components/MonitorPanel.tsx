@@ -5,6 +5,7 @@ import { ActivityIcon, RefreshIcon, XIcon } from './Icons';
 
 interface Props {
   host: Host;
+  panelWidth?: number;
   onClose: () => void;
 }
 
@@ -218,7 +219,7 @@ function formatAgo(sec: number): string {
   return `${Math.round(minutes / 60)}小时前`;
 }
 
-export default function MonitorPanel({ host, onClose }: Props) {
+export default function MonitorPanel({ host, panelWidth = 400, onClose }: Props) {
   const [snap, setSnap] = useState<MonitorSnapshot | null>(null);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -250,7 +251,7 @@ export default function MonitorPanel({ host, onClose }: Props) {
   }, [load]);
 
   return (
-    <aside className="monitor-panel">
+    <aside className="monitor-panel" style={{ width: panelWidth }}>
       <div className="sftp-header">
         <div className="sftp-path">
           <ActivityIcon size={14} /> 资源监控（每 5 秒刷新）
