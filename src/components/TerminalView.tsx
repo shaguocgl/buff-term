@@ -30,6 +30,7 @@ import {
 interface Props {
   host: Host;
   tabKey: number;
+  theme: 'dark' | 'light';
   chatOpen: boolean;
   sftpOpen: boolean;
   monitorOpen: boolean;
@@ -44,6 +45,36 @@ interface Props {
   onDisconnect: (tabKey: number) => void;
 }
 
+const TERMINAL_THEMES = {
+  dark: {
+    background: '#0f1115',
+    foreground: '#d6dee8',
+  },
+  light: {
+    background: '#ffffff',
+    foreground: '#1f2933',
+    cursor: '#4a6cf7',
+    cursorAccent: '#ffffff',
+    selectionBackground: 'rgba(74, 108, 247, 0.25)',
+    black: '#2d3748',
+    red: '#c53030',
+    green: '#2f855a',
+    yellow: '#b7791f',
+    blue: '#2b6cb0',
+    magenta: '#b83280',
+    cyan: '#0e7c86',
+    white: '#6b7a8d',
+    brightBlack: '#9ba8b8',
+    brightRed: '#e53e3e',
+    brightGreen: '#38a169',
+    brightYellow: '#d69e2e',
+    brightBlue: '#3182ce',
+    brightMagenta: '#d53f8c',
+    brightCyan: '#0ea5b7',
+    brightWhite: '#e2e8f0',
+  },
+} as const;
+
 function normalizeDims(dims: { cols: number; rows: number } | undefined) {
   // 按实际可视区域计算列宽，避免强制 100 列导致右侧被裁剪、输入字符“看不到”
   const cols = Math.max(2, Math.min(400, dims?.cols ?? 100));
@@ -54,6 +85,7 @@ function normalizeDims(dims: { cols: number; rows: number } | undefined) {
 export default function TerminalView({
   host,
   tabKey,
+  theme,
   chatOpen,
   sftpOpen,
   monitorOpen,
@@ -150,7 +182,7 @@ export default function TerminalView({
       fontFamily: 'Menlo, Monaco, "Cascadia Mono", Consolas, monospace',
       fontSize: 14,
       scrollback: 5000,
-      theme: { background: '#0f1115', foreground: '#d6dee8' },
+      theme: TERMINAL_THEMES[theme],
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -252,6 +284,14 @@ export default function TerminalView({
       fitRef.current = null;
     };
   }, [host, tabKey, applyDims, sendInput]);
+
+  // 主题切换时同步更新 xterm 配色（terminal 已在上面 effect 中创建）
+  useEffect(() => {
+    const term = termRef.current;
+    if (term) {
+      term.options.theme = TERMINAL_THEMES[theme];
+    }
+  }, [theme]);
 
   const handleDisconnect = () => {
     const sid = sessionIdRef.current;

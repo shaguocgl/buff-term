@@ -6,6 +6,7 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import {
   checkForUpdate,
   deleteHost,
@@ -42,8 +43,12 @@ import {
   ServerIcon,
   SparklesIcon,
   RefreshIcon,
+  PanelLeftCloseIcon,
+  PanelLeftOpenIcon,
+  SunIcon,
   TerminalIcon,
   TrashIcon,
+  MoonIcon,
   WrenchIcon,
 } from './components/Icons';
 
@@ -76,6 +81,22 @@ function App() {
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [rightPanelWidth, setRightPanelWidth] = useState(384);
+  const [resizing, setResizing] = useState(false);
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    try {
+      return localStorage.getItem('keywisp-theme') === 'light' ? 'light' : 'dark';
+    } catch {
+      return 'dark';
+    }
+  });
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem('keywisp-sidebar-collapsed') === '1';
+    } catch {
+      return false;
+    }
+  });
   const toastSeq = useRef(0);
   const tabSeq = useRef(0);
 
@@ -104,6 +125,23 @@ function App() {
     refresh().catch((e) => showToast('error', String(e)));
     refreshAi().catch(() => {});
   }, [refresh, refreshAi, showToast]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    try {
+      localStorage.setItem('keywisp-theme', theme);
+    } catch {
+      /* ignore storage errors */
+    }
+  }, [theme]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('keywisp-sidebar-collapsed', collapsed ? '1' : '0');
+    } catch {
+      /* ignore storage errors */
+    }
+  }, [collapsed]);
 
   useEffect(() => {
     getAppVersion().then(setAppVersion).catch(() => {});
@@ -230,9 +268,36 @@ function App() {
     }
   };
 
+  const handleResizeStart = (event: ReactMouseEvent<HTMLElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    setResizing(true);
+    const startX = event.clientX;
+    const startWidth = rightPanelWidth;
+    const onMouseMove = (e: globalThis.MouseEvent) => {
+      const delta = startX - e.clientX;
+      const maxW = window.innerWidth * 0.5;
+      const newWidth = Math.max(280, Math.min(maxW, startWidth + delta));
+      setRightPanelWidth(newWidth);
+    };
+    const onMouseUp = () => {
+      setResizing(false);
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  };
+
   const handleUpdateCheck = async () => {
     if (updateInfo?.update_available) {
-      window.open(updateInfo.release_url, '_blank', 'noopener,noreferrer');
+      openUrl(updateInfo.release_url).catch(() => {
+        showToast('error', '无法打开浏览器，请手动访问 GitHub Release 页面');
+      });
       return;
     }
     setCheckingUpdate(true);
@@ -255,9 +320,172 @@ function App() {
     }
   };
 
+  const rightPanelVisible =
+    activeTab !== null &&
+    activeTab.sessionId !== null &&
+    (chatOpen || sftpOpen || monitorOpen || inspectionOpen);
+
   return (
     <div className="app">
-      <aside className="sidebar">
+      {collapsed ? (
+        <aside className="rail">
+          <div className="rail-top">
+            <div className="rail-logo brand-mark">
+              <img className="brand-logo" src={logoUrl} alt="KeyWisp" />
+            </div>
+            <button
+              className="rail-btn"
+              onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+              title={theme === 'dark' ? '切换到日间模式' : '切换到夜间模式'}
+              aria-label={theme === 'dark' ? '切换到日间模式' : '切换到夜间模式'}
+            >
+              {theme === 'dark' ? <SunIcon size={16} /> : <MoonIcon size={16} />}
+            </button>
+            <button
+              className="rail-btn"
+              onClick={() => setCollapsed(false)}
+              title="展开侧边栏"
+              aria-label="展开侧边栏"
+            >
+              <PanelLeftOpenIcon size={16} />
+            </button>
+          </div>
+
+          <div className="rail-middle">
+            <div className="rail-icon-wrap">
+              <button className="rail-btn" aria-label="主机">
+                <ServerIcon size={18} />
+              </button>
+              <div className="rail-popover">
+                <div className="rail-popover-title">
+                  主机
+                  {hosts.length > 0 && <span className="count">{hosts.length}</span>}
+                </div>
+                {hosts.length === 0 ? (
+                  <div className="rail-popover-empty">还没有主机</div>
+                ) : (
+                  <div className="rail-host-list">
+                    {hosts.map((host) => {
+                      const active = tabs.some(
+                        (t) => t.host.id === host.id && t.status === 'connected',
+                      );
+                      return (
+                        <div
+                          key={host.id}
+                          className={`rail-host-item${active ? ' active' : ''}`}
+                          onClick={() => handleConnect(host)}
+                        >
+                          <div className="host-avatar">
+                            {host.name.slice(0, 1).toUpperCase()}
+                          </div>
+                          <div className="host-meta">
+                            <div className="host-name-row">
+                              <span className="host-name">{host.name}</span>
+                              {active && (
+                                <span className="status-dot" title="已连接">
+                                  <span />
+                                </span>
+                              )}
+                            </div>
+                            <span className="host-addr">
+                              {host.username}@{host.address}:{host.port}
+                            </span>
+                          </div>
+                          <div className="rail-host-actions">
+                            <button
+                              className="icon-btn"
+                              title="编辑主机"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditingHost(host);
+                                setShowForm(true);
+                              }}
+                            >
+                              <PencilIcon size={13} />
+                            </button>
+                            <button
+                              className="icon-btn danger"
+                              title="删除主机"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDelete(host);
+                              }}
+                            >
+                              <TrashIcon size={14} />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="rail-bottom">
+            <div className="rail-icon-wrap">
+              <button
+                className="rail-btn"
+                onClick={() => {
+                  setEditingHost(null);
+                  setShowForm(true);
+                }}
+              >
+                <PlusIcon size={16} />
+              </button>
+              <span className="rail-tip">新建主机</span>
+            </div>
+            <div className="rail-icon-wrap">
+              <button className="rail-btn" onClick={handleImport}>
+                <ImportIcon size={16} />
+              </button>
+              <span className="rail-tip">导入 ~/.ssh/config</span>
+            </div>
+            <div className="rail-icon-wrap">
+              <button className="rail-btn" onClick={() => setShowMcp(true)}>
+                <WrenchIcon size={16} />
+              </button>
+              <span className="rail-tip">MCP 服务</span>
+            </div>
+            <div className="rail-icon-wrap">
+              <button className="rail-btn" onClick={() => setShowAlerts(true)}>
+                <BellIcon size={16} />
+              </button>
+              <span className="rail-tip">通知配置</span>
+            </div>
+            <div className="rail-icon-wrap">
+              <button className="rail-btn" onClick={() => setShowLogs(true)}>
+                <ListIcon size={16} />
+              </button>
+              <span className="rail-tip">操作日志</span>
+            </div>
+            <div className="rail-icon-wrap">
+              <button
+                className="rail-btn"
+                onClick={handleUpdateCheck}
+                disabled={checkingUpdate}
+              >
+                <RefreshIcon size={16} />
+              </button>
+              <span className="rail-tip">
+                {checkingUpdate
+                  ? '正在检查更新…'
+                  : updateInfo?.update_available
+                    ? `下载更新 v${updateInfo.latest_version}`
+                    : '检查更新'}
+              </span>
+            </div>
+            <div className="rail-icon-wrap">
+              <button className="rail-btn" onClick={() => setShowAi(true)}>
+                <SparklesIcon size={16} />
+              </button>
+              <span className="rail-tip">AI Agent</span>
+            </div>
+          </div>
+        </aside>
+      ) : (
+        <aside className="sidebar">
         <div className="brand" onMouseDown={startWindowDrag}>
           <div className="brand-mark">
             <img className="brand-logo" src={logoUrl} alt="KeyWisp" />
@@ -266,6 +494,28 @@ function App() {
             <span className="brand-name">KeyWisp</span>
             <span className="brand-sub">SSH Agent · 本地优先</span>
           </div>
+          <button
+            className="theme-toggle"
+            onClick={(e) => {
+              e.stopPropagation();
+              setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
+            }}
+            title={theme === 'dark' ? '切换到日间模式' : '切换到夜间模式'}
+            aria-label={theme === 'dark' ? '切换到日间模式' : '切换到夜间模式'}
+          >
+            {theme === 'dark' ? <SunIcon size={16} /> : <MoonIcon size={16} />}
+          </button>
+          <button
+            className="sidebar-toggle"
+            onClick={(e) => {
+              e.stopPropagation();
+              setCollapsed(true);
+            }}
+            title="收起侧边栏"
+            aria-label="收起侧边栏"
+          >
+            <PanelLeftCloseIcon size={16} />
+          </button>
         </div>
 
         <div className="sidebar-actions">
@@ -411,6 +661,7 @@ function App() {
           </button>
         </div>
       </aside>
+      )}
 
       <main className="main">
         {tabs.length > 0 ? (
@@ -466,6 +717,7 @@ function App() {
                   <TerminalView
                     host={tab.host}
                     tabKey={tab.key}
+                    theme={theme}
                     chatOpen={chatOpen}
                     sftpOpen={sftpOpen}
                     monitorOpen={monitorOpen}
@@ -523,12 +775,20 @@ function App() {
                 </div>
               ))}
 
+              {rightPanelVisible && (
+                <div
+                  className={`resize-handle${resizing ? ' resizing' : ''}`}
+                  onMouseDown={handleResizeStart}
+                />
+              )}
+
               {activeTab && activeTab.sessionId !== null && chatOpen && (
                 <ChatPanel
                   key={activeTab.sessionId}
                   sessionId={activeTab.sessionId}
                   hostId={activeTab.host.id}
                   hostName={activeTab.title}
+                  panelWidth={rightPanelWidth}
                   providerLabel={
                     activeProvider
                       ? `${activeProvider.name} · ${activeModelLabel}`
@@ -550,6 +810,7 @@ function App() {
                   key={`sftp-${activeTab.sessionId}`}
                   host={activeTab.host}
                   onClose={() => setSftpOpen(false)}
+                  panelWidth={rightPanelWidth}
                 />
               )}
 
@@ -558,6 +819,7 @@ function App() {
                   key={`mon-${activeTab.sessionId}`}
                   host={activeTab.host}
                   onClose={() => setMonitorOpen(false)}
+                  panelWidth={rightPanelWidth}
                 />
               )}
 
@@ -566,6 +828,7 @@ function App() {
                   key={`inspect-${activeTab.sessionId}`}
                   host={activeTab.host}
                   onClose={() => setInspectionOpen(false)}
+                  panelWidth={rightPanelWidth}
                 />
               )}
             </div>
