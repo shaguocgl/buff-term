@@ -498,12 +498,6 @@ function App() {
               <span className="rail-tip">通知配置</span>
             </div>
             <div className="rail-icon-wrap">
-              <button className="rail-btn" onClick={() => setShowLogs(true)}>
-                <ListIcon size={16} />
-              </button>
-              <span className="rail-tip">操作日志</span>
-            </div>
-            <div className="rail-icon-wrap">
               <button
                 className="rail-btn"
                 onClick={() => setShowTerminalGuard(true)}
@@ -511,6 +505,13 @@ function App() {
                 <ShieldIcon size={16} />
               </button>
               <span className="rail-tip">终端防护</span>
+            </div>
+
+            <div className="rail-icon-wrap">
+              <button className="rail-btn" onClick={() => setShowLogs(true)}>
+                <ListIcon size={16} />
+              </button>
+              <span className="rail-tip">操作日志</span>
             </div>
             <div className="rail-icon-wrap">
               <button
@@ -667,14 +668,15 @@ function App() {
           <button className="log-entry" onClick={() => setShowAlerts(true)}>
             <BellIcon size={15} /> 通知配置
           </button>
-          <button className="log-entry" onClick={() => setShowLogs(true)}>
-            <ListIcon size={15} /> 操作日志
-          </button>
           <button
             className="log-entry"
             onClick={() => setShowTerminalGuard(true)}
           >
             <ShieldIcon size={15} /> 终端防护
+          </button>
+
+          <button className="log-entry" onClick={() => setShowLogs(true)}>
+            <ListIcon size={15} /> 操作日志
           </button>
           <div className="version-entry">
             <button
