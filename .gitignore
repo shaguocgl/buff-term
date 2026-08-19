@@ -34,3 +34,6 @@ CLAUDE.md
 *.njsproj
 *.sln
 *.sw?
+
+# 本地工具工作目录
+.freebuff/
