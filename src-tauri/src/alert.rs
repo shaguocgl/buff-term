@@ -1,5 +1,6 @@
 //! 通知配置：当前仅支持邮件（SMTP）配置与测试连接。
 
+use std::sync::Arc;
 use crate::db::Db;
 use crate::models::AlertSettings;
 use serde::Serialize;
@@ -12,13 +13,13 @@ pub struct TestResult {
 }
 
 #[tauri::command]
-pub fn get_alert_settings(db: State<'_, Db>) -> Result<AlertSettings, String> {
+pub fn get_alert_settings(db: State<'_, Arc<Db>>) -> Result<AlertSettings, String> {
     db.get_alert_settings()
         .map_err(|e| format!("读取邮件设置失败: {e}"))
 }
 
 #[tauri::command]
-pub fn save_alert_settings(db: State<'_, Db>, settings: AlertSettings) -> Result<(), String> {
+pub fn save_alert_settings(db: State<'_, Arc<Db>>, settings: AlertSettings) -> Result<(), String> {
     db.save_alert_settings(&settings)
         .map_err(|e| format!("保存邮件设置失败: {e}"))
 }
@@ -28,7 +29,7 @@ pub fn save_alert_settings(db: State<'_, Db>, settings: AlertSettings) -> Result
 pub async fn test_alert_settings(settings: AlertSettings) -> Result<TestResult, String> {
     match send_html_email(
         &settings,
-        "KeyWisp 通知配置测试",
+        "buffTerm 通知配置测试",
         &test_email_html(),
     )
     .await
@@ -119,10 +120,10 @@ fn test_email_html() -> String {
       .badge{display:inline-block;margin-top:12px;padding:5px 12px;border-radius:999px;background:#34d399;color:#fff;font-weight:700;font-size:12px;}
       code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#f1f3f5;padding:2px 6px;border-radius:5px;}
     </style></head><body><div class="card">
-      <div class="hero"><h1>KeyWisp Agent Ops</h1><p>通知配置测试邮件</p></div>
+      <div class="hero"><h1>buffTerm</h1><p>通知配置测试邮件</p></div>
       <div class="body">
         <p>这是一封测试邮件，说明你的 <strong>邮件通知配置</strong> 已生效。</p>
-        <p>后续执行 <strong>AI 巡检</strong> 时，KeyWisp 会通过这个 SMTP 渠道自动发送巡检报告。</p>
+        <p>后续执行 <strong>AI 巡检</strong> 时，buffTerm 会通过这个 SMTP 渠道自动发送巡检报告。</p>
         <p>如果你不需要接收巡检邮件，可以在“通知配置”中调整收件人。</p>
         <span class="badge">✓ 测试发送成功</span>
       </div>

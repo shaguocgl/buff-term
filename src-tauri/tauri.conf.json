@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "KeyWisp Agent Ops",
-  "version": "1.0.2",
-  "identifier": "com.keywisp.agent",
+  "productName": "buffTerm",
+  "version": "1.0.0",
+  "identifier": "com.buffterm.agent",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "KeyWisp Agent Ops",
+        "title": "buffTerm",
         "width": 1200,
         "height": 800,
         "minWidth": 900,

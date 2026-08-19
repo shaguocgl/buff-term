@@ -136,6 +136,40 @@ pub struct McpRule {
     pub created_at: u64,
 }
 
+/// 终端危险命令拦截规则（交互终端回车前判定，子串匹配）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalRule {
+    pub id: String,
+    pub pattern: String,
+    pub enabled: bool,
+    /// 是否为预置规则（可删除，可通过“恢复预置”一键还原）
+    pub builtin: bool,
+    pub created_at: u64,
+}
+
+/// 终端危险命令拦截设置。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalGuardSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    /// 审批超时秒数（超时按拒绝处理）
+    #[serde(default = "default_guard_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_guard_timeout() -> u64 {
+    60
+}
+
+impl Default for TerminalGuardSettings {
+    fn default() -> Self {
+        TerminalGuardSettings {
+            enabled: false,
+            timeout_secs: default_guard_timeout(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditLog {
     pub id: String,

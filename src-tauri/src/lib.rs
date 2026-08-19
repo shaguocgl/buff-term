@@ -4,6 +4,7 @@ mod agent;
 mod audit;
 mod credentials;
 mod db;
+mod guard;
 mod hosts;
 mod inspection;
 mod mcp;
@@ -18,6 +19,7 @@ mod sshconfig;
 mod update;
 mod util;
 
+use std::sync::Arc;
 use db::Db;
 use agent::AgentManager;
 use russh::RusshManager;
@@ -39,9 +41,11 @@ pub fn run() {
             std::fs::create_dir_all(&dir).map_err(|e| {
                 io::Error::new(io::ErrorKind::Other, format!("无法创建数据目录: {e}"))
             })?;
-            let db = Db::open(&dir.join("keywisp.db")).map_err(|e| {
+            let db = Db::open(&dir.join("buffterm.db")).map_err(|e| {
                 io::Error::new(io::ErrorKind::Other, format!("打开数据库失败: {e}"))
             })?;
+            let db = std::sync::Arc::new(db);
+            crate::db::init_global(db.clone());
             app.manage(db);
             app.manage(inspection::InspectionManager::default());
             app.manage(remediation::RemediationManager::default());
@@ -49,7 +53,7 @@ pub fn run() {
             app.manage(mcp::ApprovalRegistry::default());
             // 若上次退出前开启了 MCP 服务，启动时自动恢复
             let mcp_enabled = app
-                .state::<Db>()
+                .state::<Arc<Db>>()
                 .get_mcp_service()
                 .map(|c| c.enabled)
                 .unwrap_or(false);
@@ -119,6 +123,13 @@ pub fn run() {
             session::close_session,
             session::session_input,
             session::session_resize,
+            guard::get_terminal_guard_settings,
+            guard::save_terminal_guard_settings,
+            guard::list_terminal_rules,
+            guard::add_terminal_rule,
+            guard::delete_terminal_rule,
+            guard::reset_terminal_rules,
+            guard::session_guard_approve,
             update::check_for_update,
             update::get_app_version
         ])

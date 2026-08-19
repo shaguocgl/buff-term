@@ -138,7 +138,7 @@ export default function AlertModal({ onClose }: Props) {
             <input
               value={settings.smtp_from ?? ''}
               onChange={(e) => set('smtp_from', e.target.value)}
-              placeholder="KeyWisp <alert@example.com>"
+              placeholder="buffTerm <alert@example.com>"
             />
           </div>
 

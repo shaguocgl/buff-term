@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use crate::credentials;
 use crate::ai::TestResult;
 use crate::db::Db;
@@ -105,23 +106,23 @@ fn default_ssh_config_path() -> String {
 }
 
 #[tauri::command]
-pub fn list_hosts(db: State<'_, Db>) -> Result<Vec<Host>, String> {
+pub fn list_hosts(db: State<'_, Arc<Db>>) -> Result<Vec<Host>, String> {
     list(&db)
 }
 
 #[tauri::command]
-pub fn create_host(db: State<'_, Db>, input: HostInput) -> Result<Host, String> {
+pub fn create_host(db: State<'_, Arc<Db>>, input: HostInput) -> Result<Host, String> {
     create(&db, input)
 }
 
 #[tauri::command]
-pub fn update_host(db: State<'_, Db>, host: Host) -> Result<(), String> {
+pub fn update_host(db: State<'_, Arc<Db>>, host: Host) -> Result<(), String> {
     update(&db, host)
 }
 
 #[tauri::command]
 pub fn delete_host(
-    db: State<'_, Db>,
+    db: State<'_, Arc<Db>>,
     agents: State<'_, crate::agent::AgentManager>,
     id: String,
 ) -> Result<(), String> {
@@ -132,7 +133,7 @@ pub fn delete_host(
 }
 
 #[tauri::command]
-pub fn import_ssh_config(db: State<'_, Db>, path: Option<String>) -> Result<ImportResult, String> {
+pub fn import_ssh_config(db: State<'_, Arc<Db>>, path: Option<String>) -> Result<ImportResult, String> {
     import_config(&db, path)
 }
 

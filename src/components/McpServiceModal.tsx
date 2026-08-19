@@ -138,7 +138,7 @@ export default function McpServiceModal({ hosts, onClose }: Props) {
   return (
     <Modal
       title="MCP 服务"
-      subtitle="KeyWisp 作为 MCP 服务器，把勾选的服务器能力开放给外部 AI（Codex、Claude Desktop 等）"
+      subtitle="buffTerm 作为 MCP 服务器，把勾选的服务器能力开放给外部 AI（Codex、Claude Desktop 等）"
       className="modal-wide"
       onClose={onClose}
     >
@@ -328,7 +328,7 @@ function configJson(service: McpService): string {
   return JSON.stringify(
     {
       mcpServers: {
-        'keywisp-ssh': {
+        'buffterm-ssh': {
           type: 'http',
           url,
           headers: { Authorization: `Bearer ${service.token}` },

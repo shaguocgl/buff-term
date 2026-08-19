@@ -17,22 +17,32 @@ import {
   mcpApprove,
   onMcpApprovalRequest,
   onSessionNotice,
+  onTerminalGuardApproval,
+  sessionGuardApprove,
 } from './api';
 import './App.css';
-import type { AiProvider, Host, McpApprovalRequest, UpdateInfo } from './types';
+import type {
+  AiProvider,
+  Host,
+  McpApprovalRequest,
+  TerminalGuardApproval,
+  UpdateInfo,
+} from './types';
 import AIConfigModal from './components/AIConfigModal';
 import AlertModal from './components/AlertModal';
 import AuditLogModal from './components/AuditLogModal';
 import ChatPanel from './components/ChatPanel';
+import GuardApprovalModal from './components/GuardApprovalModal';
 import HostForm from './components/HostForm';
 import InspectionPanel from './components/InspectionPanel';
 import McpApprovalModal from './components/McpApprovalModal';
 import McpServiceModal from './components/McpServiceModal';
 import MonitorPanel from './components/MonitorPanel';
 import SftpPanel from './components/SftpPanel';
+import TerminalGuardModal from './components/TerminalGuardModal';
 import TerminalView from './components/TerminalView';
 import ToastContainer, { type ToastItem } from './components/Toast';
-import logoUrl from './assets/keywisp-logo.png';
+import logoUrl from './assets/buffterm-logo.png';
 import {
   BellIcon,
   ImportIcon,
@@ -45,6 +55,7 @@ import {
   RefreshIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
+  ShieldIcon,
   SunIcon,
   TerminalIcon,
   TrashIcon,
@@ -67,7 +78,10 @@ function App() {
   const [showLogs, setShowLogs] = useState(false);
   const [showAlerts, setShowAlerts] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
+  const [showTerminalGuard, setShowTerminalGuard] = useState(false);
   const [mcpApproval, setMcpApproval] = useState<McpApprovalRequest | null>(null);
+  const [guardApproval, setGuardApproval] =
+    useState<TerminalGuardApproval | null>(null);
   const [chatOpen, setChatOpen] = useState(true);
   const [sftpOpen, setSftpOpen] = useState(false);
   const [monitorOpen, setMonitorOpen] = useState(false);
@@ -85,14 +99,14 @@ function App() {
   const [resizing, setResizing] = useState(false);
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     try {
-      return localStorage.getItem('keywisp-theme') === 'light' ? 'light' : 'dark';
+      return localStorage.getItem('buffterm-theme') === 'light' ? 'light' : 'dark';
     } catch {
       return 'dark';
     }
   });
   const [collapsed, setCollapsed] = useState(() => {
     try {
-      return localStorage.getItem('keywisp-sidebar-collapsed') === '1';
+      return localStorage.getItem('buffterm-sidebar-collapsed') === '1';
     } catch {
       return false;
     }
@@ -129,7 +143,7 @@ function App() {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     try {
-      localStorage.setItem('keywisp-theme', theme);
+      localStorage.setItem('buffterm-theme', theme);
     } catch {
       /* ignore storage errors */
     }
@@ -137,7 +151,7 @@ function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem('keywisp-sidebar-collapsed', collapsed ? '1' : '0');
+      localStorage.setItem('buffterm-sidebar-collapsed', collapsed ? '1' : '0');
     } catch {
       /* ignore storage errors */
     }
@@ -173,6 +187,19 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    let cancelled = false;
+    onTerminalGuardApproval((req) => setGuardApproval(req)).then((fn) => {
+      if (cancelled) fn();
+      else un = fn;
+    });
+    return () => {
+      cancelled = true;
+      un?.();
+    };
+  }, []);
+
   const resolveMcpApproval = async (allow: boolean) => {
     const req = mcpApproval;
     if (!req) return;
@@ -182,6 +209,22 @@ function App() {
       showToast('error', String(e));
     } finally {
       setMcpApproval(null);
+    }
+  };
+
+  const resolveGuardApproval = async (allow: boolean) => {
+    const req = guardApproval;
+    if (!req) return;
+    try {
+      await sessionGuardApprove(req.session_id, req.request_id, allow);
+    } catch (e) {
+      showToast('error', String(e));
+    } finally {
+      setGuardApproval(null);
+      // 审批/取消后把键盘焦点还给终端，避免需要手动点击才能继续输入
+      window.setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('buffterm:refocus-terminal'));
+      }, 0);
     }
   };
 
@@ -331,7 +374,7 @@ function App() {
         <aside className="rail">
           <div className="rail-top">
             <div className="rail-logo brand-mark">
-              <img className="brand-logo" src={logoUrl} alt="KeyWisp" />
+              <img className="brand-logo" src={logoUrl} alt="buffTerm" />
             </div>
             <button
               className="rail-btn"
@@ -463,6 +506,15 @@ function App() {
             <div className="rail-icon-wrap">
               <button
                 className="rail-btn"
+                onClick={() => setShowTerminalGuard(true)}
+              >
+                <ShieldIcon size={16} />
+              </button>
+              <span className="rail-tip">终端防护</span>
+            </div>
+            <div className="rail-icon-wrap">
+              <button
+                className="rail-btn"
                 onClick={handleUpdateCheck}
                 disabled={checkingUpdate}
               >
@@ -488,10 +540,10 @@ function App() {
         <aside className="sidebar">
         <div className="brand" onMouseDown={startWindowDrag}>
           <div className="brand-mark">
-            <img className="brand-logo" src={logoUrl} alt="KeyWisp" />
+            <img className="brand-logo" src={logoUrl} alt="buffTerm" />
           </div>
           <div className="brand-text">
-            <span className="brand-name">KeyWisp</span>
+            <span className="brand-name">buffTerm</span>
             <span className="brand-sub">SSH Agent · 本地优先</span>
           </div>
           <button
@@ -617,6 +669,12 @@ function App() {
           </button>
           <button className="log-entry" onClick={() => setShowLogs(true)}>
             <ListIcon size={15} /> 操作日志
+          </button>
+          <button
+            className="log-entry"
+            onClick={() => setShowTerminalGuard(true)}
+          >
+            <ShieldIcon size={15} /> 终端防护
           </button>
           <div className="version-entry">
             <button
@@ -886,10 +944,21 @@ function App() {
         <McpServiceModal hosts={hosts} onClose={() => setShowMcp(false)} />
       )}
 
+      {showTerminalGuard && (
+        <TerminalGuardModal onClose={() => setShowTerminalGuard(false)} />
+      )}
+
       {mcpApproval && (
         <McpApprovalModal
           request={mcpApproval}
           onResolve={resolveMcpApproval}
+        />
+      )}
+
+      {guardApproval && (
+        <GuardApprovalModal
+          request={guardApproval}
+          onResolve={resolveGuardApproval}
         />
       )}
 

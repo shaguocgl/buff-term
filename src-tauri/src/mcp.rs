@@ -1,4 +1,4 @@
-//! 对外 MCP 服务：KeyWisp 作为 MCP 服务器（Streamable HTTP），
+//! 对外 MCP 服务：buffTerm 作为 MCP 服务器（Streamable HTTP），
 //! 把用户勾选的 SSH 服务器能力开放给外部 AI（Codex、Claude Desktop 等）。
 //!
 //! 设计要点：
@@ -95,7 +95,7 @@ impl ApprovalRegistry {
 
 #[tauri::command]
 pub fn get_mcp_service(
-    db: State<'_, Db>,
+    db: State<'_, Arc<Db>>,
     manager: State<'_, McpServiceManager>,
 ) -> Result<McpServiceView, String> {
     let config = db
@@ -110,7 +110,7 @@ pub fn get_mcp_service(
 #[tauri::command]
 pub async fn save_mcp_service(
     app: AppHandle,
-    db: State<'_, Db>,
+    db: State<'_, Arc<Db>>,
     manager: State<'_, McpServiceManager>,
     input: McpServiceInput,
 ) -> Result<McpServiceView, String> {
@@ -156,7 +156,7 @@ pub async fn save_mcp_service(
 
 #[tauri::command]
 pub fn rotate_mcp_token(
-    db: State<'_, Db>,
+    db: State<'_, Arc<Db>>,
     manager: State<'_, McpServiceManager>,
 ) -> Result<McpServiceView, String> {
     let mut config = db
@@ -182,13 +182,13 @@ pub fn mcp_approve(
 }
 
 #[tauri::command]
-pub fn list_mcp_rules(db: State<'_, Db>) -> Result<Vec<McpRule>, String> {
+pub fn list_mcp_rules(db: State<'_, Arc<Db>>) -> Result<Vec<McpRule>, String> {
     db.list_mcp_rules()
         .map_err(|e| format!("读取 MCP 管控规则失败: {e}"))
 }
 
 #[tauri::command]
-pub fn add_mcp_rule(db: State<'_, Db>, pattern: String) -> Result<McpRule, String> {
+pub fn add_mcp_rule(db: State<'_, Arc<Db>>, pattern: String) -> Result<McpRule, String> {
     let pattern = pattern.trim().to_string();
     if pattern.is_empty() {
         return Err("管控命令不能为空".to_string());
@@ -205,7 +205,7 @@ pub fn add_mcp_rule(db: State<'_, Db>, pattern: String) -> Result<McpRule, Strin
 }
 
 #[tauri::command]
-pub fn delete_mcp_rule(db: State<'_, Db>, id: String) -> Result<(), String> {
+pub fn delete_mcp_rule(db: State<'_, Arc<Db>>, id: String) -> Result<(), String> {
     db.delete_mcp_rule(&id)
         .map_err(|e| format!("删除管控规则失败: {e}"))
 }
@@ -308,7 +308,7 @@ fn attach_headers<R: Read>(response: Response<R>, headers: Vec<Header>) -> Respo
 }
 
 fn check_auth(app: &AppHandle, request: &Request) -> bool {
-    let db = match app.try_state::<Db>() {
+    let db = match app.try_state::<Arc<Db>>() {
         Some(db) => db,
         None => return false,
     };
@@ -457,7 +457,7 @@ async fn handle_jsonrpc(app: &AppHandle, body: &str) -> String {
             serde_json::json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": { "name": "keywisp-ssh", "version": env!("CARGO_PKG_VERSION") }
+                "serverInfo": { "name": "buffterm-ssh", "version": env!("CARGO_PKG_VERSION") }
             }),
         ),
         "notifications/initialized" => String::new(),
@@ -578,7 +578,7 @@ fn tools_schema() -> Vec<serde_json::Value> {
 
 async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Result<String, String> {
     let db = app
-        .try_state::<Db>()
+        .try_state::<Arc<Db>>()
         .ok_or_else(|| "数据库不可用".to_string())?;
     let config = db
         .get_mcp_service()
@@ -610,7 +610,7 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
     let host = resolve_host(&hosts, args.get("host").and_then(|h| h.as_str()))?;
     if !allowed.contains(&host.id) {
         return Err(format!(
-            "主机 {} 未授权给 MCP 服务，请先在 KeyWisp 中勾选该服务器",
+            "主机 {} 未授权给 MCP 服务，请先在 buffTerm 中勾选该服务器",
             host.name
         ));
     }
@@ -696,7 +696,7 @@ async fn run_and_log(
 
 fn check_mcp_rule_match(app: &AppHandle, command: &str) -> bool {
     let c = command.to_ascii_lowercase();
-    app.try_state::<Db>()
+    app.try_state::<Arc<Db>>()
         .and_then(|db| db.list_mcp_rules().ok())
         .unwrap_or_default()
         .iter()
@@ -739,7 +739,7 @@ fn write_audit(
     summary: &str,
     approval: &str,
 ) -> Result<(), String> {
-    let db = app.try_state::<Db>().ok_or_else(|| "数据库不可用".to_string())?;
+    let db = app.try_state::<Arc<Db>>().ok_or_else(|| "数据库不可用".to_string())?;
     let log = crate::models::AuditLog {
         id: uuid::Uuid::new_v4().to_string(),
         ts: now(),

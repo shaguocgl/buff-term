@@ -8,7 +8,7 @@ use crate::util::{extract_error, format_exec_output, now, shq, truncate};
 use futures_util::StreamExt;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
@@ -104,7 +104,7 @@ struct ToolCallAcc {
 #[tauri::command]
 pub async fn agent_chat(
     app: AppHandle,
-    db: State<'_, Db>,
+    db: State<'_, Arc<Db>>,
     sessions: State<'_, SessionManager>,
     agents: State<'_, AgentManager>,
     session_id: u32,
@@ -724,7 +724,7 @@ fn parse_args(raw: &str) -> serde_json::Value {
 
 fn system_prompt(host: &Host, provider: &AiProvider, model: &str) -> String {
     format!(
-        "你是 KeyWisp Agent Ops，运行在用户本地的 SSH 管理工具中，帮助用户管理远程服务器。\n\
+        "你是 buffTerm，运行在用户本地的 SSH 管理工具中，帮助用户管理远程服务器。\n\
          当前由 {} 平台提供能力，当前配置的底层模型是 {}。\n\
          当前连接的服务器：{}（{}@{}:{}）\n\
          可用工具：exec_command（执行命令）、read_file（读文件）、list_dir（列目录）、resource_usage（资源占用）。\n\
@@ -734,7 +734,7 @@ fn system_prompt(host: &Host, provider: &AiProvider, model: &str) -> String {
          3. 遇到破坏性操作（删除、格式化、改权限、停服务等）时，明确提示风险并给出命令原文。\n\
          4. 使用中文回答，简洁、专业、有条理。\n\
          5. 身份说明：当用户询问“你是什么模型/你由谁开发”时，如实回答你由 {} 驱动、配置的模型为 {}，
-            以及你是 KeyWisp Agent Ops；不要声称自己是任何其他 AI 助手（如 ChatGPT、Claude、Gemini 等），
+            以及你是 buffTerm；不要声称自己是任何其他 AI 助手（如 ChatGPT、Claude、Gemini 等），
             也不要编造版本号或开发厂商信息。\n\
          6. 工具调用约定：工具名称必须是以下之一——exec_command、read_file、list_dir、resource_usage；
             每次工具调用都必须包含完整的 name 字段且不能为空，不要发明新工具名；参数放入 arguments（JSON 对象）。",
