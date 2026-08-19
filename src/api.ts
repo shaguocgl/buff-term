@@ -15,6 +15,9 @@ import type {
   McpService,
   McpServiceInput,
   MonitorSnapshot,
+  TerminalGuardApproval,
+  TerminalGuardSettings,
+  TerminalRule,
   TestResult,
   UpdateInfo,
   InspectionReport,
@@ -159,6 +162,31 @@ export const addMcpRule = (pattern: string) =>
   invoke<McpRule>('add_mcp_rule', { pattern });
 export const deleteMcpRule = (id: string) =>
   invoke<void>('delete_mcp_rule', { id });
+
+export const getTerminalGuardSettings = () =>
+  invoke<TerminalGuardSettings>('get_terminal_guard_settings');
+export const saveTerminalGuardSettings = (settings: TerminalGuardSettings) =>
+  invoke<TerminalGuardSettings>('save_terminal_guard_settings', { settings });
+export const listTerminalRules = () =>
+  invoke<TerminalRule[]>('list_terminal_rules');
+export const addTerminalRule = (pattern: string) =>
+  invoke<TerminalRule>('add_terminal_rule', { pattern });
+export const deleteTerminalRule = (id: string) =>
+  invoke<void>('delete_terminal_rule', { id });
+export const resetTerminalRules = () =>
+  invoke<TerminalRule[]>('reset_terminal_rules');
+export const sessionGuardApprove = (
+  sessionId: number,
+  requestId: string,
+  allow: boolean,
+) => invoke<void>('session_guard_approve', { sessionId, requestId, allow });
+
+export const onTerminalGuardApproval = (
+  cb: (payload: TerminalGuardApproval) => void,
+) =>
+  listen<TerminalGuardApproval>('terminal:guard-approval', (event) =>
+    cb(event.payload),
+  );
 export const onMcpApprovalRequest = (
   cb: (payload: McpApprovalRequest) => void,
 ) => listen<McpApprovalRequest>('mcp:approval-request', (event) => cb(event.payload));
@@ -238,8 +266,18 @@ export const onAiError = (cb: (sessionId: number, message: string) => void) =>
 export const openSession = (host: Host, cols: number, rows: number) =>
   invoke<number>('open_session', { host, cols, rows });
 export const closeSession = (id: number) => invoke<void>('close_session', { id });
-export const sessionInput = (id: number, data: number[]) =>
-  invoke<void>('session_input', { id, data });
+export const sessionInput = (
+  id: number,
+  data: number[],
+  passthrough = false,
+  consoleLine?: string | null,
+) =>
+  invoke<void>('session_input', {
+    id,
+    data,
+    passthrough,
+    consoleLine: consoleLine ?? null,
+  });
 export const resizeSession = (id: number, cols: number, rows: number) =>
   invoke<void>('session_resize', { id, cols, rows });
 

@@ -76,9 +76,17 @@ const TERMINAL_THEMES = {
 } as const;
 
 function normalizeDims(dims: { cols: number; rows: number } | undefined) {
-  // 按实际可视区域计算列宽，避免强制 100 列导致右侧被裁剪、输入字符“看不到”
-  const cols = Math.max(2, Math.min(400, dims?.cols ?? 100));
-  const rows = Math.max(10, Math.min(200, dims?.rows ?? 30));
+  // 按实际可视区域计算列宽，避免强制 100 列导致右侧被裁剪、输入字符“看不到”。
+  // proposeDimensions 在容器未就绪时可能返回 undefined / NaN，必须全部兜底，
+  // 否则 NaN 经 JSON 序列化成 null 会触发后端 “invalid type: null, expected u16”。
+  const rawCols = dims?.cols;
+  const rawRows = dims?.rows;
+  const cols = Number.isFinite(rawCols)
+    ? Math.max(2, Math.min(400, rawCols as number))
+    : 100;
+  const rows = Number.isFinite(rawRows)
+    ? Math.max(10, Math.min(200, rawRows as number))
+    : 30;
   return { cols, rows };
 }
 
@@ -131,19 +139,38 @@ export default function TerminalView({
     if (sid !== null) resizeSession(sid, cols, rows).catch(() => {});
   }, []);
 
-  const sendInput = useCallback((data: number[]) => {
-    inputChainRef.current = inputChainRef.current
-      .then(() => {
-        const sid = sessionIdRef.current;
-        if (sid === null) {
-          // 连接建立前用户已经开始输入时，先放入待发送队列，连接成功后统一补发
-          pendingInputRef.current.push(...data);
-          return;
-        }
-        return sessionInput(sid, data);
-      })
-      .catch(() => {});
+  // 读取 xterm 当前光标行（readline 提示符 + 完整命令，含补全结果）。
+  // 回车时作为权威命令传给后端拦截判定，避免本地追踪 / 回显重建在补全等场景失真。
+  const readConsoleLine = useCallback((): string | null => {
+    const term = termRef.current;
+    if (!term) return null;
+    const buf = term.buffer.active;
+    // cursorY 是相对于视口顶部的行号，getLine 需要缓冲区绝对行号；
+    // 终端滚动（如 cat 输出多行）后两者会偏移，必须加上 baseY。
+    const line = buf.getLine(buf.baseY + buf.cursorY);
+    if (!line) return null;
+    const text = line.translateToString(true).trimEnd();
+    return text || null;
   }, []);
+
+  const sendInput = useCallback(
+    (data: number[], consoleLine?: string | null) => {
+      inputChainRef.current = inputChainRef.current
+        .then(() => {
+          const sid = sessionIdRef.current;
+          if (sid === null) {
+            // 连接建立前用户已经开始输入时，先放入待发送队列，连接成功后统一补发
+            pendingInputRef.current.push(...data);
+            return;
+          }
+          // 全屏应用（vim/htop/less）期间透传模式与按键同路同步，避免独立调用乱序
+          const passthrough = termRef.current?.buffer.active.type === 'alternate';
+          return sessionInput(sid, data, passthrough, consoleLine ?? null);
+        })
+        .catch(() => {});
+    },
+    [],
+  );
 
   const connect = useCallback(async () => {
     const term = termRef.current;
@@ -220,7 +247,13 @@ export default function TerminalView({
       if (bytes.length === 1 && bytes[0] >= 0x20 && bytes[0] <= 0x7e) {
         return;
       }
-      sendInput(bytes);
+      // 单次回车：读取当前控制台行（含 readline 补全/历史/编辑后的最终命令），
+      // 作为拦截判定的权威命令；多字节粘贴不读取，保持原有多行逐行判定。
+      let consoleLine: string | null = null;
+      if (bytes.length === 1 && (bytes[0] === 0x0d || bytes[0] === 0x0a)) {
+        consoleLine = readConsoleLine();
+      }
+      sendInput(bytes, consoleLine);
     });
     term.onResize(applyDims);
 
@@ -292,6 +325,20 @@ export default function TerminalView({
       term.options.theme = TERMINAL_THEMES[theme];
     }
   }, [theme]);
+
+  // 高危命令审批弹窗关闭后，把键盘焦点还给（可见的）终端，免去手动点击
+  useEffect(() => {
+    const onRefocus = () => {
+      const term = termRef.current;
+      const container = containerRef.current;
+      // 非激活标签页 display:none（offsetParent 为 null），不抢焦点
+      if (term && container && container.offsetParent !== null) {
+        term.focus();
+      }
+    };
+    window.addEventListener('buffterm:refocus-terminal', onRefocus);
+    return () => window.removeEventListener('buffterm:refocus-terminal', onRefocus);
+  }, []);
 
   const handleDisconnect = () => {
     const sid = sessionIdRef.current;

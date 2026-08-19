@@ -67,7 +67,7 @@ pub fn start_remediation_planning(
     report_id: String,
     intervention: String,
 ) -> Result<String, String> {
-    let db = app.state::<Db>();
+    let db = app.state::<Arc<Db>>();
     let report = db
         .get_inspection_report(&report_id)
         .map_err(|e| format!("读取巡检报告失败: {e}"))?
@@ -127,7 +127,7 @@ pub fn start_remediation_planning(
 
 #[tauri::command]
 pub fn get_remediation(
-    db: State<'_, Db>,
+    db: State<'_, Arc<Db>>,
     report_id: String,
 ) -> Result<Option<Remediation>, String> {
     db.get_remediation_by_report(&report_id)
@@ -141,7 +141,7 @@ pub async fn execute_remediation(
     remediation_id: String,
     steps: Vec<RemediationStepInput>,
 ) -> Result<(), String> {
-    let db = app.state::<Db>();
+    let db = app.state::<Arc<Db>>();
     let mut remediation = db
         .get_remediation(&remediation_id)
         .map_err(|e| format!("读取整改记录失败: {e}"))?
@@ -195,7 +195,7 @@ pub async fn retry_remediation(
     state: State<'_, RemediationManager>,
     remediation_id: String,
 ) -> Result<(), String> {
-    let db = app.state::<Db>();
+    let db = app.state::<Arc<Db>>();
     let mut remediation = db
         .get_remediation(&remediation_id)
         .map_err(|e| format!("读取整改记录失败: {e}"))?
@@ -247,7 +247,7 @@ async fn run_planning(
     if cancelled(&flag) {
         remediation.status = "cancelled".to_string();
         remediation.error = Some("用户取消".to_string());
-        let _ = app.state::<Db>().update_remediation(&remediation);
+        let _ = app.state::<Arc<Db>>().update_remediation(&remediation);
         let _ = app.emit(
             "remediation:done",
             RemediationDone {
@@ -274,7 +274,7 @@ async fn run_planning(
     if cancelled(&flag) {
         remediation.status = "cancelled".to_string();
         remediation.error = Some("用户取消".to_string());
-        let _ = app.state::<Db>().update_remediation(&remediation);
+        let _ = app.state::<Arc<Db>>().update_remediation(&remediation);
         let _ = app.emit(
             "remediation:done",
             RemediationDone {
@@ -290,7 +290,7 @@ async fn run_planning(
         Ok(()) => {
             remediation.status = "plan_ready".to_string();
             remediation.error = None;
-            let _ = app.state::<Db>().update_remediation(&remediation);
+            let _ = app.state::<Arc<Db>>().update_remediation(&remediation);
             let _ = app.emit(
                 "remediation:done",
                 RemediationDone {
@@ -302,7 +302,7 @@ async fn run_planning(
         Err(message) => {
             remediation.status = "failed".to_string();
             remediation.error = Some(message.clone());
-            let _ = app.state::<Db>().update_remediation(&remediation);
+            let _ = app.state::<Arc<Db>>().update_remediation(&remediation);
             let _ = app.emit(
                 "remediation:error",
                 RemediationError {
@@ -444,7 +444,7 @@ async fn run_execution(
 ) {
     let remediation_id = remediation.id.clone();
     let started = Instant::now();
-    let db = app.state::<Db>();
+    let db = app.state::<Arc<Db>>();
     let russh = app.state::<RusshManager>();
     let total = remediation.steps.len();
 
@@ -639,7 +639,7 @@ fn insert_remediation_audit(
 }
 
 async fn notify_remediation_result(app: &AppHandle, remediation: &Remediation) {
-    let db = app.state::<Db>();
+    let db = app.state::<Arc<Db>>();
     let settings = match db.get_alert_settings() {
         Ok(settings) => settings,
         Err(_) => return,
@@ -651,7 +651,7 @@ async fn notify_remediation_result(app: &AppHandle, remediation: &Remediation) {
     }
     let status_label = remediation_status_label(&remediation.status);
     let subject = format!(
-        "[KeyWisp 整改] {} - {}",
+        "[buffTerm 整改] {} - {}",
         remediation.host_label, status_label
     );
     let html = build_remediation_email_html(remediation, status_label);
@@ -708,7 +708,7 @@ fn build_remediation_email_html(remediation: &Remediation, status_label: &str) -
          <body style=\"margin:0;padding:24px;background:#f4f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2430;\">\
          <div style=\"max-width:900px;margin:0 auto;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,.08);\">\
          <div style=\"padding:24px 28px;background:linear-gradient(135deg,#2f3b52,#4f5d78);color:#ffffff;\">\
-         <div style=\"font-size:13px;opacity:.75;\">KeyWisp Agent Ops · 一键整改结果</div>\
+         <div style=\"font-size:13px;opacity:.75;\">buffTerm · 一键整改结果</div>\
          <div style=\"font-size:22px;font-weight:700;margin-top:4px;\">{}</div>\
          <div style=\"margin-top:10px;font-size:13px;\">执行结果：<span style=\"display:inline-block;padding:2px 10px;border-radius:999px;background:{};color:#fff;\">{}</span></div>\
          </div>\
@@ -760,7 +760,7 @@ fn cancelled(flag: &Arc<AtomicBool>) -> bool {
 
 fn remediation_system_prompt(host: &Host) -> String {
     format!(
-        "你是 KeyWisp Agent Ops 的服务器整改执行专家。\n\
+        "你是 buffTerm 的服务器整改执行专家。\n\
          当前服务器：{}（{}@{}:{}）\n\
          你只负责基于巡检报告和用户意见生成可执行的整改步骤，不执行任何命令。\n\
          请只输出 JSON，结构为：{{\"summary\":\"整改说明\",\"steps\":[{{\"description\":\"步骤说明\",\"command\":\"要执行的 shell 命令\",\"timeout_secs\":60}}]}}。\n\

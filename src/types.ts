@@ -156,6 +156,27 @@ export interface McpRule {
   created_at: number;
 }
 
+export interface TerminalRule {
+  id: string;
+  pattern: string;
+  enabled: boolean;
+  builtin: boolean;
+  created_at: number;
+}
+
+export interface TerminalGuardSettings {
+  enabled: boolean;
+  timeout_secs: number;
+}
+
+export interface TerminalGuardApproval {
+  session_id: number;
+  request_id: string;
+  host_label: string;
+  command: string;
+  matched_patterns: string[];
+}
+
 export interface McpApprovalRequest {
   request_id: string;
   host: string;

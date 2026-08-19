@@ -127,7 +127,7 @@ export default function ChatPanel({
   const [busy, setBusy] = useState(false);
   const [permissionMode, setPermissionMode] = useState<'all' | 'smart' | 'none'>(
     () =>
-      (localStorage.getItem('keywisp.permissionMode') as 'all' | 'smart' | 'none') ||
+      (localStorage.getItem('buffterm.permissionMode') as 'all' | 'smart' | 'none') ||
       'smart',
   );
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -137,7 +137,7 @@ export default function ChatPanel({
 
   const changePermissionMode = (mode: 'all' | 'smart' | 'none') => {
     setPermissionMode(mode);
-    localStorage.setItem('keywisp.permissionMode', mode);
+    localStorage.setItem('buffterm.permissionMode', mode);
   };
 
   const currentModelId =

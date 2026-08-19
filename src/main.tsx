@@ -8,7 +8,7 @@ if (navigator.userAgent.includes("Mac")) {
 
 // 在 React 渲染前应用已保存的主题，避免日间模式下首帧闪烁暗色主题
 try {
-  if (localStorage.getItem("keywisp-theme") === "light") {
+  if (localStorage.getItem("buffterm-theme") === "light") {
     document.documentElement.setAttribute("data-theme", "light");
   }
 } catch {

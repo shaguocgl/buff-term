@@ -12,6 +12,7 @@ const APPROVAL_LABEL: Record<string, string> = {
   auto: '自动',
   approved: '已批准',
   denied: '已拒绝',
+  timeout: '超时拒绝',
 };
 
 const STATUS_LABEL: Record<string, string> = {
@@ -48,7 +49,7 @@ export default function AuditLogModal({ onClose }: Props) {
   return (
     <Modal
       title="操作日志"
-      subtitle="AI 在服务器上的工具操作记录（最近 100 条）"
+      subtitle="AI 工具与终端命令操作记录（最近 100 条）"
       className="modal-wide"
       onClose={onClose}
     >

@@ -62,7 +62,7 @@ pub async fn start_inspection(
     state: State<'_, InspectionManager>,
     host: Host,
 ) -> Result<String, String> {
-    let db = app.state::<Db>();
+    let db = app.state::<Arc<Db>>();
     let (provider, model) = crate::ai::resolve_active_ai(&db)?;
 
     let report = InspectionReport {
@@ -99,7 +99,7 @@ pub async fn start_inspection(
 
 #[tauri::command]
 pub fn get_inspection_report(
-    db: State<'_, Db>,
+    db: State<'_, Arc<Db>>,
     id: String,
 ) -> Result<Option<InspectionReport>, String> {
     db.get_inspection_report(&id)
@@ -108,7 +108,7 @@ pub fn get_inspection_report(
 
 #[tauri::command]
 pub fn list_inspection_reports(
-    db: State<'_, Db>,
+    db: State<'_, Arc<Db>>,
     host_id: Option<String>,
     limit: Option<u32>,
 ) -> Result<Vec<InspectionReport>, String> {
@@ -117,7 +117,7 @@ pub fn list_inspection_reports(
 }
 
 #[tauri::command]
-pub fn delete_inspection_report(db: State<'_, Db>, id: String) -> Result<(), String> {
+pub fn delete_inspection_report(db: State<'_, Arc<Db>>, id: String) -> Result<(), String> {
     db.delete_inspection_report(&id)
         .map_err(|e| format!("删除巡检报告失败: {e}"))
 }
@@ -148,7 +148,7 @@ async fn run_inspection(
     report.finished_at = Some(now());
     report.duration_ms = Some(started.elapsed().as_millis() as u64);
     if report.status == "cancelled" {
-        let _ = app.state::<Db>().update_inspection_report(&report);
+        let _ = app.state::<Arc<Db>>().update_inspection_report(&report);
         let _ = app.emit(
             "inspection:done",
             InspectionDone {
@@ -162,7 +162,7 @@ async fn run_inspection(
     if let Err(message) = result {
         report.status = "failed".to_string();
         report.error = Some(message.clone());
-        let _ = app.state::<Db>().update_inspection_report(&report);
+        let _ = app.state::<Arc<Db>>().update_inspection_report(&report);
         let _ = app.emit(
             "inspection:error",
             InspectionError {
@@ -172,7 +172,7 @@ async fn run_inspection(
         );
     } else {
         report.status = "success".to_string();
-        let _ = app.state::<Db>().update_inspection_report(&report);
+        let _ = app.state::<Arc<Db>>().update_inspection_report(&report);
         let _ = app.emit(
             "inspection:done",
             InspectionDone {
@@ -210,7 +210,7 @@ async fn run_inspection_inner(
         return Ok(());
     }
 
-    let db = app.state::<Db>();
+    let db = app.state::<Arc<Db>>();
     let api_key = crate::credentials::get_api_key(&report.provider_id)
         .ok_or_else(|| "API Key 未找到，请在 AI 配置中检查".to_string())?;
     let client = reqwest::Client::builder()
@@ -253,7 +253,7 @@ async fn run_inspection_inner(
     if settings.smtp_host.as_deref().map(|s| !s.trim().is_empty()) == Some(true)
         && settings.smtp_to.as_deref().map(|s| !s.trim().is_empty()) == Some(true)
     {
-        let subject = format!("[KeyWisp 巡检] {} - {}", report.host_label, report.risk_level);
+        let subject = format!("[buffTerm 巡检] {} - {}", report.host_label, report.risk_level);
         if crate::alert::send_html_email(&settings, &subject, &report.html).await.is_ok() {
             report.email_sent = true;
         }
@@ -410,7 +410,7 @@ fn tool_message(id: &str, content: &str) -> serde_json::Value {
 
 fn inspection_system_prompt(host: &Host) -> String {
     format!(
-        "你是 KeyWisp Agent Ops 的服务器巡检专家，负责对当前连接的服务器生成专业、可执行的中文巡检报告。\n\
+        "你是 buffTerm 的服务器巡检专家，负责对当前连接的服务器生成专业、可执行的中文巡检报告。\n\
          当前服务器：{}（{}@{}:{}）\n\
          你只能调用 inspect_exec 工具执行只读检查；不得执行任何写操作。\n\
          报告必须包含以下四个模块：\n\
@@ -490,7 +490,7 @@ fn wrap_email_html(host_label: &str, risk: &str, body: &str) -> String {
          <body style=\"margin:0;padding:24px;background:#f4f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2430;\">\
          <div style=\"max-width:900px;margin:0 auto;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,.08);\">\
          <div style=\"padding:24px 28px;background:linear-gradient(135deg,#2f3b52,#4f5d78);color:#ffffff;\">\
-         <div style=\"font-size:13px;opacity:.75;\">KeyWisp Agent Ops · AI 巡检报告</div>\
+         <div style=\"font-size:13px;opacity:.75;\">buffTerm · AI 巡检报告</div>\
          <div style=\"font-size:22px;font-weight:700;margin-top:4px;\">{}</div>\
          <div style=\"margin-top:10px;font-size:13px;\">风险等级：<span style=\"display:inline-block;padding:2px 10px;border-radius:999px;background:{};color:#fff;\">{}</span></div>\
          </div>\

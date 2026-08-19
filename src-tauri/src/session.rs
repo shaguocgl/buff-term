@@ -1,3 +1,5 @@
+use crate::db::Db;
+use crate::guard::{GuardConfig, GuardEngine, TerminalGuardApproval};
 use crate::models::Host;
 use crate::russh::{do_connect, ClientHandler};
 use russh::client::Handle;
@@ -15,6 +17,8 @@ pub struct Session {
     write_half: Arc<ChannelWriteHalf<russh::client::Msg>>,
     input_tx: mpsc::UnboundedSender<Vec<u8>>,
     resize_tx: mpsc::UnboundedSender<(u16, u16)>,
+    /// 终端危险命令拦截状态机
+    guard: GuardEngine,
 }
 
 #[derive(Default)]
@@ -99,12 +103,18 @@ impl SessionManager {
             loop {
                 match read_half.wait().await {
                     Some(ChannelMsg::Data { data }) => {
+                        if let Some(manager) = app_for_io.try_state::<SessionManager>() {
+                            manager.feed_output(id, &data);
+                        }
                         let _ = app_for_io.emit(
                             "terminal:data",
                             TerminalData { session_id: id, data: data.to_vec() },
                         );
                     }
                     Some(ChannelMsg::ExtendedData { data, ext }) if ext == 1 => {
+                        if let Some(manager) = app_for_io.try_state::<SessionManager>() {
+                            manager.feed_output(id, &data);
+                        }
                         let _ = app_for_io.emit(
                             "terminal:data",
                             TerminalData { session_id: id, data: data.to_vec() },
@@ -132,6 +142,7 @@ impl SessionManager {
                 write_half,
                 input_tx,
                 resize_tx,
+                guard: GuardEngine::new(GuardConfig::default()),
             },
         );
         Ok(id)
@@ -139,6 +150,15 @@ impl SessionManager {
 
     pub fn remove(&self, id: u32) {
         self.sessions.lock().unwrap().remove(&id);
+    }
+
+    /// 把远端回显喂给危险命令拦截状态机：Suspended（方向键 / Tab 等）时，
+    /// readline 重绘的“提示符 + 历史命令”字节在这里累积，供 Enter 时重同步判定。
+    pub fn feed_output(&self, id: u32, data: &[u8]) {
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(session) = sessions.get_mut(&id) {
+            session.guard.on_output(data);
+        }
     }
 
     pub fn host(&self, id: u32) -> Option<Host> {
@@ -163,13 +183,123 @@ impl SessionManager {
         Ok(())
     }
 
-    pub fn write(&self, id: u32, data: Vec<u8>) -> Result<(), String> {
-        let sessions = self.sessions.lock().unwrap();
-        let session = sessions.get(&id).ok_or("会话不存在")?;
-        session
-            .input_tx
-            .send(data)
-            .map_err(|_| "会话已关闭".to_string())
+    /// 写入终端输入：先经过危险命令拦截状态机，再决定是否转发到远端。
+    /// `passthrough` 由前端在每次按键时传入（alternate screen 全屏应用期间为 true），
+    /// 与输入同路同步，避免独立调用的乱序竞态。
+    pub fn write(
+        &self,
+        app: &AppHandle,
+        id: u32,
+        data: Vec<u8>,
+        config: GuardConfig,
+        passthrough: bool,
+        console_line: Option<&str>,
+    ) -> Result<(), String> {
+        // Suspended（Tab / 方向键 / 编辑键后）状态下回车需要与远端 readline
+        // 补全 / 重绘回显同步：本地 Enter 通常先于补全后缀回显到达，若立即判定
+        // 会漏掉补全部分（例如第二次 Tab 补全的末尾字符）。给 ~200ms 窗口，
+        // 覆盖常见网络往返延迟，让补全/重绘回显先累积进同步缓冲，再执行判定。
+        let needs_sync_delay = !passthrough
+            && data.iter().any(|&b| b == 0x0d || b == 0x0a)
+            && self
+                .sessions
+                .lock()
+                .unwrap()
+                .get(&id)
+                .map(|s| s.guard.is_suspended())
+                .unwrap_or(false);
+        if needs_sync_delay {
+            let app = app.clone();
+            let console_line = console_line.map(|s| s.to_string());
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                if let Some(manager) = app.try_state::<SessionManager>() {
+                    let _ = manager.process_input(
+                        &app,
+                        id,
+                        data,
+                        config,
+                        passthrough,
+                        console_line.as_deref(),
+                    );
+                }
+            });
+            return Ok(());
+        }
+        self.process_input(app, id, data, config, passthrough, console_line)
+    }
+
+    /// 真正的输入处理：经过拦截状态机后决定转发 / 弹窗 / 审计。
+    fn process_input(
+        &self,
+        app: &AppHandle,
+        id: u32,
+        data: Vec<u8>,
+        config: GuardConfig,
+        passthrough: bool,
+        console_line: Option<&str>,
+    ) -> Result<(), String> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = sessions.get_mut(&id).ok_or("会话不存在")?;
+        session.guard.set_config(config.clone());
+        session.guard.set_passthrough(passthrough);
+        let outcome = session.guard.process_with_console_line(&data, console_line);
+        if !outcome.forward.is_empty() {
+            session
+                .input_tx
+                .send(outcome.forward)
+                .map_err(|_| "会话已关闭".to_string())?;
+        }
+        if let Some(approval) = outcome.approval {
+            let host_label = format!("{} ({})", session.host.name, session.host.label_address());
+            let _ = app.emit(
+                "terminal:guard-approval",
+                TerminalGuardApproval {
+                    session_id: id,
+                    request_id: approval.request_id.clone(),
+                    host_label,
+                    command: approval.command.clone(),
+                    matched_patterns: approval.matched_patterns,
+                },
+            );
+            // 审批超时：超时按拒绝处理并写审计
+            let timeout_secs = config.timeout_secs.max(10);
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)).await;
+                if let Some(manager) = app.try_state::<SessionManager>() {
+                    let _ = manager.resolve_approval(&app, id, &approval.request_id, false, true);
+                }
+            });
+        }
+        Ok(())
+    }
+
+    /// 处理终端命令审批结果（批准放行 Enter / 拒绝发 Ctrl-U）。
+    pub fn resolve_approval(
+        &self,
+        app: &AppHandle,
+        id: u32,
+        request_id: &str,
+        allow: bool,
+        timed_out: bool,
+    ) -> Result<(), String> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = sessions.get_mut(&id).ok_or("会话不存在")?;
+        let outcome = session.guard.resolve(request_id, allow, timed_out);
+        if !outcome.forward.is_empty() {
+            session
+                .input_tx
+                .send(outcome.forward)
+                .map_err(|_| "会话已关闭".to_string())?;
+        }
+        if let Some(audit) = outcome.audit {
+            let host_label = format!("{} ({})", session.host.name, session.host.label_address());
+            let host_id = session.host.id.clone();
+            drop(sessions);
+            crate::guard::write_guard_audit(app, id, &host_id, &host_label, &audit);
+        }
+        Ok(())
     }
 
     pub fn resize(&self, id: u32, cols: u16, rows: u16) -> Result<(), String> {
@@ -206,11 +336,30 @@ pub async fn close_session(
 
 #[tauri::command]
 pub fn session_input(
+    app: AppHandle,
     state: State<'_, SessionManager>,
+    db: State<'_, Arc<Db>>,
     id: u32,
     data: Vec<u8>,
+    passthrough: Option<bool>,
+    console_line: Option<String>,
 ) -> Result<(), String> {
-    state.write(id, data)
+    // 读取防护配置失败时降级为“不拦截”，保证终端输入永远不被吞掉
+    let config = match (db.get_terminal_guard_settings(), db.list_terminal_rules()) {
+        (Ok(settings), Ok(rules)) => GuardConfig::from_settings(&settings, &rules),
+        _ => {
+            eprintln!("[guard] 读取防护配置失败，本次输入不拦截");
+            GuardConfig::default()
+        }
+    };
+    state.write(
+        &app,
+        id,
+        data,
+        config,
+        passthrough.unwrap_or(false),
+        console_line.as_deref(),
+    )
 }
 
 #[tauri::command]

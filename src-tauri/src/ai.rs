@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use crate::credentials;
 use crate::db::Db;
 use crate::models::{AiModel, AiProvider, AiRule};
@@ -50,14 +51,14 @@ pub(crate) fn resolve_active_ai(db: &Db) -> Result<(AiProvider, String), String>
 }
 
 #[tauri::command]
-pub fn list_ai_providers(db: State<'_, Db>) -> Result<Vec<AiProvider>, String> {
+pub fn list_ai_providers(db: State<'_, Arc<Db>>) -> Result<Vec<AiProvider>, String> {
     db.list_ai_providers()
         .map_err(|e| format!("读取 AI 配置失败: {e}"))
 }
 
 #[tauri::command]
 pub fn save_ai_provider(
-    db: State<'_, Db>,
+    db: State<'_, Arc<Db>>,
     input: AiProviderInput,
     id: Option<String>,
 ) -> Result<AiProvider, String> {
@@ -121,7 +122,7 @@ pub fn save_ai_provider(
 }
 
 #[tauri::command]
-pub fn delete_ai_provider(db: State<'_, Db>, id: String) -> Result<(), String> {
+pub fn delete_ai_provider(db: State<'_, Arc<Db>>, id: String) -> Result<(), String> {
     db.delete_ai_provider(&id)
         .map_err(|e| format!("删除 AI 配置失败: {e}"))?;
     credentials::delete_api_key(&id);
@@ -130,7 +131,7 @@ pub fn delete_ai_provider(db: State<'_, Db>, id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn set_active_ai_model(
-    db: State<'_, Db>,
+    db: State<'_, Arc<Db>>,
     provider_id: String,
     model_id: String,
 ) -> Result<(), String> {
@@ -139,7 +140,7 @@ pub fn set_active_ai_model(
 }
 
 #[tauri::command]
-pub fn set_active_ai_provider(db: State<'_, Db>, provider_id: String) -> Result<(), String> {
+pub fn set_active_ai_provider(db: State<'_, Arc<Db>>, provider_id: String) -> Result<(), String> {
     db.disable_all_ai_providers()
         .map_err(|e| format!("切换平台失败: {e}"))?;
     db.set_ai_provider_enabled(&provider_id, true)
@@ -147,13 +148,13 @@ pub fn set_active_ai_provider(db: State<'_, Db>, provider_id: String) -> Result<
 }
 
 #[tauri::command]
-pub fn list_ai_rules(db: State<'_, Db>) -> Result<Vec<AiRule>, String> {
+pub fn list_ai_rules(db: State<'_, Arc<Db>>) -> Result<Vec<AiRule>, String> {
     db.list_ai_rules()
         .map_err(|e| format!("读取智能审核规则失败: {e}"))
 }
 
 #[tauri::command]
-pub fn add_ai_rule(db: State<'_, Db>, pattern: String) -> Result<AiRule, String> {
+pub fn add_ai_rule(db: State<'_, Arc<Db>>, pattern: String) -> Result<AiRule, String> {
     let pattern = pattern.trim();
     if pattern.is_empty() {
         return Err("规则不能为空".to_string());
@@ -170,7 +171,7 @@ pub fn add_ai_rule(db: State<'_, Db>, pattern: String) -> Result<AiRule, String>
 }
 
 #[tauri::command]
-pub fn delete_ai_rule(db: State<'_, Db>, id: String) -> Result<(), String> {
+pub fn delete_ai_rule(db: State<'_, Arc<Db>>, id: String) -> Result<(), String> {
     db.delete_ai_rule(&id)
         .map_err(|e| format!("删除规则失败: {e}"))
 }

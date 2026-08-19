@@ -1,14 +1,26 @@
 use crate::models::{
     AiModel, AiProvider, AiRule, AlertSettings, AuditLog, AuthType, Host, InspectionReport,
-    McpPermissionMode, McpRule, McpService, Remediation,
+    McpPermissionMode, McpRule, McpService, Remediation, TerminalGuardSettings, TerminalRule,
 };
+use crate::util::now;
 use rusqlite::{params, Connection, Row};
 use rusqlite::OptionalExtension;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub struct Db {
     conn: Mutex<Connection>,
+}
+
+/// 全局数据库入口：供凭据解密等非 Tauri 上下文直接读取数据库。
+static GLOBAL_DB: OnceLock<Arc<Db>> = OnceLock::new();
+
+pub fn init_global(db: Arc<Db>) {
+    let _ = GLOBAL_DB.set(db);
+}
+
+pub fn global() -> Option<&'static Arc<Db>> {
+    GLOBAL_DB.get()
 }
 
 impl Db {
@@ -83,6 +95,13 @@ impl Db {
                  enabled    INTEGER NOT NULL DEFAULT 1,
                  created_at INTEGER NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS terminal_rules (
+                 id         TEXT PRIMARY KEY,
+                 pattern    TEXT NOT NULL,
+                 enabled    INTEGER NOT NULL DEFAULT 1,
+                 builtin    INTEGER NOT NULL DEFAULT 0,
+                 created_at INTEGER NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS inspection_reports (
                  id            TEXT PRIMARY KEY,
                  host_id       TEXT NOT NULL,
@@ -118,8 +137,38 @@ impl Db {
                  started_at     INTEGER,
                  finished_at    INTEGER,
                  duration_ms    INTEGER
+             );
+             CREATE TABLE IF NOT EXISTS credentials (
+                 owner_id   TEXT NOT NULL,
+                 kind       TEXT NOT NULL,
+                 secret_enc TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL,
+                 PRIMARY KEY (owner_id, kind)
              );",
         )?;
+
+        // 首次建库时写入终端防护预置规则（含删除后重启不重复恢复的标记）
+        let seeded: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='terminal_rules_seeded'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if seeded.is_none() {
+            for (i, p) in crate::guard::PRESET_TERMINAL_RULES.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO terminal_rules (id, pattern, enabled, builtin, created_at)
+                     VALUES (?1, ?2, 1, 1, ?3)",
+                    params![format!("builtin-{i}"), p, now()],
+                )?;
+            }
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('terminal_rules_seeded', '1')
+                 ON CONFLICT(key) DO UPDATE SET value='1'",
+                [],
+            )?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -486,6 +535,111 @@ impl Db {
         Ok(())
     }
 
+    // ---------- 终端危险命令拦截规则 ----------
+
+    pub fn list_terminal_rules(&self) -> rusqlite::Result<Vec<TerminalRule>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, pattern, enabled, builtin, created_at FROM terminal_rules
+             ORDER BY builtin DESC, created_at DESC",
+        )?;
+        let rows = stmt.query_map([], row_to_terminal_rule)?;
+        rows.collect()
+    }
+
+    pub fn insert_terminal_rule(&self, rule: &TerminalRule) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO terminal_rules (id, pattern, enabled, builtin, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                rule.id,
+                rule.pattern,
+                rule.enabled as i64,
+                rule.builtin as i64,
+                rule.created_at as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_terminal_rule(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM terminal_rules WHERE id=?1", params![id])?;
+        Ok(())
+    }
+
+    /// 删除全部预置规则并按当前预置清单重新写入（自定义规则保留）。
+    pub fn reset_terminal_rules(&self) -> rusqlite::Result<Vec<TerminalRule>> {
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute("DELETE FROM terminal_rules WHERE builtin=1", [])?;
+            for (i, p) in crate::guard::PRESET_TERMINAL_RULES.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO terminal_rules (id, pattern, enabled, builtin, created_at)
+                     VALUES (?1, ?2, 1, 1, ?3)",
+                    params![format!("builtin-{i}"), p, now()],
+                )?;
+            }
+        }
+        self.list_terminal_rules()
+    }
+
+    pub fn get_terminal_guard_settings(&self) -> rusqlite::Result<TerminalGuardSettings> {
+        let conn = self.conn.lock().unwrap();
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='terminal_guard_settings'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match value {
+            Some(v) => serde_json::from_str(&v).map_err(|e| {
+                rusqlite::Error::ToSqlConversionFailure(Box::new(e))
+            }),
+            None => Ok(TerminalGuardSettings::default()),
+        }
+    }
+
+    pub fn save_terminal_guard_settings(
+        &self,
+        settings: &TerminalGuardSettings,
+    ) -> rusqlite::Result<()> {
+        let value = serde_json::to_string(settings)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        self.set_setting("terminal_guard_settings", &value)
+    }
+
+    /// 保存加密后的凭据（主机密码 / AI API Key 等）。
+    pub fn set_credential(&self, owner_id: &str, kind: &str, secret_enc: &str) -> rusqlite::Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO credentials (owner_id, kind, secret_enc, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(owner_id, kind) DO UPDATE SET secret_enc = ?3, updated_at = ?4",
+            params![owner_id, kind, secret_enc, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_credential(&self, owner_id: &str, kind: &str) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT secret_enc FROM credentials WHERE owner_id = ?1 AND kind = ?2",
+            params![owner_id, kind],
+            |row| row.get(0),
+        )
+        .optional()
+    }
+
+    pub fn delete_credential(&self, owner_id: &str, kind: &str) -> rusqlite::Result<()> {
+        self.conn.lock().unwrap().execute(
+            "DELETE FROM credentials WHERE owner_id = ?1 AND kind = ?2",
+            params![owner_id, kind],
+        )?;
+        Ok(())
+    }
+
     pub fn insert_inspection_report(&self, report: &InspectionReport) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -749,6 +903,16 @@ fn row_to_mcp_rule(row: &Row<'_>) -> rusqlite::Result<McpRule> {
         pattern: row.get(1)?,
         enabled: row.get::<_, i64>(2)? != 0,
         created_at: row.get::<_, i64>(3)? as u64,
+    })
+}
+
+fn row_to_terminal_rule(row: &Row<'_>) -> rusqlite::Result<TerminalRule> {
+    Ok(TerminalRule {
+        id: row.get(0)?,
+        pattern: row.get(1)?,
+        enabled: row.get::<_, i64>(2)? != 0,
+        builtin: row.get::<_, i64>(3)? != 0,
+        created_at: row.get::<_, i64>(4)? as u64,
     })
 }
 

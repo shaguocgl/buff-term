@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 const RELEASES_LATEST_URL: &str =
-    "https://api.github.com/repos/shaguocgl/keywisp-agent-ops/releases/latest";
+    "https://api.github.com/repos/shaguocgl/buff-term/releases/latest";
 
 #[derive(Debug, Deserialize)]
 struct GithubRelease {
@@ -29,7 +29,7 @@ pub fn get_app_version() -> String {
 pub async fn check_for_update() -> Result<UpdateInfo, String> {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     let client = reqwest::Client::builder()
-        .user_agent(concat!("KeyWisp-Agent-Ops/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("buffTerm/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("初始化更新检查失败: {e}"))?;
     let response = client
@@ -42,7 +42,7 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
             latest_version: current_version.clone(),
             current_version,
             update_available: false,
-            release_url: "https://github.com/shaguocgl/keywisp-agent-ops/releases".to_string(),
+            release_url: "https://github.com/shaguocgl/buff-term/releases".to_string(),
             release_found: false,
         });
     }

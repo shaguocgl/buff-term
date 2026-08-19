@@ -1,8 +1,8 @@
 [package]
-name = "keywisp-agent-ops"
-version = "1.0.2"
+name = "buff-term"
+version = "1.0.0"
 description = "桌面端 SSH 管理 + AI Agent 工具"
-authors = ["KeyWisp"]
+authors = ["buffTerm"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -11,7 +11,7 @@ edition = "2021"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "keywisp_agent_ops_lib"
+name = "buff_term_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -37,6 +37,8 @@ futures-util = "0.3"
 regex = "1"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
 base64 = "0.22"
+aes-gcm = "0.10"
+getrandom = "0.2"
 hmac = "0.12"
 sha2 = "0.10"
 percent-encoding = "2"
