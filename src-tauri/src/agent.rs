@@ -7,7 +7,7 @@ use crate::models::{AuditLog, Host, PermissionMode};
 use crate::russh::RusshManager;
 use crate::safety::is_dangerous;
 use crate::session::SessionManager;
-use crate::util::{extract_error, now, truncate};
+use crate::util::{extract_error, now, truncate, truncate_output};
 use futures_util::StreamExt;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -544,7 +544,7 @@ async fn run_agent_loop(
                     history.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": acc.id,
-                        "content": output,
+                        "content": truncate_output(&output, 8000),
                     }));
                 }
                 Err(err) => {
@@ -563,7 +563,7 @@ async fn run_agent_loop(
                     history.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": acc.id,
-                        "content": format!("执行失败: {err}"),
+                        "content": truncate_output(&format!("执行失败: {err}"), 8000),
                     }));
                 }
             }

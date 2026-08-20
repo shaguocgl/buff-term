@@ -869,8 +869,23 @@ impl Db {
     // ============ 主机历史指标 ============
 
     /// 插入一条主机指标快照。disks/top 以 JSON 形式存储。
+    /// 同一主机 60 秒内已有更新的记录时跳过写入，避免监控面板 5 秒轮询把
+    /// host_metrics 记录得过于密集（历史趋势按天/小时分析，不需要秒级粒度）。
     pub fn insert_metric(&self, metric: NewMetric<'_>) -> rusqlite::Result<()> {
+        const MIN_INTERVAL_SECS: i64 = 60;
         let conn = self.conn.lock().unwrap();
+        let latest_ts: Option<i64> = conn
+            .query_row(
+                "SELECT ts FROM host_metrics WHERE host_id = ?1 ORDER BY ts DESC LIMIT 1",
+                params![metric.host_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(latest) = latest_ts {
+            if (metric.ts as i64) - latest < MIN_INTERVAL_SECS {
+                return Ok(());
+            }
+        }
         conn.execute(
             "INSERT INTO host_metrics (
                 host_id, ts, cpu_percent, load1, mem_total_mb, mem_used_mb,
@@ -893,6 +908,8 @@ impl Db {
     }
 
     /// 查询指定主机在 since_ts 之后的指标记录（按时间升序），最多 limit 条。
+    /// 窗口内样本数超过 limit 时，保留的是**最新**的 limit 条（而非最早的），
+    /// 否则监控密集时段会导致查到的“最新值”其实是窗口内最早的数据，趋势/外推失真。
     pub fn list_metrics(
         &self,
         host_id: &str,
@@ -905,11 +922,13 @@ impl Db {
                     mem_percent, disks_json, top_json, source
              FROM host_metrics
              WHERE host_id = ?1 AND ts >= ?2
-             ORDER BY ts ASC
+             ORDER BY ts DESC
              LIMIT ?3",
         )?;
         let rows = stmt.query_map(params![host_id, since_ts as i64, limit as i64], metric_from_row)?;
-        rows.collect()
+        let mut rows: Vec<HostMetric> = rows.collect::<rusqlite::Result<_>>()?;
+        rows.reverse();
+        Ok(rows)
     }
 
     /// 删除 before_ts 之前的所有指标记录，返回删除行数。

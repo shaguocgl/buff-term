@@ -26,7 +26,10 @@ pub(crate) fn system_prompt(host: &Host, provider: &AiProvider, model: &str) -> 
             每次工具调用都必须包含完整的 name 字段且不能为空，不要发明新工具名；参数放入 arguments（JSON 对象）。\n\
          7. 当用户询问“最近怎么样”、“有没有异常”、“是不是变慢了”等涉及变化的问题时，优先调用 query_history 查看趋势，
             而不是只调用 resource_usage 看当下值。趋势比绝对值更有诊断价值——一个从 30% 涨到 78% 的磁盘比一个稳定在 78% 的磁盘更紧急。
-            query_history 会返回历史序列、变化斜率和外推预测（如“按当前增速，X 天后达到 90%”），这是单次快照无法提供的信息。",
+            query_history 会返回历史序列、变化斜率和外推预测（如“按当前增速，X 天后达到 90%”），这是单次快照无法提供的信息。
+            根据分析目的选择合适的 granularity 和 window_hours：看最近几小时的细节波动用 minute + 小窗口；
+            看今天的走势用 hour + 24～48 小时窗口；看长周期趋势/容量规划用 day + 更大窗口（最长 90 天）。
+            不确定时可不填 granularity，会按 window_hours 自动选择合适粒度。",
         provider.name,
         model,
         host.name,
@@ -107,6 +110,11 @@ pub(crate) fn tools_schema() -> serde_json::Value {
                         "window_hours": {
                             "type": "number",
                             "description": "回溯多少小时，默认 168（7 天），最大 2160（90 天）"
+                        },
+                        "granularity": {
+                            "type": "string",
+                            "enum": ["minute", "hour", "day"],
+                            "description": "数据聚合粒度：minute=原始采样点（适合看最近几小时的细节波动），hour=按小时取均值（适合看当天走势），day=按天取均值（适合看多天/长周期趋势）。不填时按 window_hours 自动选择：≤6 小时用 minute，≤48 小时用 hour，否则用 day。"
                         }
                     },
                     "required": ["metric"]
@@ -197,11 +205,26 @@ pub(crate) async fn execute_tool(
             let metric = args.get("metric").and_then(|v| v.as_str()).unwrap_or("cpu");
             let window_h = args.get("window_hours").and_then(|v| v.as_f64()).unwrap_or(168.0);
             let window_h = window_h.clamp(1.0, 2160.0);
+            let granularity = args
+                .get("granularity")
+                .and_then(|v| v.as_str())
+                .filter(|g| matches!(*g, "minute" | "hour" | "day"))
+                .unwrap_or(if window_h <= 6.0 {
+                    "minute"
+                } else if window_h <= 48.0 {
+                    "hour"
+                } else {
+                    "day"
+                });
             let since = now().saturating_sub((window_h * 3600.0) as u64);
+            // 查询上限按窗口大小动态计算，覆盖最小采样间隔（60s）下窗口内可能出现的
+            // 全部行数，避免长窗口 + 密集采样时旧的固定上限悄悄丢最新数据；同时设硬
+            // 上限保护内存/性能。最终发给模型的文本经聚合/降采样后长度与此无关。
+            let limit = (((window_h * 3600.0 / 60.0) as u64).saturating_add(500)).min(200_000) as u32;
             let rows = db
-                .list_metrics(&host.id, since, 2000)
+                .list_metrics(&host.id, since, limit)
                 .map_err(|e| format!("查询历史指标失败: {e}"))?;
-            Ok(format_metric_trend(metric, &rows, window_h))
+            Ok(format_metric_trend(metric, &rows, window_h, granularity))
         }
         _ => {
             let effective = infer_tool_name(name, args);
