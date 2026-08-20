@@ -176,6 +176,103 @@ pub fn delete_ai_rule(db: State<'_, Arc<Db>>, id: String) -> Result<(), String> 
         .map_err(|e| format!("删除规则失败: {e}"))
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct RemoteAiModel {
+    pub id: String,
+    pub owned_by: Option<String>,
+}
+
+/// 解析 API Key：表单传入的优先，否则回退到 keychain 中已保存的（编辑场景）。
+/// 与 test_ai_provider 不同，这里允许 key 为空（Ollama 等本地服务无需鉴权）。
+fn resolve_api_key(api_key: Option<String>, id: Option<String>) -> String {
+    match api_key {
+        Some(k) if !k.trim().is_empty() => k,
+        _ => id
+            .as_deref()
+            .and_then(credentials::get_api_key)
+            .unwrap_or_default(),
+    }
+}
+
+/// 拉取远端 OpenAI 兼容平台的可用模型列表（GET {base_url}/models）。
+/// 返回结果按 model id 升序去重。错误信息按 HTTP 状态分层，便于前端提示。
+#[tauri::command]
+pub async fn list_remote_ai_models(
+    base_url: String,
+    api_key: Option<String>,
+    id: Option<String>,
+) -> Result<Vec<RemoteAiModel>, String> {
+    let base = base_url.trim();
+    if base.is_empty() {
+        return Err("请先填写 Base URL".to_string());
+    }
+    let url = format!("{}/models", base.trim_end_matches('/'));
+    let key = resolve_api_key(api_key, id);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
+
+    let mut req = client.get(&url);
+    if !key.is_empty() {
+        req = req.bearer_auth(&key);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        let detail = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v["error"]["message"].as_str().map(String::from))
+            .unwrap_or_else(|| text.chars().take(180).collect::<String>());
+        let hint = match status.as_u16() {
+            401 | 403 => "API Key 无效或无权限，请检查 Key 与平台",
+            404 => "该平台不支持 /models 接口，请手动填写模型 ID",
+            _ => "",
+        };
+        let msg = if hint.is_empty() {
+            format!("HTTP {}: {}", status.as_u16(), detail)
+        } else {
+            format!("HTTP {}：{}（{}）", status.as_u16(), detail, hint)
+        };
+        return Err(msg);
+    }
+
+    // 兼容 { data: [{id, owned_by}, ...] } 与 { models: [...] } 两种形态
+    let parsed: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("解析响应失败: {e}"))?;
+    let arr = parsed
+        .get("data")
+        .or_else(|| parsed.get("models"))
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "响应中未找到 data/models 数组，该平台可能不兼容 OpenAI /models 协议".to_string())?;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut list: Vec<RemoteAiModel> = Vec::new();
+    for item in arr {
+        let mid = item.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let mid = match mid {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => continue,
+        };
+        if !seen.insert(mid.clone()) {
+            continue;
+        }
+        let owned_by = item
+            .get("owned_by")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        list.push(RemoteAiModel { id: mid, owned_by });
+    }
+    list.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(list)
+}
+
 #[derive(Debug, Serialize)]
 pub struct TestResult {
     pub ok: bool,
