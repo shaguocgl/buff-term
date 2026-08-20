@@ -62,6 +62,11 @@ export interface TestResult {
   message: string;
 }
 
+export interface RemoteAiModel {
+  id: string;
+  owned_by?: string | null;
+}
+
 export interface UpdateInfo {
   current_version: string;
   latest_version: string;

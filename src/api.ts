@@ -15,6 +15,7 @@ import type {
   McpService,
   McpServiceInput,
   MonitorSnapshot,
+  RemoteAiModel,
   TerminalGuardApproval,
   TerminalGuardSettings,
   TerminalRule,
@@ -199,6 +200,17 @@ export const testAiProvider = (p: {
   invoke<TestResult>('test_ai_provider', {
     baseUrl: p.base_url,
     model: p.model,
+    apiKey: p.api_key,
+    id: p.id,
+  });
+
+export const listRemoteAiModels = (p: {
+  base_url: string;
+  api_key?: string;
+  id?: string;
+}) =>
+  invoke<RemoteAiModel[]>('list_remote_ai_models', {
+    baseUrl: p.base_url,
     apiKey: p.api_key,
     id: p.id,
   });

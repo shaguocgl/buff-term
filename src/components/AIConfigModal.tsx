@@ -6,12 +6,19 @@ import {
   deleteAiProvider,
   listAiProviders,
   listAiRules,
+  listRemoteAiModels,
   saveAiProvider,
   testAiProvider,
 } from '../api';
-import type { AiModelInput, AiProvider, AiRule, TestResult } from '../types';
+import type {
+  AiModelInput,
+  AiProvider,
+  AiRule,
+  RemoteAiModel,
+  TestResult,
+} from '../types';
 import Modal from './Modal';
-import { CheckIcon, PlusIcon, SparklesIcon, TrashIcon } from './Icons';
+import { CheckIcon, DownloadIcon, PlusIcon, SparklesIcon, TrashIcon } from './Icons';
 import Select from './Select';
 
 interface Props {
@@ -22,50 +29,17 @@ interface Props {
 interface Preset {
   name: string;
   base_url: string;
-  models: { label: string; model: string }[];
 }
 
 const PRESETS: Preset[] = [
-  {
-    name: 'DeepSeek',
-    base_url: 'https://api.deepseek.com',
-    models: [
-      { label: 'DeepSeek V4 Flash', model: 'deepseek-v4-flash' },
-      { label: 'DeepSeek V4 Pro', model: 'deepseek-v4-pro' },
-    ],
-  },
-  {
-    name: 'OpenAI',
-    base_url: 'https://api.openai.com/v1',
-    models: [
-      { label: 'GPT-4o mini', model: 'gpt-4o-mini' },
-      { label: 'GPT-4o', model: 'gpt-4o' },
-    ],
-  },
+  { name: 'DeepSeek', base_url: 'https://api.deepseek.com' },
+  { name: 'OpenAI', base_url: 'https://api.openai.com/v1' },
   {
     name: '通义千问',
     base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    models: [
-      { label: 'Qwen Plus', model: 'qwen-plus' },
-      { label: 'Qwen Max', model: 'qwen-max' },
-    ],
   },
-  {
-    name: 'Kimi',
-    base_url: 'https://api.moonshot.cn/v1',
-    models: [
-      { label: 'Moonshot 8K', model: 'moonshot-v1-8k' },
-      { label: 'Moonshot 32K', model: 'moonshot-v1-32k' },
-    ],
-  },
-  {
-    name: 'Ollama（本地）',
-    base_url: 'http://localhost:11434/v1',
-    models: [
-      { label: 'Qwen2.5 7B', model: 'qwen2.5:7b' },
-      { label: 'Llama3.1 8B', model: 'llama3.1:8b' },
-    ],
-  },
+  { name: 'Kimi', base_url: 'https://api.moonshot.cn/v1' },
+  { name: 'Ollama（本地）', base_url: 'http://localhost:11434/v1' },
 ];
 
 interface FormModel {
@@ -83,20 +57,12 @@ interface FormState {
   apiKey: string;
 }
 
-function presetModels(preset: Preset): FormModel[] {
-  return preset.models.map((m, idx) => ({
-    label: m.label,
-    model: m.model,
-    is_active: idx === 0,
-  }));
-}
-
 function formFromPreset(preset: Preset): FormState {
   return {
     preset: preset.name,
     name: preset.name,
     base_url: preset.base_url,
-    models: presetModels(preset),
+    models: [],
     apiKey: '',
   };
 }
@@ -113,6 +79,11 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
+  const [fetching, setFetching] = useState(false);
+  const [showPicker, setShowPicker] = useState(false);
+  const [remoteModels, setRemoteModels] = useState<RemoteAiModel[]>([]);
+  const [pickerQuery, setPickerQuery] = useState('');
+  const [pickerSelected, setPickerSelected] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     setProviders(await listAiProviders());
@@ -152,6 +123,9 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
     setEnabled(true);
     setTestResult(null);
     setError(null);
+    setShowPicker(false);
+    setRemoteModels([]);
+    setPickerSelected(new Set());
     setShowForm(true);
   };
 
@@ -172,6 +146,9 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
     setEnabled(p.enabled);
     setTestResult(null);
     setError(null);
+    setShowPicker(false);
+    setRemoteModels([]);
+    setPickerSelected(new Set());
     setShowForm(true);
   };
 
@@ -280,9 +257,15 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
   };
 
   const handleTest = async () => {
+    if (!form.base_url.trim()) {
+      setError('请先填写 Base URL');
+      return;
+    }
     const model = activeModel();
-    if (!form.base_url.trim() || !model) {
-      setError('请先填写 Base URL 并至少添加一个模型');
+    // 表单未填模型时，回退用最近拉取到的第一个模型，省一步
+    const modelId = model?.model.trim() || remoteModels[0]?.id;
+    if (!modelId) {
+      setError('请先添加模型，或点击"拉取可用模型"获取列表');
       return;
     }
     setTesting(true);
@@ -290,7 +273,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
     try {
       const result = await testAiProvider({
         base_url: form.base_url.trim(),
-        model: model.model.trim(),
+        model: modelId,
         api_key: form.apiKey.trim() || undefined,
         id: editing?.id,
       });
@@ -300,6 +283,66 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
     } finally {
       setTesting(false);
     }
+  };
+
+  const handleFetchModels = async () => {
+    if (!form.base_url.trim()) {
+      setError('请先填写 Base URL');
+      return;
+    }
+    setError(null);
+    setFetching(true);
+    try {
+      const list = await listRemoteAiModels({
+        base_url: form.base_url.trim(),
+        api_key: form.apiKey.trim() || undefined,
+        id: editing?.id,
+      });
+      setRemoteModels(list);
+      // 默认勾选当前表单中尚未存在的模型，避免重复导入
+      const existing = new Set(form.models.map((m) => m.model.trim()));
+      setPickerSelected(new Set(list.filter((m) => !existing.has(m.id)).map((m) => m.id)));
+      setPickerQuery('');
+      setShowPicker(true);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setFetching(false);
+    }
+  };
+
+  const togglePickerSelect = (id: string) => {
+    setPickerSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const filteredRemoteModels = remoteModels.filter((m) =>
+    m.id.toLowerCase().includes(pickerQuery.trim().toLowerCase()),
+  );
+
+  const handleImportModels = () => {
+    const existing = new Set(form.models.map((m) => m.model.trim()));
+    const toAdd = remoteModels.filter(
+      (m) => pickerSelected.has(m.id) && !existing.has(m.id),
+    );
+    if (toAdd.length === 0) {
+      setShowPicker(false);
+      return;
+    }
+    setForm((prev) => {
+      const wasEmpty = prev.models.length === 0;
+      const newModels = toAdd.map((m, idx) => ({
+        label: m.id,
+        model: m.id,
+        is_active: wasEmpty && idx === 0,
+      }));
+      return { ...prev, models: [...prev.models, ...newModels] };
+    });
+    setShowPicker(false);
   };
 
   const handleDelete = async (p: AiProvider) => {
@@ -503,7 +546,113 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
             </label>
 
             <div className="model-editor">
-              <span className="model-editor-label">模型列表</span>
+              <div className="model-editor-header">
+                <span className="model-editor-label">模型列表</span>
+                <div className="model-editor-actions">
+                  <button
+                    type="button"
+                    className="btn secondary small"
+                    onClick={handleFetchModels}
+                    disabled={fetching}
+                    title="从平台拉取可用模型列表"
+                  >
+                    <DownloadIcon size={13} />
+                    {fetching ? '拉取中…' : '拉取可用模型'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn secondary small add-model"
+                    onClick={addModel}
+                  >
+                    <PlusIcon size={13} /> 添加模型
+                  </button>
+                </div>
+              </div>
+
+              {showPicker && (
+                <div className="model-picker">
+                  <div className="model-picker-bar">
+                    <input
+                      className="model-picker-search"
+                      placeholder={`搜索 ${remoteModels.length} 个可用模型…`}
+                      value={pickerQuery}
+                      onChange={(e) => setPickerQuery(e.target.value)}
+                      autoFocus
+                    />
+                    <button
+                      type="button"
+                      className="btn ghost small"
+                      onClick={() =>
+                        setPickerSelected((prev) =>
+                          prev.size === filteredRemoteModels.length
+                            ? new Set()
+                            : new Set(filteredRemoteModels.map((m) => m.id)),
+                        )
+                      }
+                    >
+                      {pickerSelected.size === filteredRemoteModels.length &&
+                      filteredRemoteModels.length > 0
+                        ? '全不选'
+                        : '全选'}
+                    </button>
+                  </div>
+                  <div className="model-picker-list">
+                    {filteredRemoteModels.length === 0 ? (
+                      <div className="model-picker-empty">没有匹配的模型</div>
+                    ) : (
+                      filteredRemoteModels.map((m) => {
+                        const exists = form.models.some(
+                          (fm) => fm.model.trim() === m.id,
+                        );
+                        const checked = pickerSelected.has(m.id);
+                        return (
+                          <label
+                            key={m.id}
+                            className={`model-picker-item${checked ? ' checked' : ''}${
+                              exists ? ' exists' : ''
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              disabled={exists}
+                              onChange={() => togglePickerSelect(m.id)}
+                            />
+                            <span className="model-picker-id">{m.id}</span>
+                            {m.owned_by && (
+                              <span className="model-picker-owner">{m.owned_by}</span>
+                            )}
+                            {exists && <span className="model-picker-tag">已添加</span>}
+                          </label>
+                        );
+                      })
+                    )}
+                  </div>
+                  <div className="model-picker-footer">
+                    <span className="model-picker-count">
+                      已选 {pickerSelected.size} 个
+                    </span>
+                    <div className="model-picker-footer-actions">
+                      <button
+                        type="button"
+                        className="btn ghost small"
+                        onClick={() => setShowPicker(false)}
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        className="btn primary small"
+                        onClick={handleImportModels}
+                        disabled={pickerSelected.size === 0}
+                      >
+                        导入 {pickerSelected.size > 0 ? pickerSelected.size : ''}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {form.models.map((m, idx) => (
                 <div className="model-row" key={idx}>
                   <input
@@ -535,9 +684,6 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
                   </button>
                 </div>
               ))}
-              <button type="button" className="btn secondary small add-model" onClick={addModel}>
-                <PlusIcon size={13} /> 添加模型
-              </button>
             </div>
 
             <div className="form-row-inline">

@@ -79,6 +79,7 @@ pub fn run() {
             ai::add_ai_rule,
             ai::delete_ai_rule,
             ai::test_ai_provider,
+            ai::list_remote_ai_models,
             agent::agent_chat,
             agent::agent_approve,
             agent::agent_cancel,
