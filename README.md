@@ -4,9 +4,9 @@
 
 # buffTerm
 
-> 本地优先的桌面 SSH 管理 + AI Agent 工具
+> AI Agent Buff 加持的 SSH 管理工具
 >
-> A local-first desktop SSH manager with an AI agent that manages your servers through natural language.
+> A desktop SSH manager supercharged by a self-built AI agent — manage servers through natural language, locally.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)
@@ -14,9 +14,9 @@
 ![React](https://img.shields.io/badge/React-19-blue.svg)
 ![Agent](https://img.shields.io/badge/Agent-自研编排%20%7C%20无框架依赖-8b5cf6.svg)
 
-buffTerm 是一款桌面端 SSH 管理工具，内置**自研的 AI Agent 编排层**：你可以自行配置大模型平台（DeepSeek、OpenAI、通义千问、Kimi、本地 Ollama 等），让 AI 通过自然语言帮你查询和运维远程服务器。所有配置、密钥和审计数据默认只保存在本机。
+buffTerm 是一款有 AI Agent Buff 加持的 SSH 管理工具，——内置**自研 AI Agent 编排层**，接入你选择的大模型（DeepSeek、OpenAI、通义千问、Kimi、本地 Ollama 等），用自然语言就能查询状态、排查问题、执行运维。终端高危命令拦截、AI 操作审批与审计全程兜底，所有数据只存本机。
 
-> 🤖 **Agent 编排层完全自研**：核心工具调用循环（SSE 流式解析 → 工具执行 → 结果回填）由本项目手写实现，**不依赖 LangChain / OpenAI Agents SDK / Vercel AI SDK 等框架**——审批拦截、安全策略、审计留痕全部自己掌控。详细设计见 [自研 AI Agent 与权限设计](docs/自研AI-Agent与权限设计.md)。
+> 🤖 **Agent 编排层完全自研**：核心工具调用循环（SSE 流式解析 → 工具执行 → 结果回填）由本项目手写实现，**不依赖 LangChain / OpenAI Agents SDK / Vercel AI SDK 等框架**——审批拦截、安全策略、审计留痕全部自己掌控。
 
 ## 📥 下载
 
@@ -29,71 +29,38 @@ buffTerm 是一款桌面端 SSH 管理工具，内置**自研的 AI Agent 编排
 
 ## ✨ 功能特性
 
-### SSH 基础管理
-
-- 主机配置增删改查（名称、地址、端口、用户名、认证方式）
-- 密钥 / 密码认证，密码与 API Key 经 AES-256-GCM 加密后存本机 SQLite，主密钥存系统钥匙串（macOS Keychain / Windows 凭据管理器 / Linux Secret Service）
-- 多标签终端会话（xterm.js）、窗口尺寸自适应
-- 一键导入 `~/.ssh/config`（HostName / User / Port / IdentityFile）
-- 密码认证由后端直接注入加密凭据解密结果，不经过终端提示符识别
-
 ### 终端防护
 
-- **回车前拦截高危命令**：基于**终端实际命令行**判定（前端 xterm 权威行 + 回显重同步，Tab 补全 / 方向键历史 / 编辑键均覆盖），命中规则弹窗确认后才真正执行
-- **预置危险规则**：覆盖删除（`rm -rf`）、格式化 / 分区（`mkfs` / `fdisk` / `dd if=`）、关机重启、服务管理（`systemctl stop`）、防火墙、账户权限、数据库（`drop table`）、强杀进程、Git 强推 / 硬重置、危险管道（`curl | sh`）、覆盖系统文件等，可删改、可一键恢复
-- **自定义规则**：子串匹配、大小写不敏感，可随时添加 / 删除
-- **审批交互**：批准放行执行、取消发送 Ctrl-U 清行、超时按拒绝处理；审批关闭后自动聚焦终端继续输入
-- 全屏应用（vim / htop / less 等）内自动透传，不误判编辑内容；每次拦截写入审计日志（命令脱敏）
-- 侧边栏「终端防护」入口配置总开关、规则与恢复预置
-
-### 界面体验
-
-- 日间 / 夜间主题切换：日间纯白、夜间深色，xterm 终端配色跟随主题，偏好自动保存
-- 左侧边栏可收起为图标栏：悬停展开主机列表与功能提示，收起状态持久化
-- 右侧 AI / 文件 / 监控 / 巡检面板支持鼠标拖拽调整宽度
+- **回车前拦截高危命令**：基于终端实际命令行判定（覆盖 Tab 补全 / 方向键历史 / 编辑键），命中规则弹窗确认后才执行
+- **预置 + 自定义危险规则**：覆盖 `rm -rf`、`mkfs`、`dd if=`、`systemctl stop`、`drop table`、`curl | sh` 等，可删改、可一键恢复
+- 全屏应用（vim / htop 等）内自动透传，不误判编辑内容；每次拦截写入审计日志
 
 ### AI Agent
 
-- **自研 Agent 编排层**：SSE 流式解析、工具调用循环、审批与审计均为手写实现，无框架依赖，行为完全可控
-- **russh 协议级执行**：AI 工具调用走独立 SSH 连接（连接复用、known_hosts 校验、结构化 stdout/退出码）
-- 多平台配置：DeepSeek / OpenAI / 通义千问 / Kimi / Ollama（OpenAI 兼容协议）
-- 单个厂商支持配置多个模型，聊天窗口底部可随时切换
-- 流式回复，Markdown 渲染（代码块 / 表格 / 列表）
+- **自研 Agent 编排层**：SSE 流式解析、工具调用循环、审批与审计均为手写实现，无框架依赖
+- **russh 协议级执行**：AI 工具调用走独立 SSH 连接（连接复用、known_hosts 校验）
+- 多平台配置：DeepSeek / OpenAI / 通义千问 / Kimi / Ollama，单厂商可配多模型
 - 工具调用：`exec_command`、`read_file`、`list_dir`、`resource_usage`
-- 每台主机独立会话历史，切换标签或重开聊天面板自动恢复，可随时中断 / 清空
+- 每台主机独立会话历史，可随时中断 / 清空
 
 ### MCP 服务
 
-- **buffTerm 作为 MCP 服务器对外提供服务**：基于 Streamable HTTP + JSON-RPC + token 认证
-- 把勾选的服务器能力开放给 Codex、Claude Desktop 等外部 AI 工具
-- 提供 `list_hosts`、命令执行、文件读取、目录列表、资源查询等 SSH 工具
-- 支持三种权限模式：
-  - **只读模式**：禁止写操作，适合安全查询场景
-  - **管控模式**：系统预置 + 自定义危险命令规则，命中后需人工确认
-  - **全部放行**：可执行任意命令，适合完全信任场景
+- **buffTerm 作为 MCP 服务器**：基于 Streamable HTTP + JSON-RPC + token 认证，把勾选的服务器能力开放给 Codex、Claude Desktop 等外部 AI 工具
+- 三种权限模式：只读（禁止写操作）/ 管控（危险命令需确认）/ 全部放行
 - 启动后自动生成外部 AI 的 MCP 配置 JSON，支持 token 轮换与吊销
 
 ### 安全体系
 
-- 三级安全级别：
-  - **全部审核**：每个工具调用都需要人工批准
-  - **智能审核**：只读命令自动执行；危险命令（内置规则 + 自定义规则 + 模型判定）需批准
-  - **全部放行**：命令直接执行（谨慎使用）
-- 自定义智能审核规则：子串匹配，无需通配符，如配置 `rm -rf` 即可命中所有包含该片段的命令
-- 审计日志：每次 AI 工具调用的时间、主机、命令、审批方式、结果摘要、耗时，面板内可查
-- 输出脱敏：命令输出进入模型前过滤 AK/SK、密钥、口令、私钥块等敏感信息
-- 私钥与 API Key 永不进入模型上下文，认证由后端注入
+- 三级安全级别：全部审核 / 智能审核（只读自动执行，危险命令需批准）/ 全部放行
+- 审计日志：记录每次 AI 工具调用的时间、主机、命令、审批方式、结果摘要
+- 输出脱敏：命令输出进入模型前过滤 AK/SK、密钥、口令等敏感信息；私钥与 API Key 永不进入模型上下文
 
 ### 监控、巡检与通知
 
-- 监控面板：CPU / 内存 / 磁盘仪表盘 + 负载 + TOP 进程，每 5 秒自动刷新
-- AI 巡检：采集服务器基线数据后由 AI 生成中文 Markdown 报告；仅允许白名单内的只读命令，支持取消、历史报告与风险等级
-- 巡检含「木马 / 挖矿风险」模块：覆盖可疑进程、对外连接、crontab / systemd timer、临时目录可执行文件与 SSH 授权文件变动
-- 一键整改：输入整改干预意见后，AI 结合巡检报告生成详细整改步骤；用户确认后自动执行，支持步骤编辑、失败重试、全程审计
-- 通知配置：邮件（SMTP）发送渠道配置，支持测试连接
-- 巡检报告可自动转为 HTML 并发送至已配置的邮件收件人
-- 整改完成后自动发送邮件，包含整改步骤与执行结果
-- 版本检查：侧边栏可显示当前版本并检查 GitHub Releases 的最新正式版本，发现更新后可跳转下载
+- 监控面板：CPU / 内存 / 磁盘仪表盘 + 负载 + TOP 进程，自动刷新
+- AI 巡检：采集只读基线数据生成中文 Markdown 报告，含木马 / 挖矿风险检测
+- 一键整改：AI 结合巡检报告生成整改步骤，确认后自动执行，支持步骤编辑与失败重试
+- 邮件通知：巡检报告与整改结果可自动发送至已配置的收件人
 
 ## 🧱 技术栈
 
@@ -170,26 +137,6 @@ src-tauri/target/release/bundle/nsis/
 
 > DMG 需要在 macOS 上构建，EXE 建议在 Windows 上构建；打包前会先执行前端构建与 Rust 编译。未配置代码签名时仍可打包，但系统可能显示安全提示。
 
-### 自动发布
-
-推送与应用版本一致的 Git 标签（例如当前版本使用 `v1.0.2`）会触发 GitHub Actions：自动构建 macOS 通用 DMG（Intel + Apple Silicon）与 Windows x64 NSIS 安装包，并上传至同名 GitHub Release。发布前请确保 `package.json`、`src-tauri/tauri.conf.json` 与 `src-tauri/Cargo.toml` 中的版本号一致。
-
-```bash
-git tag v1.0.2
-git push origin v1.0.2
-```
-
-## 📖 使用说明
-
-1. **添加主机**：左侧「新建主机」，填写地址、用户名，选择密钥或密码认证（密码加密后存本机 SQLite）；也可以点「导入 ~/.ssh/config」一键导入。
-2. **连接**：点击主机卡片即可连接，首次连接按终端提示确认主机指纹。
-3. **配置 AI**：点击底部「AI Agent」卡片，选择平台预设（如 DeepSeek），填写 API Key 并「测试连接」，保存后即可使用。
-4. **AI 对话**：连接服务器后右侧出现聊天面板；底部可切换安全级别（默认智能审核）与当前模型。
-5. **AI 巡检**：连接服务器后点击终端工具栏的「巡检」，系统采集只读基线数据并生成报告；配置 SMTP 后会自动发送 HTML 报告。报告生成后可直接「一键整改」，输入干预意见、确认步骤后自动执行整改。
-6. **MCP 服务**：侧边栏「MCP 服务」勾选要开放的服务器 → 选择权限模式 → 启动，复制生成的配置 JSON 粘贴到 Codex / Claude Desktop 即可接入。
-7. **操作日志与更新**：侧边栏底部可查看所有 AI / MCP 工具调用记录；「检查更新」会查询 GitHub 最新正式 Release，发现版本后可跳转下载。
-8. **界面**：右上角按钮切换日间 / 夜间主题；侧边栏右上角按钮收起为图标栏（悬停查看详情）；连接后右侧 AI / 文件 / 监控 / 巡检面板可拖拽调宽。
-
 ## 📚 文档
 
 - [密码存储加密设计](docs/密码存储加密设计.md)：凭据 AES-256-GCM 加密与主密钥管理
@@ -228,17 +175,6 @@ src-tauri/icons/       桌面应用图标（PNG / ICNS / ICO）
 docs/                  设计文档（密码加密 / AI Agent 权限 / MCP 服务 / 巡检整改 / 终端拦截）
 ```
 
-
-## 🔒 安全说明
-
-- 密码与 API Key 以 AES-256-GCM 加密存本机 SQLite，主密钥存系统钥匙串，数据库文件不含明文；
-- AI 会话的认证由后端注入，私钥、密码、API Key 不会进入模型上下文；
-- 危险命令默认需要人工批准；审计日志帮助追溯 AI 的每次操作；
-- 发布版请使用正式签名（macOS 公证 / Windows 代码签名），以消除开发版钥匙串授权弹窗。
-
-## 🤝 贡献
-
-欢迎提交 Issue 与 Pull Request。
 
 ## 📄 License
 
