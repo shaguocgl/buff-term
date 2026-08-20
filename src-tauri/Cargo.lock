@@ -672,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "buff-term"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "aes-gcm 0.10.3",
  "base64 0.22.1",
