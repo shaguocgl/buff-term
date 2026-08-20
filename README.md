@@ -40,7 +40,7 @@ buffTerm 是一款有 AI Agent Buff 加持的 SSH 管理工具，——内置**�
 - **自研 Agent 编排层**：SSE 流式解析、工具调用循环、审批与审计均为手写实现，无框架依赖
 - **russh 协议级执行**：AI 工具调用走独立 SSH 连接（连接复用、known_hosts 校验）
 - 多平台配置：DeepSeek / OpenAI / 通义千问 / Kimi / Ollama，单厂商可配多模型
-- 工具调用：`exec_command`、`read_file`、`list_dir`、`resource_usage`
+- 工具调用：`exec_command`、`read_file`、`list_dir`、`resource_usage`、`query_history`（历史指标趋势，支持分钟 / 小时 / 天三档聚合粒度，AI 按分析目的自选）
 - 每台主机独立会话历史，可随时中断 / 清空
 
 ### MCP 服务
@@ -83,7 +83,7 @@ flowchart LR
   BE --> MCP["对外 MCP 服务<br/>Streamable HTTP + token"]
   MCP --> MCPTOOL["工具层<br/>list_hosts / exec / 读文件 / 列目录 / 资源查询"]
   SM --> SSH["交互会话<br/>russh shell channel"]
-  AG --> TOOL["工具层<br/>exec / 读文件 / 列目录 / 资源查询"]
+  AG --> TOOL["工具层<br/>exec / 读文件 / 列目录 / 资源查询 / 历史趋势"]
   TOOL --> RSH["russh 连接池<br/>协议级执行 / 连接复用"]
   BE --> INSP["AI 巡检<br/>只读命令 + 报告归档"]
   INSP --> RSH
@@ -92,7 +92,7 @@ flowchart LR
   PROV --> DS["DeepSeek"]
   PROV --> QW["通义 / Kimi / OpenAI"]
   PROV --> OLL["本地 Ollama"]
-  BE --> DB[("SQLite<br/>配置 / 规则 / 审计 / 加密凭据")]
+  BE --> DB[("SQLite<br/>配置 / 规则 / 审计 / 加密凭据 / 历史指标")]
   BE --> KC[("系统钥匙串<br/>主密钥")]
   BE --> MON["监控采集<br/>russh 连接池"]
 ```
@@ -153,6 +153,8 @@ src/                   前端（React + xterm.js）
   assets/              buffTerm 界面与文档 logo
 src-tauri/src/         Rust 后端
   agent.rs             AI Agent 运行时（流式解析、工具循环、审批、审计）
+  agent/tools.rs       Agent 工具定义与执行（系统提示词、工具 schema、exec/read_file/list_dir/resource_usage/query_history）
+  agent/trend.rs       历史指标趋势分析（线性回归、分钟/小时/天粒度聚合、趋势文本格式化）
   safety.rs            安全判定与脱敏（危险命令 / 只读检测 / 输出脱敏）
   guard.rs             终端危险命令拦截（行缓冲状态机 + 规则判定 + 审批）
   util.rs              通用工具函数（时间戳 / 截断 / shell 转义 / token）
@@ -162,14 +164,14 @@ src-tauri/src/         Rust 后端
   ai.rs                AI 平台 / 模型 / 审核规则配置
   credentials.rs       凭据加密（AES-256-GCM）+ 主密钥管理 + 内存缓存
   audit.rs             审计日志查询
-  monitor.rs           资源快照采集（CPU / 内存 / 磁盘 / 负载 / TOP 进程）
+  monitor.rs           资源快照采集（CPU / 内存 / 磁盘 / 负载 / TOP 进程），写入历史指标表供 query_history 分析
   alert.rs             通知配置（邮件 SMTP 配置与测试）
   inspection.rs        AI 只读巡检（含木马 / 挖矿风险采集）、报告生成与邮件投递
   remediation.rs       一键整改（整改步骤生成、执行、重试、审计与邮件通知）
   mcp.rs               对外 MCP 服务（HTTP + token + 权限模式）
   sftp.rs              SFTP 文件操作（russh-sftp）
   update.rs            GitHub Release 版本检查
-  db.rs                SQLite（主机、AI 配置、规则、审计、巡检与整改）
+  db.rs                SQLite（主机、AI 配置、规则、审计、巡检与整改、历史指标）
 src-tauri/icons/       桌面应用图标（PNG / ICNS / ICO）
 .github/workflows/     GitHub Actions 自动构建与发布
 docs/                  设计文档（密码加密 / AI Agent 权限 / MCP 服务 / 巡检整改 / 终端拦截）
