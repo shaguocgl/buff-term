@@ -281,3 +281,35 @@ impl Host {
         format!("{}@{}:{}", self.username, self.address, self.port)
     }
 }
+
+/// 主机历史指标快照中单个磁盘的信息（用于趋势展示）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricDisk {
+    pub mount: String,
+    pub percent: f64,
+}
+
+/// 主机历史指标快照中 TOP 进程的精简信息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricTop {
+    pub cmd: String,
+    pub cpu: String,
+    pub mem: String,
+}
+
+/// 一条主机历史指标记录，对应 host_metrics 表的一行。
+/// 由 monitor.rs 的 MonitorSnapshot 转换而来，按时间累积形成趋势序列。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostMetric {
+    pub id: i64,
+    pub host_id: String,
+    pub ts: u64,
+    pub cpu_percent: f64,
+    pub load1: f64,
+    pub mem_total_mb: u64,
+    pub mem_used_mb: u64,
+    pub mem_percent: f64,
+    pub disks: Vec<MetricDisk>,
+    pub top: Vec<MetricTop>,
+    pub source: String,
+}
