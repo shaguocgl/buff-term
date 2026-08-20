@@ -1,6 +1,6 @@
 [package]
 name = "buff-term"
-version = "1.0.1"
+version = "1.0.2"
 description = "桌面端 SSH 管理 + AI Agent 工具"
 authors = ["buffTerm"]
 edition = "2021"
