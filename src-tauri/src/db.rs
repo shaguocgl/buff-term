@@ -1,6 +1,6 @@
 use crate::models::{
-    AiModel, AiProvider, AiRule, AlertSettings, AuditLog, AuthType, Host, InspectionReport,
-    McpPermissionMode, McpRule, McpService, Remediation, TerminalGuardSettings, TerminalRule,
+    AiModel, AiProvider, AiRule, AlertSettings, AuditLog, AuthType, Host, HostMetric, InspectionReport,
+    McpPermissionMode, McpRule, McpService, MetricDisk, MetricTop, Remediation, TerminalGuardSettings, TerminalRule,
 };
 use crate::util::now;
 use rusqlite::{params, Connection, Row};
@@ -144,7 +144,21 @@ impl Db {
                  secret_enc TEXT NOT NULL,
                  updated_at INTEGER NOT NULL,
                  PRIMARY KEY (owner_id, kind)
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS host_metrics (
+                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                 host_id      TEXT NOT NULL,
+                 ts           INTEGER NOT NULL,
+                 cpu_percent  REAL NOT NULL DEFAULT 0,
+                 load1        REAL NOT NULL DEFAULT 0,
+                 mem_total_mb INTEGER NOT NULL DEFAULT 0,
+                 mem_used_mb  INTEGER NOT NULL DEFAULT 0,
+                 mem_percent  REAL NOT NULL DEFAULT 0,
+                 disks_json   TEXT NOT NULL DEFAULT '[]',
+                 top_json     TEXT NOT NULL DEFAULT '[]',
+                 source       TEXT NOT NULL DEFAULT 'manual'
+             );
+             CREATE INDEX IF NOT EXISTS idx_metrics_host_ts ON host_metrics(host_id, ts DESC);",
         )?;
 
         // 首次建库时写入终端防护预置规则（含删除后重启不重复恢复的标记）
@@ -851,6 +865,85 @@ impl Db {
         )
         .optional()
     }
+
+    // ============ 主机历史指标 ============
+
+    /// 插入一条主机指标快照。disks/top 以 JSON 形式存储。
+    pub fn insert_metric(
+        &self,
+        host_id: &str,
+        ts: u64,
+        cpu_percent: f64,
+        load1: f64,
+        mem_total_mb: u64,
+        mem_used_mb: u64,
+        mem_percent: f64,
+        disks_json: &str,
+        top_json: &str,
+        source: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO host_metrics (
+                host_id, ts, cpu_percent, load1, mem_total_mb, mem_used_mb,
+                mem_percent, disks_json, top_json, source
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                host_id,
+                ts as i64,
+                cpu_percent,
+                load1,
+                mem_total_mb as i64,
+                mem_used_mb as i64,
+                mem_percent,
+                disks_json,
+                top_json,
+                source,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 查询指定主机在 since_ts 之后的指标记录（按时间升序），最多 limit 条。
+    pub fn list_metrics(
+        &self,
+        host_id: &str,
+        since_ts: u64,
+        limit: u32,
+    ) -> rusqlite::Result<Vec<HostMetric>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, host_id, ts, cpu_percent, load1, mem_total_mb, mem_used_mb,
+                    mem_percent, disks_json, top_json, source
+             FROM host_metrics
+             WHERE host_id = ?1 AND ts >= ?2
+             ORDER BY ts ASC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![host_id, since_ts as i64, limit as i64], metric_from_row)?;
+        rows.collect()
+    }
+
+    /// 删除 before_ts 之前的所有指标记录，返回删除行数。
+    pub fn prune_metrics(&self, before_ts: u64) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM host_metrics WHERE ts < ?1",
+            params![before_ts as i64],
+        )
+    }
+
+    /// 统计指定主机的指标记录数（供前端显示数据量）。
+    #[allow(dead_code)]
+    pub fn metric_count(&self, host_id: &str) -> rusqlite::Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM host_metrics WHERE host_id = ?1",
+            params![host_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as u64)
+    }
 }
 
 fn row_to_host(row: &Row<'_>) -> rusqlite::Result<Host> {
@@ -974,5 +1067,26 @@ fn row_to_remediation(row: &Row<'_>) -> rusqlite::Result<Remediation> {
         started_at: row.get::<_, Option<i64>>(13)?.map(|v| v as u64),
         finished_at: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
         duration_ms: row.get::<_, Option<i64>>(15)?.map(|v| v as u64),
+    })
+}
+
+fn metric_from_row(row: &Row<'_>) -> rusqlite::Result<HostMetric> {
+    let disks_json: String = row.get(8)?;
+    let top_json: String = row.get(9)?;
+    let disks: Vec<MetricDisk> =
+        serde_json::from_str(&disks_json).unwrap_or_default();
+    let top: Vec<MetricTop> = serde_json::from_str(&top_json).unwrap_or_default();
+    Ok(HostMetric {
+        id: row.get(0)?,
+        host_id: row.get(1)?,
+        ts: row.get::<_, i64>(2)? as u64,
+        cpu_percent: row.get(3)?,
+        load1: row.get(4)?,
+        mem_total_mb: row.get::<_, i64>(5)? as u64,
+        mem_used_mb: row.get::<_, i64>(6)? as u64,
+        mem_percent: row.get(7)?,
+        disks,
+        top,
+        source: row.get(10)?,
     })
 }

@@ -199,10 +199,29 @@ async fn run_inspection_inner(
 
     emit_progress(app, &report.id, "collect", "开始采集服务器基线数据");
     let russh = app.state::<RusshManager>();
+    // 巡检开始时先采集一份轻量快照写入历史指标，与巡检报告互补。
+    if let Ok(snap) = crate::monitor::collect_russh(host, &russh).await {
+        let _ = crate::monitor::save_metric(&app.state::<Arc<Db>>(), &host.id, &snap, "inspection");
+    }
     let baseline = russh
         .exec(host, BASELINE_SCRIPT, Duration::from_secs(50))
         .await?;
-    let baseline_text = sanitize(&truncate_output(&baseline.text, 52000));
+    let mut baseline_text = sanitize(&truncate_output(&baseline.text, 52000));
+
+    // 注入历史趋势：查最近 7 天和 30 天的指标，拼成趋势摘要追加到基线数据
+    let db = app.state::<Arc<Db>>();
+    let now_ts = now();
+    let trend_7d = build_trend_summary(&db, &host.id, now_ts, 168);
+    let trend_30d = build_trend_summary(&db, &host.id, now_ts, 720);
+    if !trend_7d.is_empty() || !trend_30d.is_empty() {
+        baseline_text.push_str("\n\n=== 历史趋势 ===\n");
+        if !trend_7d.is_empty() {
+            baseline_text.push_str(&format!("【最近 7 天】\n{}\n", trend_7d));
+        }
+        if !trend_30d.is_empty() {
+            baseline_text.push_str(&format!("【最近 30 天】\n{}\n", trend_30d));
+        }
+    }
 
     if cancelled(flag) {
         report.status = "cancelled".to_string();
@@ -210,11 +229,11 @@ async fn run_inspection_inner(
         return Ok(());
     }
 
-    let db = app.state::<Arc<Db>>();
     let api_key = crate::credentials::get_api_key(&report.provider_id)
         .ok_or_else(|| "API Key 未找到，请在 AI 配置中检查".to_string())?;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(180))
+        .connect_timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
@@ -302,7 +321,16 @@ async fn run_ai_inspection(
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("请求 AI 平台失败: {e}"))?;
+            .map_err(|e| {
+                let msg = e.to_string();
+                if e.is_timeout() {
+                    format!("请求 AI 平台超时（180s），模型可能响应过慢或网络不畅: {msg}")
+                } else if e.is_connect() {
+                    format!("无法连接 AI 平台，请检查网络或 Base URL: {msg}")
+                } else {
+                    format!("请求 AI 平台失败: {msg}")
+                }
+            })?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -413,13 +441,17 @@ fn inspection_system_prompt(host: &Host) -> String {
         "你是 buffTerm 的服务器巡检专家，负责对当前连接的服务器生成专业、可执行的中文巡检报告。\n\
          当前服务器：{}（{}@{}:{}）\n\
          你只能调用 inspect_exec 工具执行只读检查；不得执行任何写操作。\n\
-         报告必须包含以下四个模块：\n\
-         1. 资源使用情况\n\
-         2. 运行服务\n\
-         3. 安全基线\n\
-         4. 木马与挖矿风险\n\
-         5. 登录与风险事件\n\
+         报告必须包含以下模块：\n\
+         1. 趋势变化（对比历史数据，指出持续上升/周期性波动/接近阈值的指标，给出基于变化速率的预判）\n\
+         2. 资源使用情况\n\
+         3. 运行服务\n\
+         4. 安全基线\n\
+         5. 木马与挖矿风险\n\
+         6. 登录与风险事件\n\
          最后给出总体风险等级（低/中/高）和优先级明确的整改建议。\n\
+         趋势变化模块：若采集数据中包含“=== 历史趋势 ===”段落，必须基于其中的变化速率做预判\
+         （如“按当前增速，X 天后磁盘满”），这是单次快照无法发现的隐患。\
+         若某指标历史平稳，明确说明“无异常趋势”，不要为了凑内容而夸大。\n\
          整改建议必须严格基于采集结果中的实际配置与数值，禁止凭空猜测或套用模板：\n\
          - 若某项配置已经满足推荐阈值（例如 fail2ban maxretry 已小于等于 3、bantime 已大于等于 3600 秒），\
          不要再次建议“降低/提高”该值；应明确说明“已满足，无需整改”，并引用实际数值。\n\
@@ -554,3 +586,109 @@ lastb -20 2>/dev/null || true
 grep -iE 'failed|invalid|authentication failure|sudo' /var/log/auth.log /var/log/secure 2>/dev/null | tail -n 100
 echo "===END==="
 "#;
+
+/// 构建历史趋势摘要文本（精简版，供巡检 prompt 注入）。
+/// 查询最近 window_hours 的指标，对 cpu/mem/load/disk 各给一行摘要。
+fn build_trend_summary(db: &Db, host_id: &str, now_ts: u64, window_h: u64) -> String {
+    let since = now_ts.saturating_sub(window_h * 3600);
+    let rows = match db.list_metrics(host_id, since, 2000) {
+        Ok(r) => r,
+        Err(_) => return String::new(),
+    };
+    if rows.len() < 3 {
+        return String::new();
+    }
+
+    let mut out = String::new();
+
+    // CPU
+    let cpu_points: Vec<(f64, f64)> = rows.iter().map(|r| (r.ts as f64, r.cpu_percent)).collect();
+    if let Some(s) = scalar_summary("CPU", "%", &cpu_points) {
+        out.push_str(&s);
+    }
+
+    // 内存
+    let mem_points: Vec<(f64, f64)> = rows.iter().map(|r| (r.ts as f64, r.mem_percent)).collect();
+    if let Some(s) = scalar_summary("内存", "%", &mem_points) {
+        out.push_str(&s);
+    }
+
+    // 负载
+    let load_points: Vec<(f64, f64)> = rows.iter().map(|r| (r.ts as f64, r.load1)).collect();
+    if let Some(s) = scalar_summary("负载", "", &load_points) {
+        out.push_str(&s);
+    }
+
+    // 磁盘（按挂载点）
+    let mut mounts: Vec<String> = Vec::new();
+    for r in &rows {
+        for d in &r.disks {
+            if !mounts.contains(&d.mount) {
+                mounts.push(d.mount.clone());
+            }
+        }
+    }
+    mounts.sort();
+    for mount in &mounts {
+        let points: Vec<(f64, f64)> = rows
+            .iter()
+            .filter_map(|r| {
+                r.disks.iter().find(|d| d.mount == *mount).map(|d| (r.ts as f64, d.percent))
+            })
+            .collect();
+        if points.len() < 3 {
+            continue;
+        }
+        if let Some(s) = scalar_summary(&format!("磁盘 {}", mount), "%", &points) {
+            out.push_str(&s);
+        }
+    }
+
+    out
+}
+
+/// 单个标量指标的精简摘要：最早→最新、斜率/天、外推。
+fn scalar_summary(label: &str, unit: &str, points: &[(f64, f64)]) -> Option<String> {
+    if points.len() < 3 {
+        return None;
+    }
+    let first = points[0].1;
+    let latest = points.last().unwrap().1;
+    let (slope, _) = linear_slope_local(points);
+    let slope_per_day = slope * 24.0;
+
+    let mut line = format!("{}: {:.1}{} → {:.1}{}", label, first, unit, latest, unit);
+    if slope_per_day.abs() < 0.01 {
+        line.push_str("，平稳");
+    } else if slope_per_day > 0.0 {
+        line.push_str(&format!("，+{:.2}{}/天", slope_per_day, unit));
+        if latest < 90.0 && label != "负载" {
+            let days = (90.0 - latest) / slope_per_day;
+            if days > 0.0 && days < 365.0 {
+                line.push_str(&format!("，预计 {:.1} 天后到 90%⚠", days));
+            }
+        }
+    } else {
+        line.push_str(&format!("，{:.2}{}/天（下降）", slope_per_day, unit));
+    }
+    Some(format!("{}\n", line))
+}
+
+/// 本地线性回归（避免与 agent.rs 的 private 函数冲突）。
+fn linear_slope_local(points: &[(f64, f64)]) -> (f64, f64) {
+    let n = points.len() as f64;
+    if n < 2.0 {
+        return (0.0, 0.0);
+    }
+    let sum_x: f64 = points.iter().map(|p| p.0).sum();
+    let sum_y: f64 = points.iter().map(|p| p.1).sum();
+    let sum_xy: f64 = points.iter().map(|p| p.0 * p.1).sum();
+    let sum_x2: f64 = points.iter().map(|p| p.0 * p.0).sum();
+    let denom = n * sum_x2 - sum_x * sum_x;
+    if denom.abs() < f64::EPSILON {
+        return (0.0, sum_y / n);
+    }
+    let slope = (n * sum_xy - sum_x * sum_y) / denom;
+    let intercept = (sum_y - slope * sum_x) / n;
+    (slope, intercept)
+}

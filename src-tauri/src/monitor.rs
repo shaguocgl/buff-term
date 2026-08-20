@@ -1,9 +1,10 @@
-use crate::models::Host;
+use crate::db::Db;
+use crate::models::{Host, MetricDisk, MetricTop};
 use crate::russh::RusshManager;
 use crate::util::now;
 use serde::Serialize;
 use std::time::Duration;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 #[derive(Serialize, Default)]
 pub struct DiskInfo {
@@ -41,13 +42,19 @@ pub struct MonitorSnapshot {
 }
 
 /// 采集 Linux 服务器的资源快照（CPU / 内存 / 磁盘 / 负载 / TOP 进程）
-/// 复用 russh 连接池，避免每次采集都新建系统 ssh 进程
+/// 复用 russh 连接池，避免每次采集都新建系统 ssh 进程。
+/// 采集成功后自动写入 host_metrics 表，作为历史趋势数据。
 #[tauri::command]
 pub async fn monitor_snapshot(
+    app: AppHandle,
     russh: State<'_, RusshManager>,
     host: Host,
 ) -> Result<MonitorSnapshot, String> {
-    collect_russh(&host, &russh).await
+    let snap = collect_russh(&host, &russh).await?;
+    if let Some(db) = app.try_state::<std::sync::Arc<Db>>() {
+        let _ = save_metric(&db, &host.id, &snap, "manual");
+    }
+    Ok(snap)
 }
 
 /// 通过 russh 连接池采集（复用 AI / MCP 同一 SSH 通道）
@@ -178,4 +185,51 @@ fn percent_from_df(total: &str, used: &str) -> f64 {
         (Some(t), Some(u)) if t > 0.0 => (u / t) * 100.0,
         _ => 0.0,
     }
+}
+
+/// 将 MonitorSnapshot 转换为 host_metrics 行并写入数据库。
+/// 供 monitor_snapshot / agent 会话 / 巡检三个采集点复用。
+pub fn save_metric(
+    db: &Db,
+    host_id: &str,
+    snap: &MonitorSnapshot,
+    source: &str,
+) -> rusqlite::Result<()> {
+    let load1: f64 = snap
+        .load
+        .split_whitespace()
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    let disks: Vec<MetricDisk> = snap
+        .disks
+        .iter()
+        .map(|d| MetricDisk {
+            mount: d.mount.clone(),
+            percent: d.percent,
+        })
+        .collect();
+    let top: Vec<MetricTop> = snap
+        .top
+        .iter()
+        .map(|p| MetricTop {
+            cmd: p.cmd.clone(),
+            cpu: p.cpu.clone(),
+            mem: p.mem.clone(),
+        })
+        .collect();
+    let disks_json = serde_json::to_string(&disks).unwrap_or_else(|_| "[]".to_string());
+    let top_json = serde_json::to_string(&top).unwrap_or_else(|_| "[]".to_string());
+    db.insert_metric(
+        host_id,
+        snap.ts,
+        snap.cpu_percent,
+        load1,
+        snap.mem.total_mb,
+        snap.mem.used_mb,
+        snap.mem.percent,
+        &disks_json,
+        &top_json,
+        source,
+    )
 }

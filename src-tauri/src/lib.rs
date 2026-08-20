@@ -46,6 +46,13 @@ pub fn run() {
             })?;
             let db = std::sync::Arc::new(db);
             crate::db::init_global(db.clone());
+            // 清理 90 天前的历史指标数据，控制 SQLite 体积
+            let cutoff = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+                .saturating_sub(90 * 24 * 3600);
+            let _ = db.prune_metrics(cutoff);
             app.manage(db);
             app.manage(inspection::InspectionManager::default());
             app.manage(remediation::RemediationManager::default());
