@@ -239,27 +239,27 @@ async fn run_inspection_inner(
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
     emit_progress(app, &report.id, "analyze", "AI 正在分析服务器状态");
-    let markdown = run_ai_inspection(
+    let inspection_ctx = AiInspectionCtx {
         app,
-        &client,
-        &url,
-        &api_key,
-        &report.model,
+        client: &client,
+        url: &url,
+        api_key: &api_key,
+        model: &report.model,
         host,
-        &report.id,
-        &baseline_text,
+        report_id: &report.id,
         flag,
-    )
-    .await?;
+    };
+    let markdown = run_ai_inspection(&inspection_ctx, &baseline_text).await?;
     if cancelled(flag) {
         report.status = "cancelled".to_string();
         report.error = Some("用户取消".to_string());
         return Ok(());
     }
 
-    report.risk_level = risk_level(&markdown);
-    report.summary = summary_from_markdown(&markdown);
-    report.markdown = markdown.clone();
+    let (risk, clean_markdown) = extract_risk_level(&markdown);
+    report.risk_level = risk;
+    report.summary = summary_from_markdown(&clean_markdown);
+    report.markdown = clean_markdown.clone();
 
     emit_progress(app, &report.id, "render", "正在生成 HTML 报告");
     let body_html = markdown_to_html(&markdown);
@@ -281,17 +281,23 @@ async fn run_inspection_inner(
     Ok(())
 }
 
-async fn run_ai_inspection(
-    app: &AppHandle,
-    client: &reqwest::Client,
-    url: &str,
-    api_key: &str,
-    model: &str,
-    host: &Host,
-    report_id: &str,
-    baseline: &str,
-    flag: &Arc<AtomicBool>,
-) -> Result<String, String> {
+/// `run_ai_inspection` 所需的只读上下文（此前 9 个位置参数，收敛为具名字段结构体）。
+/// `baseline`（本次巡检的采集数据）单独作为参数传入，因为它是每次调用变化的输入，而非上下文。
+/// 字段全部是引用，因此整体可以 Copy，方便按值解构。
+#[derive(Clone, Copy)]
+struct AiInspectionCtx<'a> {
+    app: &'a AppHandle,
+    client: &'a reqwest::Client,
+    url: &'a str,
+    api_key: &'a str,
+    model: &'a str,
+    host: &'a Host,
+    report_id: &'a str,
+    flag: &'a Arc<AtomicBool>,
+}
+
+async fn run_ai_inspection(ctx: &AiInspectionCtx<'_>, baseline: &str) -> Result<String, String> {
+    let AiInspectionCtx { app, client, url, api_key, model, host, report_id, flag } = *ctx;
     let system = inspection_system_prompt(host);
     let mut messages = vec![
         serde_json::json!({"role": "system", "content": system}),
@@ -441,23 +447,34 @@ fn inspection_system_prompt(host: &Host) -> String {
         "你是 buffTerm 的服务器巡检专家，负责对当前连接的服务器生成专业、可执行的中文巡检报告。\n\
          当前服务器：{}（{}@{}:{}）\n\
          你只能调用 inspect_exec 工具执行只读检查；不得执行任何写操作。\n\
-         报告必须包含以下模块：\n\
-         1. 趋势变化（对比历史数据，指出持续上升/周期性波动/接近阈值的指标，给出基于变化速率的预判）\n\
+         \n\
+         ## 报告结构\n\
+         报告应覆盖以下维度，根据采集结果突出异常项，无异常的模块简要说明即可，无需展开填充：\n\
+         1. 趋势变化：若采集数据中包含\"=== 历史趋势 ===\"段落，基于变化速率做预判\
+         （如\"按当前增速，X 天后磁盘满\"）。若指标平稳，简要说明\"无异常趋势\"即可。\n\
          2. 资源使用情况\n\
          3. 运行服务\n\
          4. 安全基线\n\
          5. 木马与挖矿风险\n\
          6. 登录与风险事件\n\
-         最后给出总体风险等级（低/中/高）和优先级明确的整改建议。\n\
-         趋势变化模块：若采集数据中包含“=== 历史趋势 ===”段落，必须基于其中的变化速率做预判\
-         （如“按当前增速，X 天后磁盘满”），这是单次快照无法发现的隐患。\
-         若某指标历史平稳，明确说明“无异常趋势”，不要为了凑内容而夸大。\n\
-         整改建议必须严格基于采集结果中的实际配置与数值，禁止凭空猜测或套用模板：\n\
-         - 若某项配置已经满足推荐阈值（例如 fail2ban maxretry 已小于等于 3、bantime 已大于等于 3600 秒），\
-         不要再次建议“降低/提高”该值；应明确说明“已满足，无需整改”，并引用实际数值。\n\
-         - 若采集结果中缺少某项配置数据，不要臆造当前值，应说明“未采集到，建议人工确认”。\n\
-         木马与挖矿判断只依据采集到的高 CPU 进程、/tmp|/dev/shm 可疑可执行文件、异常对外连接、\
-         cron/systemd timer、SSH 授权文件变动等证据；只报告可疑点和证据，并建议人工确认，不要仅凭进程名就断定已感染。",
+         \n\
+         ## 分析要求\n\
+         - 权限感知：采集数据开头的 uid 标识当前用户。若 uid 非 0（非 root），sshd -T、\n\
+         fail2ban、/etc/sudoers、/var/log/auth.log 等段可能因权限不足为空，\n\
+         应说明\"当前用户无权限读取，建议以 root 用户巡检\"，不要将空数据误判为\"未配置\"。\n\
+         - 关联分析：注意跨模块的异常关联（如高 CPU 进程 + 异常对外连接 + 可疑 crontab 同时出现），\n\
+         综合判断而非孤立描述各模块。\n\
+         - 整改建议按风险和影响范围排序，优先给出可能导致服务中断或安全事件的项目。\n\
+         - 整改建议必须严格基于采集结果中的实际配置与数值，禁止凭空猜测或套用模板：\n\
+           若某项配置已满足推荐阈值，明确说明\"已满足，无需整改\"并引用实际数值；\n\
+           若缺少某项配置数据，说明\"未采集到，建议人工确认\"，不要臆造当前值。\n\
+         - 木马与挖矿判断只依据采集到的证据（高 CPU 进程、/tmp|/dev/shm 可疑可执行文件、\n\
+         异常对外连接、cron/systemd timer、SSH 授权文件变动等），只报告可疑点和证据并建议人工确认，\n\
+         不要仅凭进程名就断定已感染。\n\
+         \n\
+         最后给出总体风险等级（低/中/高），并在报告最末尾另起一行输出标记：\
+         `[RISK:high]` 或 `[RISK:medium]` 或 `[RISK:low]`，\
+         该标记用于程序解析，不会展示给用户。",
         host.name,
         host.username,
         host.address,
@@ -482,21 +499,90 @@ fn inspection_tools_schema() -> serde_json::Value {
     }])
 }
 
-fn risk_level(markdown: &str) -> String {
-    if markdown.contains("高风险") || markdown.contains("严重") || markdown.contains("高危") {
-        "high".to_string()
-    } else if markdown.contains("中风险") || markdown.contains("中等") {
-        "medium".to_string()
-    } else if markdown.contains("低风险") || markdown.contains("正常") {
-        "low".to_string()
-    } else {
-        "unknown".to_string()
+/// 从报告末尾的 [RISK:xxx] 标记提取风险等级，并返回剔除标记后的 markdown。
+/// fallback：若未找到标记，退回到按行匹配"风险等级"关键词。
+fn extract_risk_level(markdown: &str) -> (String, String) {
+    // 优先匹配 [RISK:high] / [RISK:medium] / [RISK:low]
+    for tag in ["[RISK:high]", "[RISK:medium]", "[RISK:low]"] {
+        if let Some(pos) = markdown.rfind(tag) {
+            let level = match tag {
+                "[RISK:high]" => "high",
+                "[RISK:medium]" => "medium",
+                "[RISK:low]" => "low",
+                _ => "unknown",
+            };
+            // 剔除标记行及其前后的空行
+            let before = &markdown[..pos];
+            let after = &markdown[pos + tag.len()..];
+            let clean = format!("{}{}", before.trim_end_matches('\n'), after).trim().to_string();
+            return (level.to_string(), clean);
+        }
     }
+    // fallback：按行匹配包含"风险等级"的行
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("风险等级") || trimmed.contains("风险评级") {
+            if trimmed.contains("高") || trimmed.contains("严重") || trimmed.contains("高危") {
+                return ("high".to_string(), markdown.to_string());
+            } else if trimmed.contains("中") || trimmed.contains("中等") {
+                return ("medium".to_string(), markdown.to_string());
+            } else if trimmed.contains("低") || trimmed.contains("正常") {
+                return ("low".to_string(), markdown.to_string());
+            }
+        }
+    }
+    ("unknown".to_string(), markdown.to_string())
 }
 
 fn summary_from_markdown(markdown: &str) -> String {
     let text = markdown.trim();
     truncate(text, 300)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_risk_level_reads_tag_and_strips_it() {
+        let md = "## 巡检报告\n一切正常。\n\n[RISK:low]";
+        let (level, clean) = extract_risk_level(md);
+        assert_eq!(level, "low");
+        assert!(!clean.contains("[RISK:low]"));
+        assert!(clean.contains("一切正常"));
+    }
+
+    #[test]
+    fn extract_risk_level_ignores_keyword_in_body_when_tag_present() {
+        // 正文里出现"高风险"这个词，但结尾标记是 medium，应以标记为准（回归此前的误判 bug）
+        let md = "整改建议：P0 项属于高风险，需优先处理。\n\n[RISK:medium]";
+        let (level, _) = extract_risk_level(md);
+        assert_eq!(level, "medium");
+    }
+
+    #[test]
+    fn extract_risk_level_falls_back_to_line_match_without_tag() {
+        let md = "8. 总体风险等级：中\n判定依据：略";
+        let (level, clean) = extract_risk_level(md);
+        assert_eq!(level, "medium");
+        // fallback 分支不剔除任何内容
+        assert_eq!(clean, md);
+    }
+
+    #[test]
+    fn extract_risk_level_unknown_when_no_signal() {
+        let md = "这是一份没有明确结论的报告。";
+        let (level, _) = extract_risk_level(md);
+        assert_eq!(level, "unknown");
+    }
+
+    #[test]
+    fn extract_risk_level_high_tag() {
+        let md = "详细分析...\n[RISK:high]";
+        let (level, clean) = extract_risk_level(md);
+        assert_eq!(level, "high");
+        assert!(!clean.contains("RISK"));
+    }
 }
 
 fn markdown_to_html(markdown: &str) -> String {
@@ -535,21 +621,36 @@ fn wrap_email_html(host_label: &str, risk: &str, body: &str) -> String {
 const BASELINE_SCRIPT: &str = r#"
 echo "===BEGIN==="
 echo "==SYSTEM=="
+echo "uid=$(id -u 2>/dev/null || echo unknown)"
 hostname 2>/dev/null || true
 uname -a 2>/dev/null || true
 cat /etc/os-release 2>/dev/null | head -n 8
 uptime 2>/dev/null || true
 echo "==RESOURCE=="
-free -h 2>/dev/null || true
+free -h 2>/dev/null || free 2>/dev/null || true
 df -hP 2>/dev/null || true
-ps -eo user,%cpu,%mem,args --sort=-%cpu 2>/dev/null | head -n 12
+ps -eo user,%cpu,%mem,args --sort=-%cpu 2>/dev/null | head -n 12 || ps aux 2>/dev/null | head -n 12 || true
+echo "==NETWORK=="
+ip addr 2>/dev/null | head -n 80 || ifconfig -a 2>/dev/null | head -n 80 || true
+ip route 2>/dev/null | head -n 40 || route -n 2>/dev/null | head -n 40 || true
 echo "==SERVICES=="
-systemctl list-units --type=service --state=running --no-pager --no-legend 2>/dev/null | head -n 60
-ss -tulnp 2>/dev/null | head -n 80
-docker ps --format '{{.Names}} {{.Image}} {{.Status}} {{.Ports}}' 2>/dev/null | head -n 40
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl list-units --type=service --state=running --no-pager --no-legend 2>/dev/null | head -n 60
+else
+  service --status-all 2>/dev/null | head -n 60 || true
+fi
+ss -tulnp 2>/dev/null | head -n 80 || netstat -tulnp 2>/dev/null | head -n 80 || true
+docker ps --format '{{.Names}} {{.Image}} {{.Status}} {{.Ports}}' 2>/dev/null | head -n 40 || true
+podman ps --format '{{.Names}} {{.Image}} {{.Status}} {{.Ports}}' 2>/dev/null | head -n 40 || true
 echo "==SECURITY=="
 sshd -T 2>/dev/null | grep -E '^(permitrootlogin|passwordauthentication|pubkeyauthentication|permitemptypasswords|x11forwarding)'
-for s in ufw firewalld fail2ban; do echo "$s=$(systemctl is-active "$s" 2>/dev/null || echo unknown)"; done
+for s in ufw firewalld fail2ban; do
+  if command -v systemctl >/dev/null 2>&1; then
+    echo "$s=$(systemctl is-active "$s" 2>/dev/null || echo unknown)"
+  else
+    echo "$s=$(service "$s" status 2>/dev/null | head -n 1 || echo unknown)"
+  fi
+done
 echo "==FAIL2BAN=="
 fail2ban-client status 2>/dev/null || true
 for f in /etc/fail2ban/jail.local /etc/fail2ban/jail.conf /etc/fail2ban/jail.d/*.conf /etc/fail2ban/jail.d/*.local; do
@@ -561,9 +662,13 @@ ufw status verbose 2>/dev/null | head -n 30
 firewall-cmd --state 2>/dev/null || true
 getent passwd 2>/dev/null | awk -F: '$7 ~ /sh$/ {print $1":"$3":"$7}' | head -n 120
 grep -RhE '^(root|%sudo|%wheel)[[:space:]]' /etc/sudoers /etc/sudoers.d 2>/dev/null | head -n 80
+echo "==UPDATES=="
+apt list --upgradable 2>/dev/null | head -n 40 || true
+yum check-update --quiet 2>/dev/null | head -n 40 || true
+dnf check-update --quiet 2>/dev/null | head -n 40 || true
 echo "==MALWARE=="
-ps -eo pid,user,%cpu,%mem,args 2>/dev/null | grep -Ei 'xmrig|kdevtmpfsi|kinsing|minergate|cgminer|bfgminer|ethminer|t-rex|phoenixminer|nbminer|gminer|/tmp/|/dev/shm/' | grep -v grep | head -n 80
-ss -tunp 2>/dev/null | head -n 120 || true
+ps -eo pid,user,%cpu,%mem,args 2>/dev/null | grep -Ei 'xmrig|kdevtmpfsi|kinsing|minergate|cgminer|bfgminer|ethminer|t-rex|phoenixminer|nbminer|gminer|/tmp/|/dev/shm/' | grep -v grep | head -n 80 || ps aux 2>/dev/null | grep -Ei 'xmrig|kdevtmpfsi|kinsing|minergate|cgminer|bfgminer|ethminer|t-rex|phoenixminer|nbminer|gminer|/tmp/|/dev/shm/' | grep -v grep | head -n 80 || true
+ss -tunp 2>/dev/null | head -n 120 || netstat -tunp 2>/dev/null | head -n 120 || true
 for c in /var/spool/cron/crontabs/* /var/spool/cron/*; do
   [ -f "$c" ] || continue
   echo "--- $c ---"
@@ -575,7 +680,11 @@ for f in /etc/crontab /etc/cron.d/* /etc/cron.daily/* /etc/cron.hourly/* /etc/cr
   echo "--- $f ---"
   head -n 40 "$f" 2>/dev/null
 done
-systemctl list-timers --all --no-pager --no-legend 2>/dev/null | head -n 80
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl list-timers --all --no-pager --no-legend 2>/dev/null | head -n 80
+else
+  echo "(systemd timers 不可用，非 systemd 系统)"
+fi
 echo "-- tmp-shm-executables --"
 find /tmp /dev/shm /var/tmp -maxdepth 2 -type f \( -perm -u+x -o -perm -g+x -o -perm -o+x \) -ls 2>/dev/null | head -n 80
 echo "-- recent-authorized-keys --"

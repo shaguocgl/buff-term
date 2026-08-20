@@ -297,6 +297,22 @@ pub struct MetricTop {
     pub mem: String,
 }
 
+/// 写入 host_metrics 表时使用的参数聚合体（对应 `Db::insert_metric`）。
+/// 此前该方法是 10 个位置参数，字段类型高度相似（多个 u64/f64/&str 挤在一起），
+/// 顺序传错编译器也无法察觉，改为具名字段的结构体传参。
+pub struct NewMetric<'a> {
+    pub host_id: &'a str,
+    pub ts: u64,
+    pub cpu_percent: f64,
+    pub load1: f64,
+    pub mem_total_mb: u64,
+    pub mem_used_mb: u64,
+    pub mem_percent: f64,
+    pub disks_json: &'a str,
+    pub top_json: &'a str,
+    pub source: &'a str,
+}
+
 /// 一条主机历史指标记录，对应 host_metrics 表的一行。
 /// 由 monitor.rs 的 MonitorSnapshot 转换而来，按时间累积形成趋势序列。
 #[derive(Debug, Clone, Serialize, Deserialize)]

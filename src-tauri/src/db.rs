@@ -1,6 +1,6 @@
 use crate::models::{
     AiModel, AiProvider, AiRule, AlertSettings, AuditLog, AuthType, Host, HostMetric, InspectionReport,
-    McpPermissionMode, McpRule, McpService, MetricDisk, MetricTop, Remediation, TerminalGuardSettings, TerminalRule,
+    McpPermissionMode, McpRule, McpService, MetricDisk, MetricTop, NewMetric, Remediation, TerminalGuardSettings, TerminalRule,
 };
 use crate::util::now;
 use rusqlite::{params, Connection, Row};
@@ -869,19 +869,7 @@ impl Db {
     // ============ 主机历史指标 ============
 
     /// 插入一条主机指标快照。disks/top 以 JSON 形式存储。
-    pub fn insert_metric(
-        &self,
-        host_id: &str,
-        ts: u64,
-        cpu_percent: f64,
-        load1: f64,
-        mem_total_mb: u64,
-        mem_used_mb: u64,
-        mem_percent: f64,
-        disks_json: &str,
-        top_json: &str,
-        source: &str,
-    ) -> rusqlite::Result<()> {
+    pub fn insert_metric(&self, metric: NewMetric<'_>) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO host_metrics (
@@ -889,16 +877,16 @@ impl Db {
                 mem_percent, disks_json, top_json, source
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
-                host_id,
-                ts as i64,
-                cpu_percent,
-                load1,
-                mem_total_mb as i64,
-                mem_used_mb as i64,
-                mem_percent,
-                disks_json,
-                top_json,
-                source,
+                metric.host_id,
+                metric.ts as i64,
+                metric.cpu_percent,
+                metric.load1,
+                metric.mem_total_mb as i64,
+                metric.mem_used_mb as i64,
+                metric.mem_percent,
+                metric.disks_json,
+                metric.top_json,
+                metric.source,
             ],
         )?;
         Ok(())

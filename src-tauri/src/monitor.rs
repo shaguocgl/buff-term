@@ -220,16 +220,16 @@ pub fn save_metric(
         .collect();
     let disks_json = serde_json::to_string(&disks).unwrap_or_else(|_| "[]".to_string());
     let top_json = serde_json::to_string(&top).unwrap_or_else(|_| "[]".to_string());
-    db.insert_metric(
+    db.insert_metric(crate::models::NewMetric {
         host_id,
-        snap.ts,
-        snap.cpu_percent,
+        ts: snap.ts,
+        cpu_percent: snap.cpu_percent,
         load1,
-        snap.mem.total_mb,
-        snap.mem.used_mb,
-        snap.mem.percent,
-        &disks_json,
-        &top_json,
+        mem_total_mb: snap.mem.total_mb,
+        mem_used_mb: snap.mem.used_mb,
+        mem_percent: snap.mem.percent,
+        disks_json: &disks_json,
+        top_json: &top_json,
         source,
-    )
+    })
 }
