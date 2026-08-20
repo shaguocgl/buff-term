@@ -1,10 +1,13 @@
+mod tools;
+mod trend;
+
 use crate::credentials;
 use crate::db::Db;
-use crate::models::{AiProvider, AuditLog, Host, HostMetric, PermissionMode};
+use crate::models::{AuditLog, Host, PermissionMode};
 use crate::russh::RusshManager;
-use crate::safety::{is_dangerous, normalize_tool, sanitize};
+use crate::safety::is_dangerous;
 use crate::session::SessionManager;
-use crate::util::{extract_error, format_exec_output, now, shq, truncate};
+use crate::util::{extract_error, now, truncate};
 use futures_util::StreamExt;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -12,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
+use tools::{execute_tool, infer_tool_name, parse_args, system_prompt, tools_schema};
 
 #[derive(Default)]
 pub struct AgentManager {
@@ -101,6 +105,28 @@ struct ToolCallAcc {
     args: String,
 }
 
+/// 统一发出 `ai:tool` 事件，避免 request/running/result/error/denied 五种状态各自重复构造事件体。
+fn emit_tool_state(
+    app: &AppHandle,
+    session_id: u32,
+    call: &ToolCallAcc,
+    args: &serde_json::Value,
+    state: &str,
+    output: Option<String>,
+) {
+    let _ = app.emit(
+        "ai:tool",
+        AiTool {
+            session_id,
+            tool_call_id: call.id.clone(),
+            name: call.name.clone(),
+            args: args.clone(),
+            state: state.to_string(),
+            output,
+        },
+    );
+}
+
 #[tauri::command]
 pub async fn agent_chat(
     app: AppHandle,
@@ -156,22 +182,20 @@ pub async fn agent_chat(
     }
     history.push(serde_json::json!({"role": "user", "content": message}));
 
-    let result = run_agent_loop(
-        &app,
-        &client,
-        &url,
-        &api_key,
-        &model,
-        &host,
+    let loop_ctx = AgentLoopCtx {
+        app: &app,
+        client: &client,
+        url: &url,
+        api_key: &api_key,
+        model: &model,
+        host: &host,
         session_id,
         permission_mode,
-        &danger_rules,
-        &db,
-        &russh,
-        rx,
-        &mut history,
-    )
-    .await;
+        danger_rules: &danger_rules,
+        db: &db,
+        russh: &russh,
+    };
+    let result = run_agent_loop(&loop_ctx, rx, &mut history).await;
 
     if agents.generation(&host.id) == generation {
         trim_history(&mut history, MAX_HISTORY_ROUNDS);
@@ -233,21 +257,42 @@ pub fn get_history(
     Ok(agents.history(&host_id))
 }
 
-async fn run_agent_loop(
-    app: &AppHandle,
-    client: &reqwest::Client,
-    url: &str,
-    api_key: &str,
-    model: &str,
-    host: &Host,
+/// `run_agent_loop` 所需的只读上下文，聚合以避免函数参数过多（此前 13 个位置参数，
+/// 顺序稍有出错编译器也无法察觉）。`rx`/`history` 会被消费/可变借用，单独作为参数传入。
+/// 字段全部是引用或已实现 Copy 的类型，因此整体可以 Copy，方便按值解构。
+#[derive(Clone, Copy)]
+struct AgentLoopCtx<'a> {
+    app: &'a AppHandle,
+    client: &'a reqwest::Client,
+    url: &'a str,
+    api_key: &'a str,
+    model: &'a str,
+    host: &'a Host,
     session_id: u32,
     permission_mode: PermissionMode,
-    danger_rules: &[String],
-    db: &Db,
-    russh: &RusshManager,
+    danger_rules: &'a [String],
+    db: &'a Db,
+    russh: &'a RusshManager,
+}
+
+async fn run_agent_loop(
+    ctx: &AgentLoopCtx<'_>,
     mut rx: mpsc::Receiver<Control>,
     history: &mut Vec<serde_json::Value>,
 ) -> Result<(), String> {
+    let AgentLoopCtx {
+        app,
+        client,
+        url,
+        api_key,
+        model,
+        host,
+        session_id,
+        permission_mode,
+        danger_rules,
+        db,
+        russh,
+    } = *ctx;
     let mut iterations = 0;
     loop {
         iterations += 1;
@@ -273,7 +318,14 @@ async fn run_agent_loop(
             .send()
             .await
             .map_err(|e| {
-                let msg = format!("请求 AI 平台失败: {e}");
+                let detail = e.to_string();
+                let msg = if e.is_timeout() {
+                    format!("请求 AI 平台超时（120s），模型可能响应过慢或网络不畅: {detail}")
+                } else if e.is_connect() {
+                    format!("无法连接 AI 平台，请检查网络或 Base URL: {detail}")
+                } else {
+                    format!("请求 AI 平台失败: {detail}")
+                };
                 let _ = app.emit("ai:error", AiError { session_id, message: msg.clone() });
                 msg
             })?;
@@ -343,29 +395,30 @@ async fn run_agent_loop(
             }
         }
 
-        // 模型漏填工具名时，从参数推断（command → exec_command，path → read_file）
+        // 模型漏填工具名时，从参数推断（与 execute_tool 的兜底分支共用同一套推断逻辑，
+        // 避免两处分别维护导致遗漏，例如此前 query_history 的 metric 参数未被覆盖）
         for (_, acc) in tool_calls.iter_mut() {
             if acc.name.trim().is_empty() {
                 if let Ok(args) = serde_json::from_str::<serde_json::Value>(&acc.args) {
-                    if let Some(cmd) = args.get("command").and_then(|c| c.as_str()) {
-                        if !cmd.trim().is_empty() {
-                            acc.name = "exec_command".to_string();
-                        }
-                    } else if args.get("path").and_then(|p| p.as_str()).is_some() {
-                        acc.name = "read_file".to_string();
+                    let inferred = infer_tool_name("", &args);
+                    if !inferred.is_empty() {
+                        acc.name = inferred.to_string();
                     }
                 }
             }
         }
 
-        // 丢弃空壳工具调用：既没有工具名也没有任何有效参数（部分模型会输出空的占位调用），
-        // 这类调用既无法推断也不能执行，直接忽略，避免回填“未知工具”错误让模型原地打转
+        // 丢弃空壳工具调用：既没有工具名也没有任何参数信号（部分模型会输出完全空的占位调用），
+        // 这类调用既无法推断也不能执行，直接忽略，避免回填“未知工具”错误让模型原地打转。
+        // 注意：只要 args 是一段能解析出来的 JSON（哪怕是 "{}"），就说明模型确实发出过参数增量，
+        // 不能仅因为对象内容为空就当成占位调用丢弃——resource_usage 等无参数工具的合法调用
+        // 恰好就是空对象，之前的写法会把这类合法调用误杀，导致模型宣布意图后却静默中断。
         tool_calls.retain(|_, acc| {
             let has_name = !acc.name.trim().is_empty();
-            let has_args = serde_json::from_str::<serde_json::Value>(&acc.args)
-                .map(|v| v.as_object().map(|m| !m.is_empty()).unwrap_or(false))
-                .unwrap_or(false);
-            has_name || has_args
+            let args_trimmed = acc.args.trim();
+            let has_args_signal = !args_trimmed.is_empty()
+                && serde_json::from_str::<serde_json::Value>(args_trimmed).is_ok();
+            has_name || has_args_signal
         });
 
         if tool_calls.is_empty() {
@@ -424,17 +477,7 @@ async fn run_agent_loop(
             };
 
             if need_approval {
-                let _ = app.emit(
-                    "ai:tool",
-                    AiTool {
-                        session_id,
-                        tool_call_id: acc.id.clone(),
-                        name: acc.name.clone(),
-                        args: args.clone(),
-                        state: "request".to_string(),
-                        output: None,
-                    },
-                );
+                emit_tool_state(app, session_id, &acc, &args, "request", None);
 
                 let decision = loop {
                     match tokio::time::timeout(Duration::from_secs(600), rx.recv()).await {
@@ -459,29 +502,18 @@ async fn run_agent_loop(
                 };
 
                 if !decision {
-                    let _ = insert_audit(
-                        db,
+                    let _ = insert_audit(db, AuditEntry {
                         session_id,
                         host,
-                        &acc,
-                        &args,
-                        permission_mode.as_str(),
-                        "denied",
-                        "denied",
-                        None,
-                        started.elapsed().as_millis() as u64,
-                    );
-                    let _ = app.emit(
-                        "ai:tool",
-                        AiTool {
-                            session_id,
-                            tool_call_id: acc.id.clone(),
-                            name: acc.name.clone(),
-                            args: args.clone(),
-                            state: "denied".to_string(),
-                            output: None,
-                        },
-                    );
+                        acc: &acc,
+                        args: &args,
+                        permission_mode: permission_mode.as_str(),
+                        approval: "denied",
+                        status: "denied",
+                        result: None,
+                        duration_ms: started.elapsed().as_millis() as u64,
+                    });
+                    emit_tool_state(app, session_id, &acc, &args, "denied", None);
                     history.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": acc.id,
@@ -492,44 +524,23 @@ async fn run_agent_loop(
             }
 
             let approval_label = if need_approval { "approved" } else { "auto" };
-            let _ = app.emit(
-                "ai:tool",
-                AiTool {
-                    session_id,
-                    tool_call_id: acc.id.clone(),
-                    name: acc.name.clone(),
-                    args: args.clone(),
-                    state: "running".to_string(),
-                    output: None,
-                },
-            );
+            emit_tool_state(app, session_id, &acc, &args, "running", None);
 
             let result = execute_tool(db, russh, host, &acc.name, &args).await;
             match result {
                 Ok(output) => {
-                    let _ = insert_audit(
-                        db,
+                    let _ = insert_audit(db, AuditEntry {
                         session_id,
                         host,
-                        &acc,
-                        &args,
-                        permission_mode.as_str(),
-                        approval_label,
-                        "executed",
-                        Some(output.clone()),
-                        started.elapsed().as_millis() as u64,
-                    );
-                    let _ = app.emit(
-                        "ai:tool",
-                        AiTool {
-                            session_id,
-                            tool_call_id: acc.id.clone(),
-                            name: acc.name.clone(),
-                            args: args.clone(),
-                            state: "result".to_string(),
-                            output: Some(output.clone()),
-                        },
-                    );
+                        acc: &acc,
+                        args: &args,
+                        permission_mode: permission_mode.as_str(),
+                        approval: approval_label,
+                        status: "executed",
+                        result: Some(output.clone()),
+                        duration_ms: started.elapsed().as_millis() as u64,
+                    });
+                    emit_tool_state(app, session_id, &acc, &args, "result", Some(output.clone()));
                     history.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": acc.id,
@@ -537,29 +548,18 @@ async fn run_agent_loop(
                     }));
                 }
                 Err(err) => {
-                    let _ = insert_audit(
-                        db,
+                    let _ = insert_audit(db, AuditEntry {
                         session_id,
                         host,
-                        &acc,
-                        &args,
-                        permission_mode.as_str(),
-                        approval_label,
-                        "error",
-                        Some(err.clone()),
-                        started.elapsed().as_millis() as u64,
-                    );
-                    let _ = app.emit(
-                        "ai:tool",
-                        AiTool {
-                            session_id,
-                            tool_call_id: acc.id.clone(),
-                            name: acc.name.clone(),
-                            args: args.clone(),
-                            state: "error".to_string(),
-                            output: Some(err.clone()),
-                        },
-                    );
+                        acc: &acc,
+                        args: &args,
+                        permission_mode: permission_mode.as_str(),
+                        approval: approval_label,
+                        status: "error",
+                        result: Some(err.clone()),
+                        duration_ms: started.elapsed().as_millis() as u64,
+                    });
+                    emit_tool_state(app, session_id, &acc, &args, "error", Some(err.clone()));
                     history.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": acc.id,
@@ -571,37 +571,41 @@ async fn run_agent_loop(
     }
 }
 
-fn insert_audit(
-    db: &Db,
+/// `insert_audit` 的参数聚合体（此前 10 个位置参数，字段含义相近的 `&str` 挤在一起，
+/// 顺序传错编译器也发现不了）。
+struct AuditEntry<'a> {
     session_id: u32,
-    host: &Host,
-    acc: &ToolCallAcc,
-    args: &serde_json::Value,
-    permission_mode: &str,
-    approval: &str,
-    status: &str,
+    host: &'a Host,
+    acc: &'a ToolCallAcc,
+    args: &'a serde_json::Value,
+    permission_mode: &'a str,
+    approval: &'a str,
+    status: &'a str,
     result: Option<String>,
     duration_ms: u64,
-) -> Result<(), String> {
-    let summary = args
+}
+
+fn insert_audit(db: &Db, entry: AuditEntry) -> Result<(), String> {
+    let summary = entry
+        .args
         .get("command")
         .and_then(|c| c.as_str())
         .map(String::from)
-        .unwrap_or_else(|| serde_json::to_string(args).unwrap_or_default());
-    let result = result.map(|r| truncate(&r, 300));
+        .unwrap_or_else(|| serde_json::to_string(entry.args).unwrap_or_default());
+    let result = entry.result.map(|r| truncate(&r, 300));
     let log = AuditLog {
         id: uuid::Uuid::new_v4().to_string(),
         ts: now(),
-        session_id: Some(session_id),
-        host_id: host.id.clone(),
-        host_label: format!("{} ({})", host.name, host.label_address()),
-        tool_name: acc.name.clone(),
+        session_id: Some(entry.session_id),
+        host_id: entry.host.id.clone(),
+        host_label: format!("{} ({})", entry.host.name, entry.host.label_address()),
+        tool_name: entry.acc.name.clone(),
         summary: truncate(&summary, 500),
-        permission_mode: permission_mode.to_string(),
-        approval: approval.to_string(),
-        status: status.to_string(),
+        permission_mode: entry.permission_mode.to_string(),
+        approval: entry.approval.to_string(),
+        status: entry.status.to_string(),
         result,
-        duration_ms: Some(duration_ms),
+        duration_ms: Some(entry.duration_ms),
     };
     db.insert_audit_log(&log)
         .map_err(|e| format!("写入操作日志失败: {e}"))
@@ -650,203 +654,6 @@ fn apply_delta(
     }
 }
 
-async fn execute_tool(
-    db: &Db,
-    russh: &RusshManager,
-    host: &Host,
-    name: &str,
-    args: &serde_json::Value,
-) -> Result<String, String> {
-    match name {
-        "exec_command" => {
-            let command = args
-                .get("command")
-                .and_then(|c| c.as_str())
-                .ok_or_else(|| "缺少 command 参数".to_string())?;
-            let timeout = args.get("timeout_secs").and_then(|t| t.as_u64()).unwrap_or(30);
-            let out = russh
-                .exec(host, command, std::time::Duration::from_secs(timeout))
-                .await?;
-            Ok(sanitize(&format_exec_output(&out)))
-        }
-        "read_file" => {
-            let path = args
-                .get("path")
-                .and_then(|p| p.as_str())
-                .ok_or_else(|| "缺少 path 参数".to_string())?;
-            let out = russh
-                .exec(host, &format!("cat {}", shq(path)), std::time::Duration::from_secs(15))
-                .await?;
-            Ok(sanitize(&format_exec_output(&out)))
-        }
-        "list_dir" => {
-            let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
-            let out = russh
-                .exec(host, &format!("ls -lah {}", shq(path)), std::time::Duration::from_secs(15))
-                .await?;
-            Ok(sanitize(&format_exec_output(&out)))
-        }
-        "resource_usage" => {
-            let script = "echo '-- 磁盘 --'; df -h; echo; echo '-- 内存 --'; (free -h 2>/dev/null || vm_stat); echo; echo '-- 负载 --'; uptime; echo; echo '-- TOP 进程 --'; (ps aux --sort=-%mem 2>/dev/null || ps aux) | head -8";
-            let out = russh
-                .exec(host, script, std::time::Duration::from_secs(25))
-                .await?;
-            Ok(sanitize(&format_exec_output(&out)))
-        }
-        "query_history" => {
-            let metric = args.get("metric").and_then(|v| v.as_str()).unwrap_or("cpu");
-            let window_h = args.get("window_hours").and_then(|v| v.as_f64()).unwrap_or(168.0);
-            let window_h = window_h.clamp(1.0, 2160.0);
-            let since = now().saturating_sub((window_h * 3600.0) as u64);
-            let rows = db
-                .list_metrics(&host.id, since, 2000)
-                .map_err(|e| format!("查询历史指标失败: {e}"))?;
-            Ok(format_metric_trend(metric, &rows, window_h))
-        }
-        _ => {
-            let mut effective = name;
-            // 模型漏填工具名时，根据参数推断（command → exec_command，path → read_file）
-            if effective.trim().is_empty() {
-                if args
-                    .get("command")
-                    .and_then(|c| c.as_str())
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false)
-                {
-                    effective = "exec_command";
-                } else if args.get("path").and_then(|p| p.as_str()).is_some() {
-                    effective = "read_file";
-                }
-            }
-            let normalized = normalize_tool(effective);
-            if normalized != name {
-                return Box::pin(execute_tool(db, russh, host, normalized, args)).await;
-            }
-            eprintln!("[agent] 未知工具调用: {name}，参数: {args}");
-            Err(format!(
-                "未知工具: {name}。可用工具：exec_command（执行命令）、read_file（读文件）、\
-                 list_dir（列目录）、resource_usage（资源占用）。\
-                 请改用这些工具重试。"
-            ))
-        }
-    }
-}
-
-fn parse_args(raw: &str) -> serde_json::Value {
-    match serde_json::from_str::<serde_json::Value>(raw) {
-        Ok(v) if v.is_object() => v,
-        _ => serde_json::json!({ "command": raw.trim() }),
-    }
-}
-
-fn system_prompt(host: &Host, provider: &AiProvider, model: &str) -> String {
-    format!(
-        "你是 buffTerm，运行在用户本地的 SSH 管理工具中，帮助用户管理远程服务器。\n\
-         当前由 {} 平台提供能力，当前配置的底层模型是 {}。\n\
-         当前连接的服务器：{}（{}@{}:{}）\n\
-         可用工具：exec_command（执行命令）、read_file（读文件）、list_dir（列目录）、resource_usage（资源占用）、query_history（查询历史指标趋势）。\n\
-         规则：\n\
-         1. 所有 exec_command 都会经过用户批准，获批后才执行，请先说明意图。\n\
-         2. 命令输出可能被截断，只基于已有信息回答，不要编造。\n\
-         3. 遇到破坏性操作（删除、格式化、改权限、停服务等）时，明确提示风险并给出命令原文。\n\
-         4. 使用中文回答，简洁、专业、有条理。\n\
-         5. 身份说明：当用户询问“你是什么模型/你由谁开发”时，如实回答你由 {} 驱动、配置的模型为 {}，
-            以及你是 buffTerm；不要声称自己是任何其他 AI 助手（如 ChatGPT、Claude、Gemini 等），
-            也不要编造版本号或开发厂商信息。\n\
-         6. 工具调用约定：工具名称必须是以下之一——exec_command、read_file、list_dir、resource_usage、query_history；
-            每次工具调用都必须包含完整的 name 字段且不能为空，不要发明新工具名；参数放入 arguments（JSON 对象）。\n\
-         7. 当用户询问“最近怎么样”、“有没有异常”、“是不是变慢了”等涉及变化的问题时，优先调用 query_history 查看趋势，
-            而不是只调用 resource_usage 看当下值。趋势比绝对值更有诊断价值——一个从 30% 涨到 78% 的磁盘比一个稳定在 78% 的磁盘更紧急。
-            query_history 会返回历史序列、变化斜率和外推预测（如“按当前增速，X 天后达到 90%”），这是单次快照无法提供的信息。",
-        provider.name,
-        model,
-        host.name,
-        host.username,
-        host.address,
-        host.port,
-        provider.name,
-        model
-    )
-}
-
-fn tools_schema() -> serde_json::Value {
-    serde_json::json!([
-        {
-            "type": "function",
-            "function": {
-                "name": "exec_command",
-                "description": "在远程服务器上执行一条 shell 命令并返回输出。默认超时 30 秒。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": { "type": "string", "description": "要执行的 shell 命令" },
-                        "timeout_secs": { "type": "number", "description": "超时秒数，默认 30" },
-                        "requires_approval": { "type": "boolean", "description": "如果你认为该命令有危险（删除、格式化、修改系统状态、影响服务等），设为 true，便于用户安全策略处理" }
-                    },
-                    "required": ["command"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "读取远程服务器上的文件内容",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "远程文件路径" }
-                    },
-                    "required": ["path"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_dir",
-                "description": "列出远程服务器上的目录内容",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "目录路径，默认当前目录" }
-                    }
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "resource_usage",
-                "description": "查看服务器磁盘、内存、负载和 CPU/内存占用最高的进程",
-                "parameters": { "type": "object", "properties": {} }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "query_history",
-                "description": "查询当前服务器的历史指标趋势。用于判断资源使用是否在持续增长、是否有周期性波动、是否接近告警阈值。当用户问'最近怎么样'、'有没有问题'、'变慢了吗'时优先调用此工具，而不是只看当下快照。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "metric": {
-                            "type": "string",
-                            "enum": ["cpu", "mem", "load", "disk"],
-                            "description": "要查询的指标：cpu=CPU使用率, mem=内存使用率, load=系统负载, disk=磁盘使用率"
-                        },
-                        "window_hours": {
-                            "type": "number",
-                            "description": "回溯多少小时，默认 168（7 天），最大 2160（90 天）"
-                        }
-                    },
-                    "required": ["metric"]
-                }
-            }
-        },
-    ])
-}
-
 /// 每台主机最多保留的对话轮数（一轮 = 一次用户提问）。
 const MAX_HISTORY_ROUNDS: usize = 20;
 
@@ -873,173 +680,37 @@ fn trim_history(history: &mut Vec<serde_json::Value>, max_rounds: usize) {
     history.append(&mut kept);
 }
 
-// ============ 历史指标趋势分析 ============
 
-/// 简单线性回归（最小二乘），返回 (斜率/小时, 截距)。
-/// 样本数 < 2 时返回 (0, 0)。
-fn linear_slope(points: &[(f64, f64)]) -> (f64, f64) {
-    let n = points.len() as f64;
-    if n < 2.0 {
-        return (0.0, 0.0);
-    }
-    let sum_x: f64 = points.iter().map(|p| p.0).sum();
-    let sum_y: f64 = points.iter().map(|p| p.1).sum();
-    let sum_xy: f64 = points.iter().map(|p| p.0 * p.1).sum();
-    let sum_x2: f64 = points.iter().map(|p| p.0 * p.0).sum();
-    let denom = n * sum_x2 - sum_x * sum_x;
-    if denom.abs() < f64::EPSILON {
-        return (0.0, sum_y / n);
-    }
-    let slope = (n * sum_xy - sum_x * sum_y) / denom;
-    let intercept = (sum_y - slope * sum_x) / n;
-    (slope, intercept)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// 将秒级时间戳格式化为可读的日期时间（本地时间）。
-fn fmt_ts(ts: u64) -> String {
-    use chrono::TimeZone;
-    chrono::Local
-        .timestamp_opt(ts as i64, 0)
-        .single()
-        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
-        .unwrap_or_else(|| ts.to_string())
-}
-
-/// 格式化单个标量指标（cpu/mem/load）的趋势文本，供模型阅读。
-fn format_scalar_trend(label: &str, unit: &str, points: &[(f64, f64)], window_h: f64) -> String {
-    if points.is_empty() {
-        return format!("指标: {}\n数据不足：该时间窗口内没有历史样本，建议先多使用几次监控/巡检/对话来积累数据。\n", label);
-    }
-    if points.len() < 5 {
-        return format!(
-            "指标: {} ({} 个样本，数据偏少)\n最早: {} → {:.1}{}\n最新: {} → {:.1}{}\n样本不足 5 个，趋势斜率不可靠，建议多观察几天。\n",
-            label, points.len(), fmt_ts(points[0].0 as u64), points[0].1, unit,
-            fmt_ts(points.last().unwrap().0 as u64), points.last().unwrap().1, unit,
-        );
-    }
-    let (slope, _) = linear_slope(points);
-    let values: Vec<f64> = points.iter().map(|p| p.1).collect();
-    let min_v = values.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max_v = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let avg = values.iter().sum::<f64>() / values.len() as f64;
-    let latest = *values.last().unwrap();
-    let first = values[0];
-    let slope_per_day = slope * 24.0;
-
-    let mut out = format!(
-        "指标: {}\n时间窗口: 最近 {:.0} 小时\n样本数: {}\n最早: {} → {:.1}{}\n最新: {} → {:.1}{}\n最小值: {:.1}{}\n最大值: {:.1}{}\n平均值: {:.1}{}\n",
-        label, window_h, points.len(),
-        fmt_ts(points[0].0 as u64), first, unit,
-        fmt_ts(points.last().unwrap().0 as u64), latest, unit,
-        min_v, unit, max_v, unit, avg, unit,
-    );
-
-    if slope_per_day.abs() < 0.01 {
-        out.push_str("趋势: 平稳（日变化 < 0.01）\n");
-    } else if slope_per_day > 0.0 {
-        out.push_str(&format!("趋势斜率: +{:.2}{}/天（持续上升）\n", slope_per_day, unit));
-        // 外推到 90% 的天数
-        if latest < 90.0 && slope_per_day > 0.0 {
-            let days = (90.0 - latest) / slope_per_day;
-            if days > 0.0 && days < 365.0 {
-                out.push_str(&format!(
-                    "线性外推: 按当前增速，约 {:.1} 天后达到 90%{}\n",
-                    days, unit,
-                ));
-            }
+    #[test]
+    fn trim_history_keeps_system_prompt_and_recent_rounds() {
+        let mut history = vec![serde_json::json!({"role": "system", "content": "sys"})];
+        for i in 0..5 {
+            history.push(serde_json::json!({"role": "user", "content": format!("q{i}")}));
+            history.push(serde_json::json!({"role": "assistant", "content": format!("a{i}")}));
         }
-    } else {
-        out.push_str(&format!("趋势斜率: {:.2}{}/天（下降中）\n", slope_per_day, unit));
-    }
-
-    // 完整序列（最多 30 个点，等间隔采样）
-    let max_points = 30;
-    let step = if points.len() > max_points {
-        points.len() / max_points
-    } else {
-        1
-    };
-    out.push_str("完整序列（时间, 值）:\n");
-    for p in points.iter().step_by(step) {
-        out.push_str(&format!("{} {:.1}\n", fmt_ts(p.0 as u64), p.1));
-    }
-    out
-}
-
-/// 格式化磁盘指标趋势（按挂载点分组）。
-fn format_disk_trend(rows: &[HostMetric], window_h: f64) -> String {
-    // 收集所有出现过的挂载点
-    let mut mounts: Vec<String> = Vec::new();
-    for r in rows {
-        for d in &r.disks {
-            if !mounts.contains(&d.mount) {
-                mounts.push(d.mount.clone());
-            }
-        }
-    }
-    if mounts.is_empty() {
-        return format!("指标: disk_percent（按挂载点）\n数据不足：该时间窗口内没有磁盘历史样本。\n");
-    }
-    mounts.sort();
-
-    let mut out = format!("指标: disk_percent（按挂载点）\n时间窗口: 最近 {:.0} 小时\n样本数: {}\n\n", window_h, rows.len());
-    for mount in &mounts {
-        let points: Vec<(f64, f64)> = rows
+        trim_history(&mut history, 2);
+        // 保留 system + 最近 2 轮（每轮 user+assistant）
+        assert_eq!(history[0]["role"], "system");
+        let user_msgs: Vec<&str> = history
             .iter()
-            .filter_map(|r| {
-                r.disks.iter().find(|d| d.mount == *mount).map(|d| (r.ts as f64, d.percent))
-            })
+            .filter(|m| m["role"] == "user")
+            .map(|m| m["content"].as_str().unwrap())
             .collect();
-        if points.is_empty() {
-            continue;
-        }
-        out.push_str(&format!("挂载点 {}:\n", mount));
-        if points.len() < 5 {
-            out.push_str(&format!(
-                "  样本 {} 个，最早 {:.1}% → 最新 {:.1}%，数据偏少\n\n",
-                points.len(), points[0].1, points.last().unwrap().1,
-            ));
-            continue;
-        }
-        let (slope, _) = linear_slope(&points);
-        let slope_per_day = slope * 24.0;
-        let latest = points.last().unwrap().1;
-        let first = points[0].1;
-        out.push_str(&format!("  最早 {:.1}% → 最新 {:.1}%", first, latest));
-        if slope_per_day.abs() < 0.01 {
-            out.push_str("，平稳\n");
-        } else if slope_per_day > 0.0 {
-            out.push_str(&format!("，+{:.2}%/天（上升）\n", slope_per_day));
-            if latest < 90.0 {
-                let days = (90.0 - latest) / slope_per_day;
-                if days > 0.0 && days < 365.0 {
-                    out.push_str(&format!("  ⚠ 按当前增速，约 {:.1} 天后达到 90%\n", days));
-                }
-            }
-        } else {
-            out.push_str(&format!("，{:.2}%/天（下降）\n", slope_per_day));
-        }
-        out.push('\n');
+        assert_eq!(user_msgs, vec!["q3", "q4"]);
     }
-    out
-}
 
-/// 把 host_metrics 查询结果格式化为模型可读的趋势文本。
-pub fn format_metric_trend(metric: &str, rows: &[HostMetric], window_h: f64) -> String {
-    match metric {
-        "cpu" => {
-            let points: Vec<(f64, f64)> = rows.iter().map(|r| (r.ts as f64, r.cpu_percent)).collect();
-            format_scalar_trend("cpu_percent", "%", &points, window_h)
-        }
-        "mem" => {
-            let points: Vec<(f64, f64)> = rows.iter().map(|r| (r.ts as f64, r.mem_percent)).collect();
-            format_scalar_trend("mem_percent", "%", &points, window_h)
-        }
-        "load" => {
-            let points: Vec<(f64, f64)> = rows.iter().map(|r| (r.ts as f64, r.load1)).collect();
-            format_scalar_trend("load1 (1分钟)", "", &points, window_h)
-        }
-        "disk" => format_disk_trend(rows, window_h),
-        _ => format!("未知指标: {}。可用: cpu, mem, load, disk\n", metric),
+    #[test]
+    fn trim_history_noop_when_under_limit() {
+        let mut history = vec![
+            serde_json::json!({"role": "system", "content": "sys"}),
+            serde_json::json!({"role": "user", "content": "q0"}),
+        ];
+        let before = history.clone();
+        trim_history(&mut history, 20);
+        assert_eq!(history, before);
     }
 }

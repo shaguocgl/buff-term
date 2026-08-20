@@ -110,17 +110,16 @@ pub fn start_remediation_planning(
     let provider_id = provider.id.clone();
     let base_url = provider.base_url.clone();
     tauri::async_runtime::spawn(async move {
-        run_planning(
-            app_for_task,
-            remediation,
-            host_for_task,
+        let task = PlanningTask {
+            app: app_for_task,
+            host: host_for_task,
             report_markdown,
             provider_id,
             base_url,
             model,
             flag,
-        )
-        .await;
+        };
+        run_planning(task, remediation).await;
     });
     Ok(remediation_id)
 }
@@ -232,16 +231,33 @@ pub async fn retry_remediation(
     Ok(())
 }
 
-async fn run_planning(
+/// `run_planning` 拥有的整改规划任务数据（此前 8 个位置参数，全部是 spawn 进异步任务
+/// 前 move 进来的所有权数据，收敛为一个结构体，调用点也不必再担心参数顺序）。
+struct PlanningTask {
     app: AppHandle,
-    mut remediation: Remediation,
     host: Host,
     report_markdown: String,
     provider_id: String,
     base_url: String,
     model: String,
     flag: Arc<AtomicBool>,
-) {
+}
+
+/// `plan_remediation` 所需的只读上下文（对应 `PlanningTask` 的借用视图）。字段全部是
+/// 引用，因此整体可以 Copy，方便按值解构。
+#[derive(Clone, Copy)]
+struct PlanningCtx<'a> {
+    app: &'a AppHandle,
+    host: &'a Host,
+    report_markdown: &'a str,
+    provider_id: &'a str,
+    base_url: &'a str,
+    model: &'a str,
+    flag: &'a Arc<AtomicBool>,
+}
+
+async fn run_planning(task: PlanningTask, mut remediation: Remediation) {
+    let PlanningTask { app, host, report_markdown, provider_id, base_url, model, flag } = task;
     let remediation_id = remediation.id.clone();
 
     if cancelled(&flag) {
@@ -259,17 +275,16 @@ async fn run_planning(
         return;
     }
 
-    let result = plan_remediation(
-        &app,
-        &mut remediation,
-        &host,
-        &report_markdown,
-        &provider_id,
-        &base_url,
-        &model,
-        &flag,
-    )
-    .await;
+    let ctx = PlanningCtx {
+        app: &app,
+        host: &host,
+        report_markdown: &report_markdown,
+        provider_id: &provider_id,
+        base_url: &base_url,
+        model: &model,
+        flag: &flag,
+    };
+    let result = plan_remediation(&ctx, &mut remediation).await;
 
     if cancelled(&flag) {
         remediation.status = "cancelled".to_string();
@@ -316,15 +331,10 @@ async fn run_planning(
 }
 
 async fn plan_remediation(
-    app: &AppHandle,
+    ctx: &PlanningCtx<'_>,
     remediation: &mut Remediation,
-    host: &Host,
-    report_markdown: &str,
-    provider_id: &str,
-    base_url: &str,
-    model: &str,
-    flag: &Arc<AtomicBool>,
 ) -> Result<(), String> {
+    let &PlanningCtx { app, host, report_markdown, provider_id, base_url, model, flag } = ctx;
     emit_progress(
         app,
         &remediation.id,
@@ -337,7 +347,8 @@ async fn plan_remediation(
     let api_key = credentials::get_api_key(provider_id)
         .ok_or_else(|| "API Key 未找到，请在 AI 配置中检查".to_string())?;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(180))
+        .connect_timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
@@ -376,7 +387,16 @@ async fn plan_remediation(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("请求 AI 平台失败: {e}"))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if e.is_timeout() {
+                format!("请求 AI 平台超时（180s），模型可能响应过慢或网络不畅: {msg}")
+            } else if e.is_connect() {
+                format!("无法连接 AI 平台，请检查网络或 Base URL: {msg}")
+            } else {
+                format!("请求 AI 平台失败: {msg}")
+            }
+        })?;
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
