@@ -3508,12 +3508,15 @@ input::placeholder {
 }
 
 .model-default {
-  flex: none;
+  /* 固定宽度，避免“默认 / 设默认”文字长度不同导致同一行输入框宽度不一致 */
+  flex: 0 0 58px;
+  width: 58px;
+  text-align: center;
   border: 1px solid var(--border);
   background: var(--panel-3);
   color: var(--muted);
   border-radius: 7px;
-  padding: 6px 9px;
+  padding: 6px 0;
   font-size: 11.5px;
   cursor: pointer;
   white-space: nowrap;
