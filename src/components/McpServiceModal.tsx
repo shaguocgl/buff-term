@@ -8,6 +8,7 @@ import {
   saveMcpService,
 } from '../api';
 import type { Host, McpRule, McpService } from '../types';
+import { copyToClipboard } from '../utils/clipboard';
 import Modal from './Modal';
 import Select, { type SelectOption } from './Select';
 import { CheckIcon, KeyIcon, PowerIcon, ServerIcon } from './Icons';
@@ -97,11 +98,10 @@ export default function McpServiceModal({ hosts, onClose }: Props) {
 
   const copyConfig = async () => {
     if (!service?.token || !service?.port) return;
-    try {
-      await navigator.clipboard.writeText(configJson(service));
+    if (await copyToClipboard(configJson(service))) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
-    } catch {
+    } else {
       setError('复制失败，请手动选择复制');
     }
   };

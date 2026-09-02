@@ -4721,3 +4721,85 @@ input::placeholder {
   padding: 4px 8px;
   margin-top: 6px;
 }
+
+/* ---------- 聊天面板：滚动跟随 / 工具输出折叠复制 / 代码块复制 ---------- */
+
+.chat-scroll-bottom {
+  position: sticky;
+  bottom: 8px;
+  align-self: flex-end;
+  margin-top: 8px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--panel-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: var(--shadow-lg);
+}
+
+.chat-scroll-bottom:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.tool-output-wrap {
+  position: relative;
+}
+
+.tool-output-wrap .tool-output {
+  border-top: none;
+}
+
+.tool-output-wrap.expanded .tool-output {
+  max-height: 55vh;
+}
+
+.tool-output-actions {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  display: flex;
+  gap: 4px;
+}
+
+.tool-output-actions button {
+  padding: 2px 8px;
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.tool-output-actions button:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.md-code {
+  position: relative;
+}
+
+.md-code .md-code-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 2px 8px;
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0.85;
+}
+
+.md-code .md-code-copy:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+  opacity: 1;
+}

@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   agentApprove,
   agentCancel,
@@ -11,6 +17,7 @@ import {
   onAiTool,
   setActiveAiModel,
 } from '../api';
+import { copyToClipboard } from '../utils/clipboard';
 import type { AiModel, HistoryEntry } from '../types';
 import Select, { type SelectOption } from './Select';
 import {
@@ -125,6 +132,68 @@ function ApprovalCountdown({
   );
 }
 
+// 工具输出默认折叠（180px 可滚动），长输出可展开，右上角常驻复制
+function ToolOutput({ output }: { output: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const long = output.length > 400 || output.split('\n').length > 10;
+  return (
+    <div className={`tool-output-wrap${expanded ? ' expanded' : ''}`}>
+      <pre className="tool-output">{output}</pre>
+      <div className="tool-output-actions">
+        {long && (
+          <button onClick={() => setExpanded((v) => !v)}>
+            {expanded ? '收起' : '展开'}
+          </button>
+        )}
+        <button
+          onClick={async () => {
+            if (await copyToClipboard(output)) {
+              setCopied(true);
+              window.setTimeout(() => setCopied(false), 1500);
+            }
+          }}
+        >
+          {copied ? '已复制' : '复制'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// 从 markdown 代码块节点递归提取纯文本，供复制按钮使用
+function extractText(node: ReactNode): string {
+  if (node == null || typeof node === 'boolean') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) {
+    return node.map((n) => extractText(n as ReactNode)).join('');
+  }
+  const props = (node as { props?: { children?: ReactNode } }).props;
+  return props ? extractText(props.children) : '';
+}
+
+// markdown 代码块容器：右上角复制按钮
+function MarkdownPre({ children }: { children?: ReactNode }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="md-code">
+      <button
+        className="md-code-copy"
+        title="复制代码"
+        onClick={async () => {
+          if (await copyToClipboard(extractText(children))) {
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1500);
+          }
+        }}
+      >
+        {copied ? '已复制' : '复制'}
+      </button>
+      <pre>{children}</pre>
+    </div>
+  );
+}
+
 // 消息 ID 使用模块级单调递增序列，避免组件重新挂载后从 0 重新计数，
 // 与恢复出来的历史消息 ID 发生冲突。
 let chatMessageSeq = 0;
@@ -187,9 +256,23 @@ export default function ChatPanel({
       'smart',
   );
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [nearBottom, setNearBottom] = useState(true);
   const activeAssistantId = useRef<number | null>(null);
   const composingRef = useRef(false);
   const hasSentRef = useRef(false);
+
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setNearBottom(el.scrollTop + el.clientHeight >= el.scrollHeight - 40);
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    setNearBottom(true);
+  }, []);
 
   const changePermissionMode = (mode: 'all' | 'smart' | 'none') => {
     setPermissionMode(mode);
@@ -312,10 +395,11 @@ export default function ChatPanel({
     };
   }, [sessionId, updateLastAssistant]);
 
+  // 流式输出时仅当用户本来就停在底部才自动跟随，避免上翻阅读被拽回
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, busy]);
+    if (el && nearBottom) el.scrollTop = el.scrollHeight;
+  }, [messages, busy, nearBottom]);
 
   const handleSend = () => {
     const text = input.trim();
@@ -394,9 +478,7 @@ export default function ChatPanel({
           <span className="spinner" /> 执行中…
         </div>
       )}
-      {tool.output && (
-        <pre className="tool-output">{tool.output}</pre>
-      )}
+      {tool.output && <ToolOutput output={tool.output} />}
     </div>
   );
 
@@ -435,7 +517,7 @@ export default function ChatPanel({
         </div>
       </div>
 
-      <div className="chat-messages" ref={scrollRef}>
+      <div className="chat-messages" ref={scrollRef} onScroll={handleScroll}>
         {messages.length === 0 && (
           <div className="chat-empty">
             <SparklesIcon size={26} />
@@ -460,7 +542,10 @@ export default function ChatPanel({
                 {msg.content &&
                   (msg.role === 'assistant' ? (
                     <div className="md-content">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{ pre: MarkdownPre }}
+                      >
                         {msg.content}
                       </ReactMarkdown>
                     </div>
@@ -479,6 +564,16 @@ export default function ChatPanel({
               <span className="spinner" /> 思考中…
             </div>
           </div>
+        )}
+
+        {!nearBottom && (
+          <button
+            className="chat-scroll-bottom"
+            onClick={scrollToBottom}
+            title="回到底部"
+          >
+            ↓ 回到底部
+          </button>
         )}
       </div>
 
