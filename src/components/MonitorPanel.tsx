@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
 import { monitorSnapshot } from '../api';
 import type { Host, MonitorSnapshot } from '../types';
+import { fmtError } from '../utils/errors';
 import { ActivityIcon, RefreshIcon, XIcon } from './Icons';
 
 interface Props {
@@ -238,7 +239,7 @@ export default function MonitorPanel({ host, panelWidth = 400, onClose }: Props)
         return next.filter((p) => p.ts >= cutoff);
       });
     } catch (e) {
-      setError(String(e));
+      setError(fmtError(e));
     } finally {
       firstLoad.current = false;
     }

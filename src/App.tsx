@@ -7,6 +7,7 @@ import {
 } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { fmtError } from './utils/errors';
 import {
   checkForUpdate,
   deleteHost,
@@ -32,6 +33,7 @@ import AIConfigModal from './components/AIConfigModal';
 import AlertModal from './components/AlertModal';
 import AuditLogModal from './components/AuditLogModal';
 import ChatPanel from './components/ChatPanel';
+import ConfirmModal from './components/ConfirmModal';
 import GuardApprovalModal from './components/GuardApprovalModal';
 import HostForm from './components/HostForm';
 import InspectionPanel from './components/InspectionPanel';
@@ -88,6 +90,7 @@ function App() {
   const [inspectionOpen, setInspectionOpen] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingHost, setEditingHost] = useState<Host | null>(null);
+  const [deleteHostTarget, setDeleteHostTarget] = useState<Host | null>(null);
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeKey, setActiveKey] = useState<number | null>(null);
   const [loadingHostId, setLoadingHostId] = useState<string | null>(null);
@@ -136,7 +139,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    refresh().catch((e) => showToast('error', String(e)));
+    refresh().catch((e) => showToast('error', fmtError(e)));
     refreshAi().catch(() => {});
   }, [refresh, refreshAi, showToast]);
 
@@ -216,7 +219,7 @@ function App() {
     try {
       await mcpApprove(req.request_id, allow);
     } catch (e) {
-      showToast('error', String(e));
+      showToast('error', fmtError(e));
     } finally {
       setMcpApproval(null);
     }
@@ -228,7 +231,7 @@ function App() {
     try {
       await sessionGuardApprove(req.session_id, req.request_id, allow);
     } catch (e) {
-      showToast('error', String(e));
+      showToast('error', fmtError(e));
     } finally {
       setGuardApproval(null);
       // 审批/取消后把键盘焦点还给终端，避免需要手动点击才能继续输入
@@ -291,13 +294,13 @@ function App() {
   };
 
   const handleDelete = async (host: Host) => {
-    if (!window.confirm(`确定删除主机 "${host.name}" 吗？`)) return;
+    setDeleteHostTarget(null);
     try {
       await deleteHost(host.id);
       await refresh();
       showToast('success', `已删除 ${host.name}`);
     } catch (e) {
-      showToast('error', String(e));
+      showToast('error', fmtError(e));
     }
   };
 
@@ -317,7 +320,7 @@ function App() {
         showToast('info', '~/.ssh/config 中没有可导入的主机');
       }
     } catch (e) {
-      showToast('error', String(e));
+      showToast('error', fmtError(e));
     }
   };
 
@@ -367,7 +370,7 @@ function App() {
           : '当前已是最新版本。',
       );
     } catch (e) {
-      showToast('error', String(e));
+      showToast('error', fmtError(e));
     } finally {
       setCheckingUpdate(false);
     }
@@ -461,7 +464,7 @@ function App() {
                               title="删除主机"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handleDelete(host);
+                                setDeleteHostTarget(host);
                               }}
                             >
                               <TrashIcon size={14} />
@@ -659,7 +662,7 @@ function App() {
                       title="删除主机"
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleDelete(host);
+                        setDeleteHostTarget(host);
                       }}
                     >
                       <TrashIcon size={15} />
@@ -971,6 +974,17 @@ function App() {
         <GuardApprovalModal
           request={guardApproval}
           onResolve={resolveGuardApproval}
+        />
+      )}
+
+      {deleteHostTarget && (
+        <ConfirmModal
+          title="删除主机"
+          body={`确定删除主机 "${deleteHostTarget.name}" 吗？`}
+          confirmText="删除"
+          danger
+          onConfirm={() => handleDelete(deleteHostTarget)}
+          onCancel={() => setDeleteHostTarget(null)}
         />
       )}
 

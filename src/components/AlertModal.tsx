@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { getAlertSettings, saveAlertSettings, testAlertSettings } from '../api';
 import type { AlertSettings } from '../types';
+import { fmtError } from '../utils/errors';
 import Modal from './Modal';
 import Select from './Select';
 import { BellIcon } from './Icons';
@@ -32,7 +33,7 @@ export default function AlertModal({ onClose }: Props) {
   }, []);
 
   useEffect(() => {
-    load().catch((e) => setError(String(e)));
+    load().catch((e) => setError(fmtError(e)));
   }, [load]);
 
   const handleSave = async () => {
@@ -43,7 +44,7 @@ export default function AlertModal({ onClose }: Props) {
       await saveAlertSettings(settings);
       setTestResult('✓ SMTP 设置已保存');
     } catch (e) {
-      setError(String(e));
+      setError(fmtError(e));
     } finally {
       setSaving(false);
     }

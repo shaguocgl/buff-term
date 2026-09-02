@@ -9,6 +9,7 @@ import {
 } from '../api';
 import type { Host, McpRule, McpService } from '../types';
 import { copyToClipboard } from '../utils/clipboard';
+import { fmtError } from '../utils/errors';
 import Modal from './Modal';
 import Select, { type SelectOption } from './Select';
 import { CheckIcon, KeyIcon, PowerIcon, ServerIcon } from './Icons';
@@ -52,13 +53,13 @@ export default function McpServiceModal({ hosts, onClose }: Props) {
   }, []);
 
   useEffect(() => {
-    load().catch((e) => setError(String(e)));
+    load().catch((e) => setError(fmtError(e)));
   }, [load]);
 
   useEffect(() => {
     listMcpRules()
       .then(setRules)
-      .catch((e) => setError(String(e)));
+      .catch((e) => setError(fmtError(e)));
   }, []);
 
   const toggleHost = (id: string) => {
@@ -79,7 +80,7 @@ export default function McpServiceModal({ hosts, onClose }: Props) {
       setService(s);
       setCopied(false);
     } catch (e) {
-      setError(String(e));
+      setError(fmtError(e));
     } finally {
       setBusy(false);
     }
@@ -92,7 +93,7 @@ export default function McpServiceModal({ hosts, onClose }: Props) {
       setService(s);
       setCopied(false);
     } catch (e) {
-      setError(String(e));
+      setError(fmtError(e));
     }
   };
 
@@ -115,7 +116,7 @@ export default function McpServiceModal({ hosts, onClose }: Props) {
       setRules((prev) => [rule, ...prev]);
       setRuleInput('');
     } catch (e) {
-      setError(String(e));
+      setError(fmtError(e));
     }
   };
 
@@ -125,7 +126,7 @@ export default function McpServiceModal({ hosts, onClose }: Props) {
       await deleteMcpRule(id);
       setRules((prev) => prev.filter((r) => r.id !== id));
     } catch (e) {
-      setError(String(e));
+      setError(fmtError(e));
     }
   };
 

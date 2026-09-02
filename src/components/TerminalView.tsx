@@ -18,6 +18,7 @@ import {
   sessionInput,
 } from '../api';
 import type { Host } from '../types';
+import { fmtError } from '../utils/errors';
 import {
   ActivityIcon,
   FolderIcon,
@@ -293,7 +294,7 @@ export default function TerminalView({
       await connectRef.current();
     })().catch((e) => {
       if (disposed) return;
-      const message = String(e);
+      const message = fmtError(e);
       term.writeln(`\r\n\x1b[31m[连接失败: ${message}]\x1b[0m`);
       setConnecting(false);
       setExited(true);
@@ -352,7 +353,7 @@ export default function TerminalView({
     setConnecting(true);
     termRef.current?.reset();
     connectRef.current().catch((e) => {
-      const message = String(e);
+      const message = fmtError(e);
       termRef.current?.writeln(`\r\n\x1b[31m[重连失败: ${message}]\x1b[0m`);
       setConnecting(false);
       setExited(true);

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { listAuditLogs } from '../api';
 import type { AuditLog } from '../types';
+import { fmtError } from '../utils/errors';
 import Modal from './Modal';
 import { ListIcon } from './Icons';
 
@@ -42,7 +43,7 @@ export default function AuditLogModal({ onClose }: Props) {
 
   useEffect(() => {
     load()
-      .catch((e) => setError(String(e)))
+      .catch((e) => setError(fmtError(e)))
       .finally(() => setLoading(false));
   }, [load]);
 

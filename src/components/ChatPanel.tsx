@@ -18,6 +18,7 @@ import {
   setActiveAiModel,
 } from '../api';
 import { copyToClipboard } from '../utils/clipboard';
+import { fmtError } from '../utils/errors';
 import type { AiModel, HistoryEntry } from '../types';
 import Select, { type SelectOption } from './Select';
 import {
@@ -288,7 +289,7 @@ export default function ChatPanel({
       await setActiveAiModel(providerId, modelId);
       onModelSwitched();
     } catch (err) {
-      updateLastAssistant((m) => ({ ...m, error: String(err) }));
+      updateLastAssistant((m) => ({ ...m, error: fmtError(err) }));
     }
   };
 
@@ -422,14 +423,14 @@ export default function ChatPanel({
     setInput('');
     setBusy(true);
     agentChat(sessionId, text, permissionMode).catch((err) => {
-      updateLastAssistant((m) => ({ ...m, error: String(err) }));
+      updateLastAssistant((m) => ({ ...m, error: fmtError(err) }));
       setBusy(false);
     });
   };
 
   const handleApprove = (toolCallId: string, allow: boolean) => {
     agentApprove(sessionId, toolCallId, allow).catch((err) => {
-      updateLastAssistant((m) => ({ ...m, error: String(err) }));
+      updateLastAssistant((m) => ({ ...m, error: fmtError(err) }));
     });
   };
 

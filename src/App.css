@@ -4803,3 +4803,43 @@ input::placeholder {
   border-color: var(--border-strong);
   opacity: 1;
 }
+
+/* ---------- 统一确认/输入弹窗（ConfirmModal / PromptModal） ---------- */
+
+.confirm-body {
+  padding: 2px 20px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.confirm-text {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.6;
+}
+
+.confirm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.confirm-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.confirm-field input {
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+}
+
+.confirm-field input:focus {
+  border-color: var(--accent);
+}

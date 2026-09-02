@@ -9,6 +9,9 @@ import {
   sftpUpload,
 } from '../api';
 import type { Host } from '../types';
+import { fmtError } from '../utils/errors';
+import ConfirmModal from './ConfirmModal';
+import PromptModal from './PromptModal';
 import {
   DownloadIcon,
   FileIcon,
@@ -70,6 +73,10 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<Entry | null>(null);
+  const [promptState, setPromptState] = useState<
+    { kind: 'mkdir' } | { kind: 'rename'; entry: Entry } | null
+  >(null);
 
   const load = useCallback(
     async (path: string) => {
@@ -84,7 +91,7 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
           setError(res.text || '目录读取失败');
         }
       } catch (e) {
-        setError(String(e));
+        setError(fmtError(e));
       } finally {
         setLoading(false);
       }
@@ -110,7 +117,7 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
         setError(res.text || '操作失败');
       }
     } catch (e) {
-      setError(String(e));
+      setError(fmtError(e));
     } finally {
       setBusy(false);
     }
@@ -130,26 +137,37 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
     await run(() => sftpDownload(host, remote, dest), () => load(cwd));
   };
 
-  const handleDelete = async (entry: Entry) => {
-    if (!window.confirm(`确定删除 ${entry.isDir ? '目录' : '文件'} "${entry.name}" 吗？`)) return;
+  const handleDelete = (entry: Entry) => {
+    setConfirmDelete(entry);
+  };
+
+  const doDelete = async (entry: Entry) => {
+    setConfirmDelete(null);
     const remote = joinPath(cwd, entry.name);
     await run(() => sftpDelete(host, remote), () => load(cwd));
   };
 
-  const handleMkdir = async () => {
-    const name = window.prompt('新建文件夹名称：');
-    if (!name) return;
-    await run(() => sftpMkdir(host, joinPath(cwd, name.trim())), () => load(cwd));
+  const handleMkdir = () => {
+    setPromptState({ kind: 'mkdir' });
   };
 
-  const handleRename = async (entry: Entry) => {
-    const name = window.prompt('重命名为：', entry.name);
-    if (!name || name === entry.name) return;
-    await run(
-      () =>
-        sftpRename(host, joinPath(cwd, entry.name), joinPath(cwd, name.trim())),
-      () => load(cwd),
-    );
+  const handleRename = (entry: Entry) => {
+    setPromptState({ kind: 'rename', entry });
+  };
+
+  const submitPrompt = (value: string) => {
+    const p = promptState;
+    setPromptState(null);
+    if (!p) return;
+    if (p.kind === 'mkdir') {
+      void run(() => sftpMkdir(host, joinPath(cwd, value)), () => load(cwd));
+    } else if (p.kind === 'rename' && value !== p.entry.name) {
+      void run(
+        () =>
+          sftpRename(host, joinPath(cwd, p.entry.name), joinPath(cwd, value)),
+        () => load(cwd),
+      );
+    }
   };
 
   return (
@@ -234,6 +252,27 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
           </div>
         )}
       </div>
+
+      {confirmDelete && (
+        <ConfirmModal
+          title={confirmDelete.isDir ? '删除目录' : '删除文件'}
+          body={`确定删除 ${confirmDelete.isDir ? '目录' : '文件'} "${confirmDelete.name}" 吗？`}
+          confirmText="删除"
+          danger
+          onConfirm={() => doDelete(confirmDelete)}
+          onCancel={() => setConfirmDelete(null)}
+        />
+      )}
+      {promptState && (
+        <PromptModal
+          title={promptState.kind === 'mkdir' ? '新建文件夹' : '重命名'}
+          label={promptState.kind === 'mkdir' ? '文件夹名称' : '新名称'}
+          initialValue={promptState.kind === 'rename' ? promptState.entry.name : ''}
+          placeholder={promptState.kind === 'mkdir' ? '例如 logs' : undefined}
+          onOk={submitPrompt}
+          onCancel={() => setPromptState(null)}
+        />
+      )}
     </aside>
   );
 }

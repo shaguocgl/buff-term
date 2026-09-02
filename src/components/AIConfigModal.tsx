@@ -17,6 +17,8 @@ import type {
   RemoteAiModel,
   TestResult,
 } from '../types';
+import { fmtError } from '../utils/errors';
+import ConfirmModal from './ConfirmModal';
 import Modal from './Modal';
 import { CheckIcon, DownloadIcon, PlusIcon, SparklesIcon, TrashIcon } from './Icons';
 import Select from './Select';
@@ -73,6 +75,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
   const [ruleInput, setRuleInput] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<AiProvider | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AiProvider | null>(null);
   const [form, setForm] = useState<FormState>(() => formFromPreset(PRESETS[0]));
   const [enabled, setEnabled] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -90,7 +93,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
   }, []);
 
   useEffect(() => {
-    load().catch((e) => setError(String(e)));
+    load().catch((e) => setError(fmtError(e)));
     listAiRules()
       .then(setRules)
       .catch(() => {});
@@ -104,7 +107,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
       setRules((prev) => [rule, ...prev]);
       setRuleInput('');
     } catch (err) {
-      setError(String(err));
+      setError(fmtError(err));
     }
   };
 
@@ -113,7 +116,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
       await deleteAiRule(id);
       setRules((prev) => prev.filter((r) => r.id !== id));
     } catch (err) {
-      setError(String(err));
+      setError(fmtError(err));
     }
   };
 
@@ -250,7 +253,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
       await load();
       onSaved();
     } catch (err) {
-      setError(String(err));
+      setError(fmtError(err));
     } finally {
       setSaving(false);
     }
@@ -279,7 +282,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
       });
       setTestResult(result);
     } catch (err) {
-      setTestResult({ ok: false, message: String(err) });
+      setTestResult({ ok: false, message: fmtError(err) });
     } finally {
       setTesting(false);
     }
@@ -305,7 +308,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
       setPickerQuery('');
       setShowPicker(true);
     } catch (err) {
-      setError(String(err));
+      setError(fmtError(err));
     } finally {
       setFetching(false);
     }
@@ -345,14 +348,18 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
     setShowPicker(false);
   };
 
-  const handleDelete = async (p: AiProvider) => {
-    if (!window.confirm(`删除 AI 配置 "${p.name}"？`)) return;
+  const handleDelete = (p: AiProvider) => {
+    setDeleteTarget(p);
+  };
+
+  const doDelete = async (p: AiProvider) => {
+    setDeleteTarget(null);
     try {
       await deleteAiProvider(p.id);
       await load();
       onSaved();
     } catch (err) {
-      setError(String(err));
+      setError(fmtError(err));
     }
   };
 
@@ -375,7 +382,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
       await load();
       onSaved();
     } catch (err) {
-      setError(String(err));
+      setError(fmtError(err));
     }
   };
 
@@ -728,6 +735,17 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
           </form>
         )}
       </div>
+
+      {deleteTarget && (
+        <ConfirmModal
+          title="删除 AI 配置"
+          body={`删除 AI 配置 "${deleteTarget.name}"？`}
+          confirmText="删除"
+          danger
+          onConfirm={() => doDelete(deleteTarget)}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
     </Modal>
   );
 }

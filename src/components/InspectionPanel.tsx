@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { fmtError } from '../utils/errors';
+import ConfirmModal from './ConfirmModal';
 import {
   cancelInspection,
   cancelRemediation,
@@ -64,6 +66,7 @@ export default function InspectionPanel({ host, panelWidth = 620, onClose }: Pro
   const [history, setHistory] = useState<InspectionReport[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [emailConfigured, setEmailConfigured] = useState<boolean | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const currentIdRef = useRef<string | null>(null);
   const runningRef = useRef(false);
   const [remediation, setRemediation] = useState<Remediation | null>(null);
@@ -105,7 +108,7 @@ export default function InspectionPanel({ host, panelWidth = 620, onClose }: Pro
         }
       } catch (e) {
         setStatus('failed');
-        setError(String(e));
+        setError(fmtError(e));
       }
       await refreshHistory();
     },
@@ -153,7 +156,7 @@ export default function InspectionPanel({ host, panelWidth = 620, onClose }: Pro
       setCurrentId(id);
     } catch (e) {
       setStatus('failed');
-      setError(String(e));
+      setError(fmtError(e));
     } finally {
       runningRef.current = false;
     }
@@ -280,10 +283,14 @@ export default function InspectionPanel({ host, panelWidth = 620, onClose }: Pro
     await cancelInspection(currentIdRef.current).catch(() => {});
   };
 
-  const handleDeleteReport = async (id: string) => {
-    if (!window.confirm('确定删除这条巡检报告吗？')) return;
+  const handleDeleteReport = (id: string) => {
+    setConfirmDeleteId(id);
+  };
+
+  const doDeleteReport = async (id: string) => {
+    setConfirmDeleteId(null);
     await deleteInspectionReport(id).catch((e) => {
-      setError(String(e));
+      setError(fmtError(e));
     });
     if (currentIdRef.current === id) {
       currentIdRef.current = null;
@@ -362,7 +369,7 @@ export default function InspectionPanel({ host, panelWidth = 620, onClose }: Pro
       );
     } catch (e) {
       setRemediationBusy(false);
-      setRemediationError(String(e));
+      setRemediationError(fmtError(e));
     }
   };
 
@@ -375,7 +382,7 @@ export default function InspectionPanel({ host, panelWidth = 620, onClose }: Pro
       await executeRemediation(remediationIdRef.current, steps);
     } catch (e) {
       setRemediationBusy(false);
-      setRemediationError(String(e));
+      setRemediationError(fmtError(e));
     }
   };
 
@@ -416,7 +423,7 @@ export default function InspectionPanel({ host, panelWidth = 620, onClose }: Pro
       await retryRemediation(remediationIdRef.current);
     } catch (e) {
       setRemediationBusy(false);
-      setRemediationError(String(e));
+      setRemediationError(fmtError(e));
     }
   };
 
@@ -831,6 +838,17 @@ export default function InspectionPanel({ host, panelWidth = 620, onClose }: Pro
             </div>
           </div>
         </Modal>
+      )}
+
+      {confirmDeleteId && (
+        <ConfirmModal
+          title="删除巡检报告"
+          body="确定删除这条巡检报告吗？"
+          confirmText="删除"
+          danger
+          onConfirm={() => doDeleteReport(confirmDeleteId)}
+          onCancel={() => setConfirmDeleteId(null)}
+        />
       )}
     </aside>
   );

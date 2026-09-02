@@ -8,6 +8,8 @@ import {
   saveTerminalGuardSettings,
 } from '../api';
 import type { TerminalGuardSettings, TerminalRule } from '../types';
+import { fmtError } from '../utils/errors';
+import ConfirmModal from './ConfirmModal';
 import Modal from './Modal';
 import { RefreshIcon, ShieldIcon } from './Icons';
 
@@ -21,6 +23,7 @@ export default function TerminalGuardModal({ onClose }: Props) {
   const [ruleInput, setRuleInput] = useState('');
   const [timeoutInput, setTimeoutInput] = useState('60');
   const [error, setError] = useState<string | null>(null);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
 
   useEffect(() => {
     getTerminalGuardSettings()
@@ -79,20 +82,18 @@ export default function TerminalGuardModal({ onClose }: Props) {
     }
   };
 
-  const handleReset = async () => {
-    if (
-      !window.confirm(
-        '将删除所有预置规则并恢复为默认清单，自定义规则保留。确定吗？',
-      )
-    ) {
-      return;
-    }
+  const handleReset = () => {
+    setShowResetConfirm(true);
+  };
+
+  const doReset = async () => {
+    setShowResetConfirm(false);
     setError(null);
     try {
       const next = await resetTerminalRules();
       setRules(next);
     } catch (e) {
-      setError(String(e));
+      setError(fmtError(e));
     }
   };
 
@@ -230,6 +231,17 @@ export default function TerminalGuardModal({ onClose }: Props) {
 
         {error && <span className="mcp-error">{error}</span>}
       </div>
+
+      {showResetConfirm && (
+        <ConfirmModal
+          title="恢复预置规则"
+          body="将删除所有预置规则并恢复为默认清单，自定义规则保留。确定吗？"
+          confirmText="恢复预置"
+          danger
+          onConfirm={doReset}
+          onCancel={() => setShowResetConfirm(false)}
+        />
+      )}
     </Modal>
   );
 }

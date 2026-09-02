@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { createHost, saveHostPassword, testHostConnection, updateHost } from '../api';
 import type { Host, HostInput, TestResult } from '../types';
+import { fmtError } from '../utils/errors';
 import Modal from './Modal';
 import { EyeIcon, EyeOffIcon, KeyIcon, ShieldIcon } from './Icons';
 
@@ -59,7 +60,7 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
       );
       setTestResult(res);
     } catch (err) {
-      setTestResult({ ok: false, message: String(err) });
+      setTestResult({ ok: false, message: fmtError(err) });
     } finally {
       setTesting(false);
     }
@@ -117,7 +118,7 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
       }
       onSaved();
     } catch (err) {
-      setError(String(err));
+      setError(fmtError(err));
       setSaving(false);
     }
   };
