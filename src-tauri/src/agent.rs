@@ -85,6 +85,10 @@ pub struct AiTool {
     pub args: serde_json::Value,
     pub state: String,
     pub output: Option<String>,
+    /// request/denied 态附带：审批原因（命中规则 / 内置危险 / 模型标记 / 全部审核）
+    pub reason: Option<String>,
+    /// request 态附带：审批超时秒数，超时按拒绝处理
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -106,6 +110,7 @@ struct ToolCallAcc {
 }
 
 /// 统一发出 `ai:tool` 事件，避免 request/running/result/error/denied 五种状态各自重复构造事件体。
+/// reason / timeout_secs 仅审批相关状态（request/denied）携带，其余状态传 None。
 fn emit_tool_state(
     app: &AppHandle,
     session_id: u32,
@@ -113,6 +118,8 @@ fn emit_tool_state(
     args: &serde_json::Value,
     state: &str,
     output: Option<String>,
+    reason: Option<String>,
+    timeout_secs: Option<u64>,
 ) {
     let _ = app.emit(
         "ai:tool",
@@ -123,6 +130,8 @@ fn emit_tool_state(
             args: args.clone(),
             state: state.to_string(),
             output,
+            reason,
+            timeout_secs,
         },
     );
 }
@@ -451,8 +460,13 @@ async fn run_agent_loop(
             let started = Instant::now();
             let args = parse_args(&acc.args);
 
+            // 判定是否需要审批，并记录审批原因（随 request 事件下发，供审批卡片展示）
+            let mut reason: Option<String> = None;
             let need_approval = match permission_mode {
-                PermissionMode::All => true,
+                PermissionMode::All => {
+                    reason = Some("全部审核：所有命令执行前都需要批准".to_string());
+                    true
+                }
                 PermissionMode::None => false,
                 PermissionMode::Smart => {
                     if acc.name != "exec_command" {
@@ -467,24 +481,48 @@ async fn run_agent_loop(
                             .and_then(|c| c.as_str())
                             .unwrap_or("");
                         let c = command.to_ascii_lowercase();
-                        marked
-                            || is_dangerous(command)
-                            || danger_rules
-                                .iter()
-                                .any(|p| !p.trim().is_empty() && c.contains(&p.to_ascii_lowercase()))
+                        if marked {
+                            reason = Some("模型标记该命令需要审批".to_string());
+                            true
+                        } else if is_dangerous(command) {
+                            reason = Some("命中内置危险命令规则".to_string());
+                            true
+                        } else {
+                            match danger_rules.iter().find(|p| {
+                                !p.trim().is_empty() && c.contains(&p.to_ascii_lowercase())
+                            }) {
+                                Some(p) => {
+                                    reason = Some(format!("命中自定义规则：{p}"));
+                                    true
+                                }
+                                None => false,
+                            }
+                        }
                     }
                 }
             };
 
             if need_approval {
-                emit_tool_state(app, session_id, &acc, &args, "request", None);
+                emit_tool_state(
+                    app,
+                    session_id,
+                    &acc,
+                    &args,
+                    "request",
+                    None,
+                    reason.clone(),
+                    Some(APPROVAL_TIMEOUT_SECS),
+                );
 
+                let mut timed_out = false;
                 let decision = loop {
-                    match tokio::time::timeout(Duration::from_secs(600), rx.recv()).await {
+                    match tokio::time::timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), rx.recv())
+                        .await
+                    {
                         Err(_) => {
-                            let msg = "等待审批超时".to_string();
-                            let _ = app.emit("ai:error", AiError { session_id, message: msg.clone() });
-                            return Err(msg);
+                            // 审批超时：按拒绝处理，不终止整个会话
+                            timed_out = true;
+                            break false;
                         }
                         Ok(None) => {
                             let msg = "会话已结束".to_string();
@@ -502,6 +540,11 @@ async fn run_agent_loop(
                 };
 
                 if !decision {
+                    let note = if timed_out {
+                        Some("等待审批超时，已按拒绝处理".to_string())
+                    } else {
+                        reason.clone()
+                    };
                     let _ = insert_audit(db, AuditEntry {
                         session_id,
                         host,
@@ -510,21 +553,21 @@ async fn run_agent_loop(
                         permission_mode: permission_mode.as_str(),
                         approval: "denied",
                         status: "denied",
-                        result: None,
+                        result: note.clone(),
                         duration_ms: started.elapsed().as_millis() as u64,
                     });
-                    emit_tool_state(app, session_id, &acc, &args, "denied", None);
+                    emit_tool_state(app, session_id, &acc, &args, "denied", None, note, None);
                     history.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": acc.id,
-                        "content": "用户拒绝执行该操作",
+                        "content": if timed_out { "等待审批超时，已按拒绝处理" } else { "用户拒绝执行该操作" },
                     }));
                     continue;
                 }
             }
 
             let approval_label = if need_approval { "approved" } else { "auto" };
-            emit_tool_state(app, session_id, &acc, &args, "running", None);
+            emit_tool_state(app, session_id, &acc, &args, "running", None, None, None);
 
             let result = execute_tool(db, russh, host, &acc.name, &args).await;
             match result {
@@ -540,7 +583,16 @@ async fn run_agent_loop(
                         result: Some(output.clone()),
                         duration_ms: started.elapsed().as_millis() as u64,
                     });
-                    emit_tool_state(app, session_id, &acc, &args, "result", Some(output.clone()));
+                    emit_tool_state(
+                        app,
+                        session_id,
+                        &acc,
+                        &args,
+                        "result",
+                        Some(output.clone()),
+                        None,
+                        None,
+                    );
                     history.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": acc.id,
@@ -559,7 +611,16 @@ async fn run_agent_loop(
                         result: Some(err.clone()),
                         duration_ms: started.elapsed().as_millis() as u64,
                     });
-                    emit_tool_state(app, session_id, &acc, &args, "error", Some(err.clone()));
+                    emit_tool_state(
+                        app,
+                        session_id,
+                        &acc,
+                        &args,
+                        "error",
+                        Some(err.clone()),
+                        None,
+                        None,
+                    );
                     history.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": acc.id,
@@ -656,6 +717,8 @@ fn apply_delta(
 
 /// 每台主机最多保留的对话轮数（一轮 = 一次用户提问）。
 const MAX_HISTORY_ROUNDS: usize = 20;
+/// 单个工具审批的等待上限（秒），超时按拒绝处理，不终止会话
+const APPROVAL_TIMEOUT_SECS: u64 = 600;
 
 /// 裁剪对话历史，最多保留最近 `max_rounds` 轮（一轮 = 一次 user 消息及其后续 assistant/tool 消息），
 /// 始终保留首条 system 提示词。

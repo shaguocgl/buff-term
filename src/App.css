@@ -4680,3 +4680,44 @@ input::placeholder {
 .remediation-danger-modal .remediation-actions {
   justify-content: flex-end;
 }
+
+/* ---------- 审批倒计时（AI 工具卡片 / 终端 guard 弹窗共用） ---------- */
+
+.approval-countdown {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.approval-countdown-bar {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--panel-3);
+  overflow: hidden;
+}
+
+.approval-countdown-bar span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--warn);
+  transition: width 0.5s linear;
+}
+
+.approval-countdown-text {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* AI 审批卡片上的命中原因行 */
+.tool-reason {
+  font-size: 11px;
+  color: var(--warn);
+  background: rgba(245, 166, 35, 0.12);
+  border-radius: 6px;
+  padding: 4px 8px;
+  margin-top: 6px;
+}

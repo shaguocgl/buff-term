@@ -31,6 +31,11 @@ interface ToolView {
   args: Record<string, unknown>;
   state: ToolState;
   output?: string;
+  /** 审批原因（命中规则 / 内置危险 / 模型标记 / 全部审核） */
+  reason?: string;
+  /** request 事件到达时刻，用于倒计时 */
+  requestedAt?: number;
+  timeoutSecs?: number;
 }
 
 interface ChatMsg {
@@ -67,6 +72,57 @@ function safeParseArgs(raw: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+// 非命令类工具把参数翻成人话，避免直接展示 JSON
+function describeToolArgs(name: string, args: Record<string, unknown>): string | null {
+  const path = typeof args.path === 'string' ? args.path : null;
+  switch (name) {
+    case 'read_file':
+      return path ? `读取 ${path}` : '读取文件';
+    case 'list_dir':
+      return path ? `列目录 ${path}` : '列目录';
+    case 'resource_usage':
+      return '查看资源概览';
+    case 'query_history': {
+      const metric = typeof args.metric === 'string' ? args.metric : '';
+      return metric ? `查询 ${metric} 趋势` : '查询历史指标趋势';
+    }
+    default:
+      return null;
+  }
+}
+
+// 审批倒计时：request 事件附带 timeout_secs，超时后端按拒绝处理
+function ApprovalCountdown({
+  requestedAt,
+  timeoutSecs,
+}: {
+  requestedAt: number;
+  timeoutSecs: number;
+}) {
+  const [remaining, setRemaining] = useState(() =>
+    Math.max(0, timeoutSecs - Math.floor((Date.now() - requestedAt) / 1000)),
+  );
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setRemaining(
+        Math.max(0, timeoutSecs - Math.floor((Date.now() - requestedAt) / 1000)),
+      );
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [requestedAt, timeoutSecs]);
+  const pct = timeoutSecs > 0 ? Math.max(0, (remaining / timeoutSecs) * 100) : 0;
+  return (
+    <div className="approval-countdown">
+      <div className="approval-countdown-bar">
+        <span style={{ width: `${pct}%` }} />
+      </div>
+      <span className="approval-countdown-text">
+        {remaining > 0 ? `${remaining}s 后未处理将自动拒绝` : '已超时，按拒绝处理'}
+      </span>
+    </div>
+  );
 }
 
 // 消息 ID 使用模块级单调递增序列，避免组件重新挂载后从 0 重新计数，
@@ -206,12 +262,17 @@ export default function ChatPanel({
         updateLastAssistant((m) => {
           const tools = [...m.tools];
           const idx = tools.findIndex((t) => t.id === p.tool_call_id);
+          const prev = idx >= 0 ? tools[idx] : undefined;
           const tool: ToolView = {
             id: p.tool_call_id,
             name: p.name,
             args: p.args,
             state: p.state,
             output: p.output ?? undefined,
+            reason: p.reason ?? prev?.reason,
+            requestedAt: p.state === 'request' ? Date.now() : prev?.requestedAt,
+            timeoutSecs:
+              p.state === 'request' ? p.timeout_secs ?? undefined : prev?.timeoutSecs,
           };
           if (idx >= 0) tools[idx] = tool;
           else tools.push(tool);
@@ -300,13 +361,24 @@ export default function ChatPanel({
           {tool.state === 'error' && '出错'}
         </span>
       </div>
+      {tool.reason && <div className="tool-reason">{tool.reason}</div>}
       <div className="tool-args">
         {typeof tool.args.command === 'string' ? (
           <code className="tool-command">{tool.args.command}</code>
+        ) : describeToolArgs(tool.name, tool.args) ? (
+          <code className="tool-command">{describeToolArgs(tool.name, tool.args)}</code>
         ) : (
           <code>{JSON.stringify(tool.args, null, 2)}</code>
         )}
       </div>
+      {tool.state === 'request' &&
+        tool.requestedAt != null &&
+        tool.timeoutSecs != null && (
+          <ApprovalCountdown
+            requestedAt={tool.requestedAt}
+            timeoutSecs={tool.timeoutSecs}
+          />
+        )}
       {tool.state === 'request' && (
         <div className="tool-actions">
           <button className="btn primary small" onClick={() => handleApprove(tool.id, true)}>

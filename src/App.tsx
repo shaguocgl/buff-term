@@ -200,6 +200,16 @@ function App() {
     };
   }, []);
 
+  // guard 审批弹窗超时自动关闭（后端同时按拒绝处理并写审计，无需前端补发 deny）
+  useEffect(() => {
+    if (!guardApproval) return;
+    const timer = window.setTimeout(
+      () => setGuardApproval(null),
+      Math.max(10, guardApproval.timeout_secs) * 1000,
+    );
+    return () => window.clearTimeout(timer);
+  }, [guardApproval]);
+
   const resolveMcpApproval = async (allow: boolean) => {
     const req = mcpApproval;
     if (!req) return;

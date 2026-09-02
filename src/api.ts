@@ -246,6 +246,10 @@ export interface AiToolPayload {
   args: Record<string, unknown>;
   state: 'request' | 'denied' | 'running' | 'result' | 'error';
   output?: string | null;
+  /** request/denied 态附带：审批原因 */
+  reason?: string | null;
+  /** request 态附带：审批超时秒数，超时按拒绝处理 */
+  timeout_secs?: number | null;
 }
 
 export interface AiDonePayload {

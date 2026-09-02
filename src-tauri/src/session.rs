@@ -252,6 +252,8 @@ impl SessionManager {
         }
         if let Some(approval) = outcome.approval {
             let host_label = format!("{} ({})", session.host.name, session.host.label_address());
+            // 审批超时：超时按拒绝处理并写审计（下限 10s，避免用户来不及反应）
+            let timeout_secs = config.timeout_secs.max(10);
             let _ = app.emit(
                 "terminal:guard-approval",
                 TerminalGuardApproval {
@@ -260,10 +262,9 @@ impl SessionManager {
                     host_label,
                     command: approval.command.clone(),
                     matched_patterns: approval.matched_patterns,
+                    timeout_secs,
                 },
             );
-            // 审批超时：超时按拒绝处理并写审计
-            let timeout_secs = config.timeout_secs.max(10);
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)).await;

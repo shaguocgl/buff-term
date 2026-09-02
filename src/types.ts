@@ -180,6 +180,8 @@ export interface TerminalGuardApproval {
   host_label: string;
   command: string;
   matched_patterns: string[];
+  /** 审批倒计时秒数，超时按拒绝处理 */
+  timeout_secs: number;
 }
 
 export interface McpApprovalRequest {

@@ -850,6 +850,8 @@ pub struct TerminalGuardApproval {
     pub host_label: String,
     pub command: String,
     pub matched_patterns: Vec<String>,
+    /// 审批倒计时秒数，超时按拒绝处理
+    pub timeout_secs: u64,
 }
 
 // ---------- Tauri 命令 ----------
