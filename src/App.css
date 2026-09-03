@@ -1818,6 +1818,72 @@ input::placeholder {
   white-space: nowrap;
 }
 
+/* 可编辑路径输入框（Enter 跳转 / Esc 还原），替换原纯文本路径展示 */
+.sftp-path-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+}
+
+.sftp-path-input:focus {
+  border-color: var(--accent);
+}
+
+/* 传输任务进度条（传输进行中不锁定目录浏览） */
+.sftp-transfers {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+}
+
+.sftp-transfer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sftp-transfer-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sftp-transfer-meta {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.sftp-transfer-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--panel-3);
+  overflow: hidden;
+  margin-top: 5px;
+}
+
+.sftp-transfer-bar span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
 .sftp-actions {
   display: flex;
   gap: 2px;

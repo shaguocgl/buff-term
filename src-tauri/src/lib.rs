@@ -58,6 +58,7 @@ pub fn run() {
             app.manage(remediation::RemediationManager::default());
             app.manage(mcp::McpServiceManager::default());
             app.manage(mcp::ApprovalRegistry::default());
+            app.manage(sftp::SftpTransferRegistry::default());
             // 若上次退出前开启了 MCP 服务，启动时自动恢复
             let mcp_enabled = app
                 .state::<Arc<Db>>()
@@ -99,6 +100,8 @@ pub fn run() {
             sftp::sftp_delete,
             sftp::sftp_mkdir,
             sftp::sftp_rename,
+            sftp::sftp_exists,
+            sftp::sftp_cancel_transfer,
             monitor::monitor_snapshot,
             monitor::monitor_history,
             inspection::start_inspection,

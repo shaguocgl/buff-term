@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import {
+  onSftpProgress,
+  sftpCancelTransfer,
   sftpDelete,
   sftpDownload,
+  sftpExists,
   sftpList,
   sftpMkdir,
   sftpRename,
   sftpUpload,
 } from '../api';
+import type { SftpProgressPayload } from '../api';
 import type { Host } from '../types';
 import { fmtError } from '../utils/errors';
 import ConfirmModal from './ConfirmModal';
@@ -46,6 +50,21 @@ function baseName(p: string) {
   return parts[parts.length - 1] || p;
 }
 
+function formatBytes(n: number): string {
+  if (n >= 1024 * 1024 * 1024) return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${n} B`;
+}
+
+interface Transfer {
+  id: string;
+  name: string;
+  kind: 'upload' | 'download';
+  transferred: number;
+  total: number;
+}
+
 function parseListing(text: string): Entry[] {
   const entries: Entry[] = [];
   for (const line of text.split('\n')) {
@@ -77,6 +96,40 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
   const [promptState, setPromptState] = useState<
     { kind: 'mkdir' } | { kind: 'rename'; entry: Entry } | null
   >(null);
+  // 传输任务独立于 busy：传输期间不锁定浏览/刷新
+  const [transfers, setTransfers] = useState<Record<string, Transfer>>({});
+  const [overwriteTarget, setOverwriteTarget] = useState<{
+    local: string;
+    remote: string;
+  } | null>(null);
+  const [pathInput, setPathInput] = useState('/');
+
+  // 跟随后端 sftp:progress 事件刷新进度条
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    let cancelled = false;
+    onSftpProgress((p: SftpProgressPayload) => {
+      setTransfers((prev) => {
+        const t = prev[p.transfer_id];
+        if (!t) return prev;
+        return {
+          ...prev,
+          [p.transfer_id]: {
+            ...t,
+            transferred: p.transferred,
+            total: p.total || t.total,
+          },
+        };
+      });
+    }).then((fn) => {
+      if (cancelled) fn();
+      else un = fn;
+    });
+    return () => {
+      cancelled = true;
+      un?.();
+    };
+  }, []);
 
   const load = useCallback(
     async (path: string) => {
@@ -87,6 +140,7 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
         if (res.ok) {
           setEntries(parseListing(res.text));
           setCwd(path);
+          setPathInput(path);
         } else {
           setError(res.text || '目录读取失败');
         }
@@ -123,18 +177,70 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
     }
   };
 
+  // 启动一个传输任务：不经过 run()（不置 busy），进度走 sftp:progress 事件
+  const startTransfer = async (
+    kind: 'upload' | 'download',
+    local: string,
+    remote: string,
+  ) => {
+    const id = `t-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const name = kind === 'upload' ? baseName(local) : baseName(remote);
+    setTransfers((prev) => ({
+      ...prev,
+      [id]: { id, name, kind, transferred: 0, total: 0 },
+    }));
+    setError(null);
+    try {
+      const res =
+        kind === 'upload'
+          ? await sftpUpload(host, local, remote, id)
+          : await sftpDownload(host, remote, local, id);
+      if (!res.ok) setError(res.text || '传输失败');
+      else if (kind === 'upload') load(cwd);
+    } catch (e) {
+      const msg = fmtError(e);
+      // 用户主动取消不算错误
+      if (!msg.includes('取消')) setError(msg);
+    } finally {
+      setTransfers((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    }
+  };
+
+  const cancelTransfer = async (id: string) => {
+    try {
+      await sftpCancelTransfer(id);
+    } catch {
+      /* 忽略：任务可能已结束 */
+    }
+  };
+
   const handleUpload = async () => {
     const picked = await open({ multiple: false });
     if (!picked || typeof picked !== 'string') return;
     const remote = joinPath(cwd, baseName(picked));
-    await run(() => sftpUpload(host, picked, remote), () => load(cwd));
+    // 上传前检查远端是否已存在，存在则弹窗确认覆盖
+    let exists = false;
+    try {
+      exists = await sftpExists(host, remote);
+    } catch {
+      exists = false;
+    }
+    if (exists) {
+      setOverwriteTarget({ local: picked, remote });
+      return;
+    }
+    void startTransfer('upload', picked, remote);
   };
 
   const handleDownload = async (entry: Entry) => {
     const dest = await save({ defaultPath: entry.name });
     if (!dest) return;
     const remote = joinPath(cwd, entry.name);
-    await run(() => sftpDownload(host, remote, dest), () => load(cwd));
+    void startTransfer('download', dest, remote);
   };
 
   const handleDelete = (entry: Entry) => {
@@ -173,9 +279,25 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
   return (
     <aside className="sftp-panel" style={{ width: panelWidth }}>
       <div className="sftp-header">
-        <div className="sftp-path" title={cwd}>
-          {cwd}
-        </div>
+        <input
+          className="sftp-path-input"
+          value={pathInput}
+          title={cwd}
+          spellCheck={false}
+          onChange={(e) => setPathInput(e.target.value)}
+          onFocus={() => setPathInput(cwd)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              const target = pathInput.trim();
+              if (target && target.startsWith('/')) load(target);
+              else setPathInput(cwd);
+            } else if (e.key === 'Escape') {
+              setPathInput(cwd);
+              (e.target as HTMLInputElement).blur();
+            }
+          }}
+          onBlur={() => setPathInput(cwd)}
+        />
         <div className="sftp-actions">
           <button className="icon-btn" title="刷新" onClick={() => load(cwd)} disabled={busy}>
             <RefreshIcon size={14} />
@@ -191,6 +313,41 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
           </button>
         </div>
       </div>
+
+      {Object.values(transfers).length > 0 && (
+        <div className="sftp-transfers">
+          {Object.values(transfers).map((t) => {
+            const pct =
+              t.total > 0
+                ? Math.min(100, Math.round((t.transferred / t.total) * 100))
+                : 0;
+            return (
+              <div className="sftp-transfer" key={t.id}>
+                <div className="sftp-transfer-head">
+                  <span className="sftp-transfer-name">
+                    {t.kind === 'upload' ? '↑' : '↓'} {t.name}
+                  </span>
+                  <span className="sftp-transfer-meta">
+                    {t.total > 0
+                      ? `${pct}% · ${formatBytes(t.transferred)}/${formatBytes(t.total)}`
+                      : formatBytes(t.transferred)}
+                  </span>
+                  <button
+                    className="icon-btn"
+                    title="取消传输"
+                    onClick={() => cancelTransfer(t.id)}
+                  >
+                    <XIcon size={12} />
+                  </button>
+                </div>
+                <div className="sftp-transfer-bar">
+                  <span style={{ width: `${pct}%` }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       <div className="sftp-body">
         {loading && <div className="sftp-status">加载中…</div>}
@@ -253,6 +410,20 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
         )}
       </div>
 
+      {overwriteTarget && (
+        <ConfirmModal
+          title="覆盖远端文件"
+          body={`远端已存在 "${baseName(overwriteTarget.remote)}"，覆盖它吗？`}
+          confirmText="覆盖"
+          danger
+          onConfirm={() => {
+            const t = overwriteTarget;
+            setOverwriteTarget(null);
+            void startTransfer('upload', t.local, t.remote);
+          }}
+          onCancel={() => setOverwriteTarget(null)}
+        />
+      )}
       {confirmDelete && (
         <ConfirmModal
           title={confirmDelete.isDir ? '删除目录' : '删除文件'}
