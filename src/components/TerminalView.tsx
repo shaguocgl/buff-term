@@ -211,6 +211,16 @@ export default function TerminalView({
   });
   const fontSizeRef = useRef(fontSize);
   fontSizeRef.current = fontSize;
+  const [autoReconnect, setAutoReconnect] = useState(
+    () => localStorage.getItem('buffterm-autoreconnect') === '1',
+  );
+  const autoReconnectRef = useRef(autoReconnect);
+  autoReconnectRef.current = autoReconnect;
+  const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  // 同一次断开（closed+exited 双事件）只调度一次重连
+  const reconnectScheduledRef = useRef(false);
+  const scheduleReconnectRef = useRef<() => void>(() => {});
 
   onOpenedRef.current = onOpened;
   onFailedRef.current = onFailed;
@@ -308,6 +318,9 @@ export default function TerminalView({
       return;
     }
     sessionIdRef.current = id;
+    // 会话退出时 disableStdin 被置 true，重连成功后必须恢复，
+    // 否则 xterm 自身的按键处理（方向键等）在重连后仍然被禁用。
+    term.options.disableStdin = false;
     setConnecting(false);
     setExited(false);
     onOpenedRef.current(tabKey, id);
@@ -320,6 +333,66 @@ export default function TerminalView({
 
   const connectRef = useRef(connect);
   connectRef.current = connect;
+
+  const cancelPendingReconnect = useCallback(() => {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    reconnectScheduledRef.current = false;
+  }, []);
+
+  // 自动重连：会话结束后按指数退避重试（1s→2s→…→上限 30s，最多 5 次）。
+  // 不 reset 终端以保留 scrollback；重连成功后重置计数。
+  // 注意：后端读循环无法区分网络断开与 shell 正常退出（都发 exited），
+  // 因此该行为由用户显式开启（默认关），退出命令同样会触发重连。
+  const scheduleReconnect = useCallback(() => {
+    if (reconnectScheduledRef.current) return;
+    const attempt = reconnectAttemptsRef.current;
+    if (attempt >= 5) {
+      termRef.current?.writeln(
+        '\r\n\x1b[31m[自动重连失败：已达最大重试次数，请手动重连]\x1b[0m',
+      );
+      return;
+    }
+    reconnectScheduledRef.current = true;
+    const delayMs = Math.min(30_000, 1000 * 2 ** attempt);
+    termRef.current?.writeln(
+      `\r\n\x1b[90m[${Math.round(delayMs / 1000)}s 后自动重连（第 ${attempt + 1}/5 次）…]\x1b[0m`,
+    );
+    reconnectTimerRef.current = window.setTimeout(() => {
+      reconnectTimerRef.current = null;
+      reconnectScheduledRef.current = false;
+      reconnectAttemptsRef.current += 1;
+      setConnecting(true);
+      connectRef.current()
+        .then(() => {
+          reconnectAttemptsRef.current = 0;
+          termRef.current?.writeln('\r\n\x1b[32m[已自动重新连接]\x1b[0m');
+        })
+        .catch((e) => {
+          setConnecting(false);
+          setExited(true);
+          const message = fmtError(e);
+          termRef.current?.writeln(`\r\n\x1b[31m[重连失败: ${message}]\x1b[0m`);
+          scheduleReconnectRef.current();
+        });
+    }, delayMs);
+  }, []);
+  scheduleReconnectRef.current = scheduleReconnect;
+
+  const toggleAutoReconnect = () => {
+    setAutoReconnect((v) => {
+      const next = !v;
+      try {
+        localStorage.setItem('buffterm-autoreconnect', next ? '1' : '0');
+      } catch {
+        /* ignore storage errors */
+      }
+      if (!next) cancelPendingReconnect();
+      return next;
+    });
+  };
 
   useEffect(() => {
     const container = containerRef.current;
@@ -432,7 +505,9 @@ export default function TerminalView({
           term.options.disableStdin = true;
           setExited(true);
           onExitedRef.current(tabKey);
+          if (autoReconnectRef.current) scheduleReconnectRef.current();
         } else if (status === 'closed') {
+          // 手动断开：不自动重连（标签页即将关闭）
           term.writeln(`\r\n\x1b[33m[会话已结束: closed]\x1b[0m`);
           term.options.disableStdin = true;
           setExited(true);
@@ -456,6 +531,11 @@ export default function TerminalView({
     return () => {
       disposed = true;
       disposedRef.current = true;
+      if (reconnectTimerRef.current !== null) {
+        window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      reconnectScheduledRef.current = false;
       observer.disconnect();
       container.removeEventListener('keydown', handleKeyDownCapture, true);
       unData?.();
@@ -508,6 +588,8 @@ export default function TerminalView({
   }, []);
 
   const handleDisconnect = () => {
+    cancelPendingReconnect();
+    reconnectAttemptsRef.current = 0;
     const sid = sessionIdRef.current;
     if (sid !== null) {
       closeSession(sid).catch(() => {});
@@ -516,6 +598,8 @@ export default function TerminalView({
   };
 
   const handleReconnect = () => {
+    cancelPendingReconnect();
+    reconnectAttemptsRef.current = 0;
     setConnecting(true);
     termRef.current?.reset();
     connectRef.current().catch((e) => {
@@ -543,6 +627,20 @@ export default function TerminalView({
           <button className="btn reconnect" onClick={handleReconnect}>
             <RefreshIcon size={13} /> 重连
           </button>
+        )}
+        {exited && !connecting && (
+          <label
+            className="autoreconnect-toggle"
+            title="会话结束后自动尝试重连（最多 5 次，指数退避）。注意：手动输入 exit 退出也会触发"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <input
+              type="checkbox"
+              checked={autoReconnect}
+              onChange={toggleAutoReconnect}
+            />
+            自动重连
+          </label>
         )}
         <div className="terminal-header-actions">
           <button

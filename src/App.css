@@ -4892,3 +4892,24 @@ input::placeholder {
   height: 22px;
   flex: none;
 }
+
+/* 断线自动重连开关（重连按钮旁，仅会话结束后显示） */
+.autoreconnect-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.autoreconnect-toggle:hover {
+  color: var(--text);
+}
+
+.autoreconnect-toggle input {
+  accent-color: var(--accent);
+  margin: 0;
+}

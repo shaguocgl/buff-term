@@ -293,6 +293,36 @@ function App() {
     }
   };
 
+  // 全局快捷键：Cmd/Ctrl+F 终端搜索、Cmd/Ctrl+T 新建主机、Cmd/Ctrl+W 关闭标签、
+  // Ctrl+Tab / Ctrl+Shift+Tab 切换标签。
+  // 注意：macOS 系统菜单可能拦截 Cmd+W/Cmd+T（按键到不了 WebView），此时改用 Ctrl 组合键。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && (e.key === 'f' || e.key === 'F')) {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('buffterm:open-terminal-search'));
+      } else if (mod && (e.key === 't' || e.key === 'T')) {
+        e.preventDefault();
+        setEditingHost(null);
+        setShowForm(true);
+      } else if (mod && (e.key === 'w' || e.key === 'W')) {
+        e.preventDefault();
+        if (activeKey !== null) closeTab(activeKey);
+      } else if (e.ctrlKey && e.key === 'Tab') {
+        e.preventDefault();
+        if (tabs.length === 0) return;
+        const idx = tabs.findIndex((t) => t.key === activeKey);
+        const dir = e.shiftKey ? -1 : 1;
+        const next = tabs[(idx + dir + tabs.length) % tabs.length];
+        if (next) setActiveKey(next.key);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [tabs, activeKey, closeTab]);
+
   const handleDelete = async (host: Host) => {
     setDeleteHostTarget(null);
     try {
