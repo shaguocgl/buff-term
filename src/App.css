@@ -21,6 +21,22 @@
   --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.5);
   --code-bg: #0b0e13;
   --terminal-bg: #0b0e13;
+  /* AI 相关强调色（聊天面板 / 命令面板等） */
+  --accent-ai: #c4b5fd;
+  --accent-ai-strong: #a78bfa;
+  /* 实心强调红（错误徽章、危险标记） */
+  --danger-strong: #e5484d;
+  /* 彩色背景之上的前景（文字 / 开关旋钮） */
+  --on-accent: #ffffff;
+  /* 巡检风险等级 */
+  --risk-low: #30a46c;
+  --risk-medium: #f5a623;
+  --risk-unknown: #8b8d98;
+  /* 常用渐变（引用 var() 的部分在使用处按当前主题解析） */
+  --grad-accent: linear-gradient(135deg, var(--accent), #5b7cff);
+  --grad-green: linear-gradient(90deg, #34d399, #22c55e);
+  --grad-amber: linear-gradient(90deg, #fbbf24, #f59e0b);
+  --grad-red: linear-gradient(90deg, #f87171, #ef4444);
 }
 
 [data-theme='light'] {
@@ -42,6 +58,13 @@
   --shadow-lg: 0 24px 60px rgba(60, 70, 90, 0.18);
   --code-bg: #f4f4f4;
   --terminal-bg: #ffffff;
+  --accent-ai: #7c3aed;
+  --accent-ai-strong: #6d28d9;
+  --danger-strong: #dc2626;
+  --on-accent: #ffffff;
+  --risk-low: #15803d;
+  --risk-medium: #d97706;
+  --risk-unknown: #6b7280;
 }
 
 * {
@@ -363,7 +386,7 @@ button {
   border-radius: 10px;
   display: grid;
   place-items: center;
-  color: #fff;
+  color: var(--on-accent);
   background: transparent;
   box-shadow: 0 6px 18px rgba(109, 141, 255, 0.35);
 }
@@ -606,9 +629,9 @@ button {
 }
 
 .btn.primary {
-  background: linear-gradient(135deg, var(--accent), #5b7cff);
+  background: var(--grad-accent);
   border-color: transparent;
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 600;
   box-shadow: 0 6px 16px rgba(109, 141, 255, 0.25);
 }
@@ -1164,7 +1187,7 @@ input::placeholder {
   border-radius: 9px;
   display: grid;
   place-items: center;
-  color: #c4b5fd;
+  color: var(--accent-ai);
   background: rgba(167, 139, 250, 0.12);
   border: 1px solid rgba(167, 139, 250, 0.28);
 }
@@ -1581,7 +1604,7 @@ input::placeholder {
 
 .switch.on span {
   transform: translateX(18px);
-  background: #fff;
+  background: var(--on-accent);
 }
 
 .test-result {
@@ -2082,15 +2105,15 @@ input::placeholder {
 }
 
 .gauge-fill.green {
-  background: linear-gradient(90deg, #34d399, #22c55e);
+  background: var(--grad-green);
 }
 
 .gauge-fill.amber {
-  background: linear-gradient(90deg, #fbbf24, #f59e0b);
+  background: var(--grad-amber);
 }
 
 .gauge-fill.red {
-  background: linear-gradient(90deg, #f87171, #ef4444);
+  background: var(--grad-red);
 }
 
 .monitor-charts {
@@ -2742,7 +2765,7 @@ input::placeholder {
 }
 
 .btn.ai-toggle.active {
-  color: #c4b5fd;
+  color: var(--accent-ai);
   border-color: rgba(167, 139, 250, 0.4);
   background: rgba(167, 139, 250, 0.1);
 }
@@ -2807,7 +2830,7 @@ input::placeholder {
   border-radius: 8px;
   display: grid;
   place-items: center;
-  color: #c4b5fd;
+  color: var(--accent-ai);
   background: rgba(167, 139, 250, 0.12);
   border: 1px solid rgba(167, 139, 250, 0.28);
 }
@@ -2885,8 +2908,8 @@ input::placeholder {
 }
 
 .msg-user .msg-bubble {
-  background: linear-gradient(135deg, var(--accent), #5b7cff);
-  color: #fff;
+  background: var(--grad-accent);
+  color: var(--on-accent);
   border-radius: 14px 14px 4px 14px;
   padding: 9px 13px;
   font-size: 13.5px;
@@ -3175,13 +3198,13 @@ input::placeholder {
 }
 
 .icon-btn.send {
-  color: #c4b5fd;
+  color: var(--accent-ai);
   background: rgba(167, 139, 250, 0.12);
   border-color: rgba(167, 139, 250, 0.3);
 }
 
 .icon-btn.send:hover {
-  color: #fff;
+  color: var(--on-accent);
   background: rgba(167, 139, 250, 0.25);
 }
 
@@ -3204,7 +3227,7 @@ input::placeholder {
 }
 
 .chat-tip.tip-smart {
-  color: #a78bfa;
+  color: var(--accent-ai-strong);
 }
 
 .chat-tip.tip-all {
@@ -3258,14 +3281,14 @@ input::placeholder {
 }
 
 .chat-control.permission-smart .chat-control-label {
-  color: #c4b5fd;
+  color: var(--accent-ai);
 }
 
 .permission-recommend {
   font-style: normal;
   font-size: 9.5px;
   font-weight: 700;
-  color: #a78bfa;
+  color: var(--accent-ai-strong);
   background: rgba(167, 139, 250, 0.14);
   border: 1px solid rgba(167, 139, 250, 0.35);
   border-radius: 99px;
@@ -3277,7 +3300,7 @@ input::placeholder {
 .chat-control.permission-smart .select-btn {
   border-color: rgba(167, 139, 250, 0.55);
   background: rgba(167, 139, 250, 0.08);
-  color: #c4b5fd;
+  color: var(--accent-ai);
   font-weight: 600;
 }
 
@@ -3342,7 +3365,7 @@ input::placeholder {
 
 .select-btn.open svg {
   transform: rotate(180deg);
-  color: #a78bfa;
+  color: var(--accent-ai-strong);
 }
 
 .select-menu {
@@ -3393,12 +3416,12 @@ input::placeholder {
 }
 
 .select-option.selected {
-  color: #c4b5fd;
+  color: var(--accent-ai);
   font-weight: 600;
 }
 
 .select-option.selected svg {
-  color: #c4b5fd;
+  color: var(--accent-ai);
 }
 
 /* ============ 多模型编辑 ============ */
@@ -3827,7 +3850,7 @@ input::placeholder {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  color: var(--on-accent);
   transition:
     background 0.15s,
     border-color 0.15s;
@@ -4217,7 +4240,7 @@ input::placeholder {
   border-radius: 9px;
   border: 1px solid rgba(232, 80, 80, 0.3);
   background: rgba(232, 80, 80, 0.08);
-  color: #e5484d;
+  color: var(--danger-strong);
   font-size: 12.5px;
 }
 
@@ -4300,25 +4323,25 @@ input::placeholder {
 .risk-badge {
   padding: 2px 8px;
   border-radius: 999px;
-  color: #fff;
+  color: var(--on-accent);
   font-size: 11px;
   font-weight: 700;
 }
 
 .risk-low {
-  background: #30a46c;
+  background: var(--risk-low);
 }
 
 .risk-medium {
-  background: #f5a623;
+  background: var(--risk-medium);
 }
 
 .risk-high {
-  background: #e5484d;
+  background: var(--danger-strong);
 }
 
 .risk-unknown {
-  background: #8b8d98;
+  background: var(--risk-unknown);
 }
 
 .risk-dot {
@@ -4559,7 +4582,7 @@ input::placeholder {
   padding: 1px 6px;
   border-radius: 999px;
   background: rgba(232, 80, 80, 0.12);
-  color: #e5484d;
+  color: var(--danger-strong);
   font-size: 10.5px;
   font-weight: 700;
 }
@@ -4668,7 +4691,7 @@ input::placeholder {
 }
 
 .step-error .remediation-step-state {
-  color: #e5484d;
+  color: var(--danger-strong);
 }
 
 .remediation-result-step .remediation-step-desc {
@@ -4708,7 +4731,7 @@ input::placeholder {
   border-radius: 9px;
   border: 1px solid rgba(232, 80, 80, 0.3);
   background: rgba(232, 80, 80, 0.08);
-  color: #e5484d;
+  color: var(--danger-strong);
   font-size: 12.5px;
 }
 
@@ -4808,7 +4831,7 @@ input::placeholder {
 .chat-scroll-bottom:hover {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .tool-output-wrap {
