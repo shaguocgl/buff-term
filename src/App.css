@@ -453,6 +453,20 @@ button {
   gap: 7px;
 }
 
+/* 搜索框作为 host-list 滚动容器的第一个元素（sticky 吸顶），与卡片共享同一内容盒，
+   因此无论系统滚动条是否占宽，右边缘都必然与卡片对齐 */
+.host-list > .host-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0;
+  padding: 6px 10px 7px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-bottom-color: var(--border-strong);
+  flex: none;
+}
+
 .host-card {
   display: flex;
   align-items: center;
@@ -1251,7 +1265,19 @@ input::placeholder {
 }
 
 .version-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin: -1px 0 8px;
+}
+
+/* 版本按钮在 flex 容器里取消强制整宽，改为可收缩，让出版本号靠右的空间 */
+.version-entry .log-entry {
+  width: auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-bottom: 0;
 }
 
 .version-check {
@@ -1265,11 +1291,13 @@ input::placeholder {
 }
 
 .version-current {
-  display: block;
-  padding-left: 37px;
+  padding-left: 0;
   color: var(--faint);
   font-family: var(--mono);
   font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ============ 操作日志 ============ */
@@ -5006,7 +5034,8 @@ input::placeholder {
 /* ---------- 主机搜索（侧栏 / rail 弹层共用） ---------- */
 
 .host-search {
-  margin: 0 0 8px;
+  /* 左右 12px 与 .host-list 的水平 padding 一致，保证与主机卡片同宽对齐 */
+  margin: 0 12px 8px;
   padding: 6px 10px;
   font-size: 12px;
   color: var(--text);

@@ -730,17 +730,16 @@ function App() {
           </span>
         </div>
 
-        {hosts.length > 0 && (
-          <input
-            className="host-search"
-            placeholder="搜索主机，或按 Cmd+K"
-            value={hostSearch}
-            spellCheck={false}
-            onChange={(e) => setHostSearch(e.target.value)}
-          />
-        )}
-
         <div className="host-list">
+          {hosts.length > 0 && (
+            <input
+              className="host-search"
+              placeholder="搜索主机，或按 Cmd+K"
+              value={hostSearch}
+              spellCheck={false}
+              onChange={(e) => setHostSearch(e.target.value)}
+            />
+          )}
           {hosts.length === 0 && (
             <div className="host-empty">
               <ServerIcon size={28} />
