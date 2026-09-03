@@ -298,13 +298,13 @@ pub async fn sftp_upload(
                 &cancelled,
             )
             .await;
+            // 取消/失败时先清理半成品远端文件，再关流（close 的失败不应阻断清理）
+            if count.is_err() {
+                let _ = sftp.remove_file(&remote).await;
+            }
             dst.close()
                 .await
                 .map_err(|e| format!("关闭远程文件失败: {e}"))?;
-            if count.is_err() {
-                // 取消/失败时清理半成品远程文件（尽力而为）
-                let _ = sftp.remove_file(&remote).await;
-            }
             count
         })
     })

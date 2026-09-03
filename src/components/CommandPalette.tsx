@@ -105,10 +105,14 @@ export default function CommandPalette({
           onKeyDown={(e) => {
             if (e.key === 'ArrowDown') {
               e.preventDefault();
-              setActive((a) => Math.min(a + 1, Math.max(0, items.length - 1)));
+              if (items.length > 0) {
+                setActive((a) => Math.min(a + 1, items.length - 1));
+              }
             } else if (e.key === 'ArrowUp') {
               e.preventDefault();
-              setActive((a) => Math.max(a - 1, 0));
+              if (items.length > 0) {
+                setActive((a) => Math.max(a - 1, 0));
+              }
             } else if (e.key === 'Enter') {
               e.preventDefault();
               if (items[active]) run(items[active]);
