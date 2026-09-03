@@ -6,8 +6,11 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { SearchAddon } from '@xterm/addon-search';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import {
   closeSession,
@@ -91,6 +94,81 @@ function normalizeDims(dims: { cols: number; rows: number } | undefined) {
   return { cols, rows };
 }
 
+const TERMINAL_FONT_KEY = 'buffterm-term-fontsize';
+const clampFontSize = (v: number) => Math.min(24, Math.max(10, v));
+
+// 终端内搜索条：Enter 下一个 / Shift+Enter 上一个 / Esc 关闭
+function TerminalSearchBar({
+  searchAddon,
+  onClose,
+}: {
+  searchAddon: SearchAddon;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [stats, setStats] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  useEffect(() => {
+    const disposable = searchAddon.onDidChangeResults((r) => {
+      if (r.resultCount === 0) setStats('无结果');
+      else if (r.resultIndex >= 0 && r.resultCount > 0)
+        setStats(`${r.resultIndex + 1}/${r.resultCount}`);
+      else setStats(null);
+    });
+    return () => disposable.dispose();
+  }, [searchAddon]);
+
+  const doSearch = (dir: 'next' | 'prev') => {
+    if (!query) return;
+    if (dir === 'next') searchAddon.findNext(query);
+    else searchAddon.findPrevious(query);
+  };
+
+  return (
+    <div className="terminal-search">
+      <input
+        ref={inputRef}
+        value={query}
+        placeholder="搜索终端…"
+        onChange={(e) => setQuery(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            doSearch(e.shiftKey ? 'prev' : 'next');
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            onClose();
+          }
+        }}
+      />
+      {stats && <span className="terminal-search-stats">{stats}</span>}
+      <button
+        className="icon-btn"
+        title="上一个 (Shift+Enter)"
+        onClick={() => doSearch('prev')}
+      >
+        ↑
+      </button>
+      <button
+        className="icon-btn"
+        title="下一个 (Enter)"
+        onClick={() => doSearch('next')}
+      >
+        ↓
+      </button>
+      <button className="icon-btn" title="关闭 (Esc)" onClick={onClose}>
+        ×
+      </button>
+    </div>
+  );
+}
+
 export default function TerminalView({
   host,
   tabKey,
@@ -114,18 +192,64 @@ export default function TerminalView({
   const inputChainRef = useRef<Promise<void>>(Promise.resolve());
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const searchAddonRef = useRef<SearchAddon | null>(null);
   const disposedRef = useRef(false);
   const onOpenedRef = useRef(onOpened);
   const onFailedRef = useRef(onFailed);
   const onExitedRef = useRef(onExited);
   const onDisconnectRef = useRef(onDisconnect);
+  const zoomRef = useRef<(delta: number) => void>(() => {});
   const [connecting, setConnecting] = useState(true);
   const [exited, setExited] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [fontSize, setFontSize] = useState(() => {
+    const parsed = parseInt(
+      localStorage.getItem(TERMINAL_FONT_KEY) || '14',
+      10,
+    );
+    return Number.isFinite(parsed) ? clampFontSize(parsed) : 14;
+  });
+  const fontSizeRef = useRef(fontSize);
+  fontSizeRef.current = fontSize;
 
   onOpenedRef.current = onOpened;
   onFailedRef.current = onFailed;
   onExitedRef.current = onExited;
   onDisconnectRef.current = onDisconnect;
+
+  // 字号缩放：Cmd/Ctrl + = / - / 0，持久化到 localStorage
+  const changeFontSize = useCallback((delta: number) => {
+    setFontSize((prev) => {
+      const next = clampFontSize(delta === 0 ? 14 : prev + delta);
+      try {
+        localStorage.setItem(TERMINAL_FONT_KEY, String(next));
+      } catch {
+        /* ignore storage errors */
+      }
+      return next;
+    });
+  }, []);
+  zoomRef.current = changeFontSize;
+
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    searchAddonRef.current?.clearDecorations();
+    termRef.current?.focus();
+  }, []);
+
+  // 全局 Cmd+F（App.tsx 派发）打开搜索条；仅可见标签页响应
+  useEffect(() => {
+    const onOpenSearch = () => {
+      const container = containerRef.current;
+      if (container && container.offsetParent !== null) setSearchOpen(true);
+    };
+    window.addEventListener('buffterm:open-terminal-search', onOpenSearch);
+    return () =>
+      window.removeEventListener(
+        'buffterm:open-terminal-search',
+        onOpenSearch,
+      );
+  }, []);
 
   const applyDims = useCallback(() => {
     const term = termRef.current;
@@ -208,12 +332,20 @@ export default function TerminalView({
     const term = new Terminal({
       cursorBlink: true,
       fontFamily: 'Menlo, Monaco, "Cascadia Mono", Consolas, monospace',
-      fontSize: 14,
+      fontSize: fontSizeRef.current,
       scrollback: 5000,
       theme: TERMINAL_THEMES[theme],
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    const searchAddon = new SearchAddon();
+    const webLinks = new WebLinksAddon((event, uri) => {
+      event.preventDefault();
+      openUrl(uri).catch(() => {});
+    });
+    term.loadAddon(searchAddon);
+    term.loadAddon(webLinks);
+    searchAddonRef.current = searchAddon;
     term.open(container);
     fit.fit();
     applyDims();
@@ -223,12 +355,32 @@ export default function TerminalView({
 
     // 普通可打印字符直接从原生 keydown 截获发送（避免 WKWebView 丢字），
     // onData 收到对应单字节 ASCII 时直接忽略，避免 xterm 补发导致双显。
+    // Cmd/Ctrl + =/-/0 作为终端字号缩放，其余组合键交给系统/浏览器。
     const handleKeyDownCapture = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.metaKey) {
+        if (event.key === '=' || event.key === '+') {
+          event.preventDefault();
+          event.stopPropagation();
+          zoomRef.current(1);
+          return;
+        }
+        if (event.key === '-') {
+          event.preventDefault();
+          event.stopPropagation();
+          zoomRef.current(-1);
+          return;
+        }
+        if (event.key === '0') {
+          event.preventDefault();
+          event.stopPropagation();
+          zoomRef.current(0);
+          return;
+        }
+        return;
+      }
       if (
         event.isComposing ||
         event.key === 'Process' ||
-        event.ctrlKey ||
-        event.metaKey ||
         event.altKey
       ) {
         return;
@@ -313,11 +465,25 @@ export default function TerminalView({
         closeSession(sid).catch(() => {});
       }
       sessionIdRef.current = null;
+      searchAddon.dispose();
+      webLinks.dispose();
+      searchAddonRef.current = null;
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
     };
   }, [host, tabKey, applyDims, sendInput]);
+
+  // 字号变化时同步 xterm 并重新适配容器
+  useEffect(() => {
+    const term = termRef.current;
+    const fit = fitRef.current;
+    if (term && term.options.fontSize !== fontSize) {
+      term.options.fontSize = fontSize;
+      fit?.fit();
+      applyDims();
+    }
+  }, [fontSize, applyDims]);
 
   // 主题切换时同步更新 xterm 配色（terminal 已在上面 effect 中创建）
   useEffect(() => {
@@ -414,6 +580,12 @@ export default function TerminalView({
             <div className="spinner" />
             <span>正在连接 {host.name}…</span>
           </div>
+        )}
+        {searchOpen && searchAddonRef.current && (
+          <TerminalSearchBar
+            searchAddon={searchAddonRef.current}
+            onClose={closeSearch}
+          />
         )}
       </div>
     </div>
