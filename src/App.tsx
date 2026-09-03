@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
@@ -33,6 +34,7 @@ import AIConfigModal from './components/AIConfigModal';
 import AlertModal from './components/AlertModal';
 import AuditLogModal from './components/AuditLogModal';
 import ChatPanel from './components/ChatPanel';
+import CommandPalette from './components/CommandPalette';
 import ConfirmModal from './components/ConfirmModal';
 import GuardApprovalModal from './components/GuardApprovalModal';
 import HostForm from './components/HostForm';
@@ -73,6 +75,30 @@ interface Tab {
   title: string;
 }
 
+/** 右侧面板类型（chat / sftp / monitor / inspection），none 表示全部收起 */
+type PanelKind = 'chat' | 'sftp' | 'monitor' | 'inspection' | 'none';
+
+const PANEL_STORAGE_KEY = 'buffterm-panel';
+const PANEL_WIDTH_STORAGE_KEY = 'buffterm-panel-width';
+
+function readSavedPanel(): PanelKind {
+  try {
+    const v = localStorage.getItem(PANEL_STORAGE_KEY);
+    if (
+      v === 'chat' ||
+      v === 'sftp' ||
+      v === 'monitor' ||
+      v === 'inspection' ||
+      v === 'none'
+    ) {
+      return v;
+    }
+  } catch {
+    /* ignore storage errors */
+  }
+  return 'chat';
+}
+
 function App() {
   const [hosts, setHosts] = useState<Host[]>([]);
   const [aiProviders, setAiProviders] = useState<AiProvider[]>([]);
@@ -88,6 +114,8 @@ function App() {
   const [sftpOpen, setSftpOpen] = useState(false);
   const [monitorOpen, setMonitorOpen] = useState(false);
   const [inspectionOpen, setInspectionOpen] = useState(false);
+  const [hostSearch, setHostSearch] = useState('');
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingHost, setEditingHost] = useState<Host | null>(null);
   const [deleteHostTarget, setDeleteHostTarget] = useState<Host | null>(null);
@@ -98,7 +126,18 @@ function App() {
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
-  const [rightPanelWidth, setRightPanelWidth] = useState(384);
+  const [rightPanelWidth, setRightPanelWidth] = useState(() => {
+    try {
+      const saved = parseInt(
+        localStorage.getItem(PANEL_WIDTH_STORAGE_KEY) || '',
+        10,
+      );
+      if (Number.isFinite(saved)) return Math.max(280, Math.min(720, saved));
+    } catch {
+      /* ignore storage errors */
+    }
+    return 384;
+  });
   const [resizing, setResizing] = useState(false);
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     try {
@@ -137,6 +176,23 @@ function App() {
   const refreshAi = useCallback(async () => {
     setAiProviders(await listAiProviders());
   }, []);
+
+  // 打开指定面板并持久化选择；连接主机/重连时按上次选择恢复，不再强制切回 AI 面板
+  const applyPanel = useCallback((panel: PanelKind) => {
+    setChatOpen(panel === 'chat');
+    setSftpOpen(panel === 'sftp');
+    setMonitorOpen(panel === 'monitor');
+    setInspectionOpen(panel === 'inspection');
+    try {
+      localStorage.setItem(PANEL_STORAGE_KEY, panel);
+    } catch {
+      /* ignore storage errors */
+    }
+  }, []);
+
+  const restorePanel = useCallback(() => {
+    applyPanel(readSavedPanel());
+  }, [applyPanel]);
 
   useEffect(() => {
     refresh().catch((e) => showToast('error', fmtError(e)));
@@ -258,16 +314,25 @@ function App() {
 
   const activeTab = tabs.find((t) => t.key === activeKey) ?? null;
 
+  // 主机搜索过滤（侧栏与 rail 弹层共用）：按名称 / 地址 / 备注
+  const filteredHosts = useMemo(() => {
+    const q = hostSearch.trim().toLowerCase();
+    if (!q) return hosts;
+    return hosts.filter(
+      (h) =>
+        h.name.toLowerCase().includes(q) ||
+        h.address.toLowerCase().includes(q) ||
+        (h.notes ?? '').toLowerCase().includes(q),
+    );
+  }, [hosts, hostSearch]);
+
   const handleConnect = (host: Host) => {
     const existing = tabs.find(
       (t) => t.host.id === host.id && t.status === 'connected',
     );
     if (existing) {
       setActiveKey(existing.key);
-      setChatOpen(true);
-      setSftpOpen(false);
-      setMonitorOpen(false);
-      setInspectionOpen(false);
+      restorePanel();
       return;
     }
     const key = ++tabSeq.current;
@@ -277,10 +342,7 @@ function App() {
     ]);
     setActiveKey(key);
     setLoadingHostId(host.id);
-    setChatOpen(true);
-    setSftpOpen(false);
-    setMonitorOpen(false);
-    setInspectionOpen(false);
+    restorePanel();
   };
 
   const closeTab = (key: number) => {
@@ -293,14 +355,17 @@ function App() {
     }
   };
 
-  // 全局快捷键：Cmd/Ctrl+F 终端搜索、Cmd/Ctrl+T 新建主机、Cmd/Ctrl+W 关闭标签、
-  // Ctrl+Tab / Ctrl+Shift+Tab 切换标签。
+  // 全局快捷键：Cmd/Ctrl+K 命令面板、Cmd/Ctrl+F 终端搜索、Cmd/Ctrl+T 新建主机、
+  // Cmd/Ctrl+W 关闭标签、Ctrl+Tab / Ctrl+Shift+Tab 切换标签。
   // 注意：macOS 系统菜单可能拦截 Cmd+W/Cmd+T（按键到不了 WebView），此时改用 Ctrl 组合键。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.isComposing) return;
       const mod = e.metaKey || e.ctrlKey;
-      if (mod && (e.key === 'f' || e.key === 'F')) {
+      if (mod && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      } else if (mod && (e.key === 'f' || e.key === 'F')) {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent('buffterm:open-terminal-search'));
       } else if (mod && (e.key === 't' || e.key === 'T')) {
@@ -360,10 +425,12 @@ function App() {
     setResizing(true);
     const startX = event.clientX;
     const startWidth = rightPanelWidth;
+    let latestWidth = startWidth;
     const onMouseMove = (e: globalThis.MouseEvent) => {
       const delta = startX - e.clientX;
       const maxW = window.innerWidth * 0.5;
       const newWidth = Math.max(280, Math.min(maxW, startWidth + delta));
+      latestWidth = newWidth;
       setRightPanelWidth(newWidth);
     };
     const onMouseUp = () => {
@@ -372,6 +439,14 @@ function App() {
       document.removeEventListener('mouseup', onMouseUp);
       document.body.style.userSelect = '';
       document.body.style.cursor = '';
+      try {
+        localStorage.setItem(
+          PANEL_WIDTH_STORAGE_KEY,
+          String(Math.round(latestWidth)),
+        );
+      } catch {
+        /* ignore storage errors */
+      }
     };
     document.body.style.userSelect = 'none';
     document.body.style.cursor = 'col-resize';
@@ -445,13 +520,30 @@ function App() {
               <div className="rail-popover">
                 <div className="rail-popover-title">
                   主机
-                  {hosts.length > 0 && <span className="count">{hosts.length}</span>}
+                  {hosts.length > 0 && (
+                    <span className="count">
+                      {hostSearch.trim()
+                        ? `${filteredHosts.length}/${hosts.length}`
+                        : hosts.length}
+                    </span>
+                  )}
                 </div>
+                {hosts.length > 0 && (
+                  <input
+                    className="host-search"
+                    placeholder="搜索主机…"
+                    value={hostSearch}
+                    spellCheck={false}
+                    onChange={(e) => setHostSearch(e.target.value)}
+                  />
+                )}
                 {hosts.length === 0 ? (
                   <div className="rail-popover-empty">还没有主机</div>
+                ) : filteredHosts.length === 0 ? (
+                  <div className="rail-popover-empty">没有匹配的主机</div>
                 ) : (
                   <div className="rail-host-list">
-                    {hosts.map((host) => {
+                    {filteredHosts.map((host) => {
                       const active = tabs.some(
                         (t) => t.host.id === host.id && t.status === 'connected',
                       );
@@ -631,8 +723,22 @@ function App() {
 
         <div className="section-title">
           <span>主机</span>
-          <span className="count">{hosts.length}</span>
+          <span className="count">
+            {hostSearch.trim()
+              ? `${filteredHosts.length}/${hosts.length}`
+              : hosts.length}
+          </span>
         </div>
+
+        {hosts.length > 0 && (
+          <input
+            className="host-search"
+            placeholder="搜索主机，或按 Cmd+K"
+            value={hostSearch}
+            spellCheck={false}
+            onChange={(e) => setHostSearch(e.target.value)}
+          />
+        )}
 
         <div className="host-list">
           {hosts.length === 0 && (
@@ -643,7 +749,14 @@ function App() {
             </div>
           )}
 
-          {hosts.map((host) => {
+          {hosts.length > 0 && filteredHosts.length === 0 && (
+            <div className="host-empty">
+              <p>没有匹配的主机</p>
+              <span>换个关键词试试</span>
+            </div>
+          )}
+
+          {filteredHosts.map((host) => {
             const active = tabs.some(
               (t) => t.host.id === host.id && t.status === 'connected',
             );
@@ -825,30 +938,14 @@ function App() {
                     sftpOpen={sftpOpen}
                     monitorOpen={monitorOpen}
                     inspectionOpen={inspectionOpen}
-                    onToggleChat={() => {
-                      setChatOpen((v) => !v);
-                      setSftpOpen(false);
-                      setMonitorOpen(false);
-                      setInspectionOpen(false);
-                    }}
-                    onToggleSftp={() => {
-                      setSftpOpen((v) => !v);
-                      setChatOpen(false);
-                      setMonitorOpen(false);
-                      setInspectionOpen(false);
-                    }}
-                    onToggleMonitor={() => {
-                      setMonitorOpen((v) => !v);
-                      setChatOpen(false);
-                      setSftpOpen(false);
-                      setInspectionOpen(false);
-                    }}
-                    onToggleInspection={() => {
-                      setInspectionOpen((v) => !v);
-                      setChatOpen(false);
-                      setSftpOpen(false);
-                      setMonitorOpen(false);
-                    }}
+                    onToggleChat={() => applyPanel(chatOpen ? 'none' : 'chat')}
+                    onToggleSftp={() => applyPanel(sftpOpen ? 'none' : 'sftp')}
+                    onToggleMonitor={() =>
+                      applyPanel(monitorOpen ? 'none' : 'monitor')
+                    }
+                    onToggleInspection={() =>
+                      applyPanel(inspectionOpen ? 'none' : 'inspection')
+                    }
                     onOpened={(key, id) => {
                       setTabs((prev) =>
                         prev.map((t) =>
@@ -856,10 +953,7 @@ function App() {
                         ),
                       );
                       setLoadingHostId(null);
-                      setChatOpen(true);
-                      setSftpOpen(false);
-                      setMonitorOpen(false);
-                      setInspectionOpen(false);
+                      restorePanel();
                     }}
                     onFailed={(key, message) => {
                       setTabs((prev) =>
@@ -904,7 +998,7 @@ function App() {
                   onModelSwitched={() => {
                     refreshAi().catch(() => {});
                   }}
-                  onClose={() => setChatOpen(false)}
+                  onClose={() => applyPanel('none')}
                 />
               )}
 
@@ -912,7 +1006,7 @@ function App() {
                 <SftpPanel
                   key={`sftp-${activeTab.sessionId}`}
                   host={activeTab.host}
-                  onClose={() => setSftpOpen(false)}
+                  onClose={() => applyPanel('none')}
                   panelWidth={rightPanelWidth}
                 />
               )}
@@ -921,7 +1015,7 @@ function App() {
                 <MonitorPanel
                   key={`mon-${activeTab.sessionId}`}
                   host={activeTab.host}
-                  onClose={() => setMonitorOpen(false)}
+                  onClose={() => applyPanel('none')}
                   panelWidth={rightPanelWidth}
                 />
               )}
@@ -930,7 +1024,7 @@ function App() {
                 <InspectionPanel
                   key={`inspect-${activeTab.sessionId}`}
                   host={activeTab.host}
-                  onClose={() => setInspectionOpen(false)}
+                  onClose={() => applyPanel('none')}
                   panelWidth={rightPanelWidth}
                 />
               )}
@@ -949,7 +1043,7 @@ function App() {
             </p>
             <div className="welcome-hints">
               <span>⇥ 多标签会话</span>
-              <span>⛨ 凭据入钥匙串</span>
+              <span>⛨ 凭据本地加密</span>
               <span>⛨ AI 自动审批</span>
             </div>
           </div>
@@ -982,6 +1076,40 @@ function App() {
       )}
 
       {showLogs && <AuditLogModal onClose={() => setShowLogs(false)} />}
+
+      {paletteOpen && (
+        <CommandPalette
+          hosts={hosts}
+          onConnect={handleConnect}
+          onAction={(action) => {
+            switch (action) {
+              case 'new-host':
+                setEditingHost(null);
+                setShowForm(true);
+                break;
+              case 'import-ssh':
+                void handleImport();
+                break;
+              case 'ai-config':
+                setShowAi(true);
+                break;
+              case 'logs':
+                setShowLogs(true);
+                break;
+              case 'mcp':
+                setShowMcp(true);
+                break;
+              case 'guard':
+                setShowTerminalGuard(true);
+                break;
+              case 'alerts':
+                setShowAlerts(true);
+                break;
+            }
+          }}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
 
       {showAlerts && <AlertModal onClose={() => setShowAlerts(false)} />}
 
