@@ -128,6 +128,13 @@ export interface MonitorSnapshot {
   top: TopProc[];
 }
 
+/** 历史指标点（host_metrics 表的精简投影，供监控面板趋势图回填） */
+export interface HostMetricPoint {
+  ts: number;
+  cpu_percent: number;
+  mem_percent: number;
+}
+
 export interface AlertSettings {
   smtp_host?: string | null;
   smtp_port?: number | null;

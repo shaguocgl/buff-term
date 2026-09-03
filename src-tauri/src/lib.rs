@@ -100,6 +100,7 @@ pub fn run() {
             sftp::sftp_mkdir,
             sftp::sftp_rename,
             monitor::monitor_snapshot,
+            monitor::monitor_history,
             inspection::start_inspection,
             inspection::get_inspection_report,
             inspection::list_inspection_reports,

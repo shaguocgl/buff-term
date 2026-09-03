@@ -15,6 +15,7 @@ import type {
   McpService,
   McpServiceInput,
   MonitorSnapshot,
+  HostMetricPoint,
   RemoteAiModel,
   TerminalGuardApproval,
   TerminalGuardSettings,
@@ -68,10 +69,22 @@ export interface SftpResult {
 
 export const sftpList = (host: Host, path: string) =>
   invoke<SftpResult>('sftp_list', { host, path });
-export const sftpDownload = (host: Host, remote: string, local: string) =>
-  invoke<SftpResult>('sftp_download', { host, remote, local });
-export const sftpUpload = (host: Host, local: string, remote: string) =>
-  invoke<SftpResult>('sftp_upload', { host, local, remote });
+export const sftpDownload = (
+  host: Host,
+  remote: string,
+  local: string,
+  transferId: string,
+) => invoke<SftpResult>('sftp_download', { host, remote, local, transferId });
+export const sftpUpload = (
+  host: Host,
+  local: string,
+  remote: string,
+  transferId: string,
+) => invoke<SftpResult>('sftp_upload', { host, local, remote, transferId });
+export const sftpExists = (host: Host, path: string) =>
+  invoke<boolean>('sftp_exists', { host, path });
+export const sftpCancelTransfer = (transferId: string) =>
+  invoke<boolean>('sftp_cancel_transfer', { transferId });
 export const sftpDelete = (host: Host, path: string) =>
   invoke<SftpResult>('sftp_delete', { host, path });
 export const sftpMkdir = (host: Host, path: string) =>
@@ -81,6 +94,18 @@ export const sftpRename = (host: Host, from: string, to: string) =>
 
 export const monitorSnapshot = (host: Host) =>
   invoke<MonitorSnapshot>('monitor_snapshot', { host });
+export const monitorHistory = (hostId: string, windowSecs = 1800) =>
+  invoke<HostMetricPoint[]>('monitor_history', { hostId, windowSecs });
+
+export interface SftpProgressPayload {
+  transfer_id: string;
+  kind: 'upload' | 'download';
+  transferred: number;
+  total: number;
+}
+
+export const onSftpProgress = (cb: (payload: SftpProgressPayload) => void) =>
+  listen<SftpProgressPayload>('sftp:progress', (event) => cb(event.payload));
 
 export const startInspection = (host: Host) =>
   invoke<string>('start_inspection', { host });

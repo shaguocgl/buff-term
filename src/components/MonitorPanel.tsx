@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
-import { monitorSnapshot } from '../api';
+import { monitorHistory, monitorSnapshot } from '../api';
 import type { Host, MonitorSnapshot } from '../types';
 import { fmtError } from '../utils/errors';
 import { ActivityIcon, RefreshIcon, XIcon } from './Icons';
@@ -244,6 +244,22 @@ export default function MonitorPanel({ host, panelWidth = 400, onClose }: Props)
       firstLoad.current = false;
     }
   }, [host]);
+
+  // 面板打开时用后端历史指标回填趋势图（firstLoad 仅此一次），随后进入 5s 轮询。
+  // monitor_snapshot 每次采集都会写库，所以最近 30 分钟的数据已在 host_metrics 里。
+  useEffect(() => {
+    if (!firstLoad.current) return;
+    firstLoad.current = false;
+    monitorHistory(host.id, 1800)
+      .then((rows) => {
+        if (rows.length > 0) {
+          setHistory(
+            rows.map((r) => ({ ts: r.ts, cpu: r.cpu_percent, mem: r.mem_percent })),
+          );
+        }
+      })
+      .catch(() => {});
+  }, [host.id]);
 
   useEffect(() => {
     load();

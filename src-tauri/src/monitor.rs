@@ -1,5 +1,5 @@
 use crate::db::Db;
-use crate::models::{Host, MetricDisk, MetricTop};
+use crate::models::{Host, HostMetric, MetricDisk, MetricTop};
 use crate::russh::RusshManager;
 use crate::util::now;
 use serde::Serialize;
@@ -66,6 +66,20 @@ pub async fn collect_russh(
         .exec(host, MONITOR_SCRIPT, Duration::from_secs(25))
         .await?;
     parse(&out.text, host)
+}
+
+/// 查询主机历史指标（供监控面板打开时回填趋势图）。
+/// 复用 Db::list_metrics，窗口按秒级时间戳取 since，窗口 1 分钟 ~ 24 小时。
+#[tauri::command]
+pub fn monitor_history(
+    db: State<'_, std::sync::Arc<Db>>,
+    host_id: String,
+    window_secs: Option<u64>,
+) -> Result<Vec<HostMetric>, String> {
+    let window = window_secs.unwrap_or(1800).clamp(60, 86_400);
+    let since = now().saturating_sub(window);
+    db.list_metrics(&host_id, since, 5000)
+        .map_err(|e| format!("读取历史指标失败: {e}"))
 }
 
 const MONITOR_SCRIPT: &str = r#"
