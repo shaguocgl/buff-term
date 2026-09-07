@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use tauri::Emitter;
 
 pub struct ExecResult {
     pub text: String,
@@ -14,7 +15,129 @@ pub struct ExecResult {
     pub timed_out: bool,
 }
 
-/// 自定义 Handler：用 ~/.ssh/known_hosts 校验服务器主机密钥
+// ---------- 首次连接主机密钥确认 ----------
+
+/// 全局 AppHandle（在 lib.rs setup 中初始化），供非 Tauri 上下文（SSH handler）发事件。
+static APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+pub fn init_app_handle(app: &tauri::AppHandle) {
+    let _ = APP_HANDLE.set(app.clone());
+}
+
+/// 主机密钥确认的等待结果：std Mutex 存决策（同步读写），Notify 唤醒等待中的连接。
+#[derive(Default)]
+struct HostKeyDecision {
+    decision: Mutex<Option<bool>>,
+    notify: tokio::sync::Notify,
+}
+
+impl HostKeyDecision {
+    fn set(&self, v: bool) {
+        *self.decision.lock().unwrap() = Some(v);
+        self.notify.notify_waiters();
+    }
+    fn get(&self) -> Option<bool> {
+        *self.decision.lock().unwrap()
+    }
+}
+
+/// 首次连接（TOFU）弹窗确认注册表：key = address:port。
+/// 并发连接同一新主机时共享同一个决策，避免重复弹窗；
+/// 用户确认/拒绝/超时后所有等待者得到同一结论。
+#[derive(Default)]
+pub struct HostKeyRegistry {
+    pending: Mutex<HashMap<String, Arc<HostKeyDecision>>>,
+}
+
+impl HostKeyRegistry {
+    /// 注册（或复用）一个待确认项。返回 (决策句柄, 是否首次注册)。
+    fn register(&self, key: &str) -> (Arc<HostKeyDecision>, bool) {
+        let mut map = self.pending.lock().unwrap();
+        if let Some(d) = map.get(key) {
+            return (d.clone(), false);
+        }
+        let d = Arc::new(HostKeyDecision::default());
+        map.insert(key.to_string(), d.clone());
+        (d, true)
+    }
+
+    /// 用户决策：信任 → 记录 known_hosts；拒绝 → 拒绝连接。
+    pub fn resolve(&self, key: &str, trust: bool) -> Result<(), String> {
+        let decision = self
+            .pending
+            .lock()
+            .unwrap()
+            .remove(key)
+            .ok_or_else(|| "确认请求不存在或已超时".to_string())?;
+        decision.set(trust);
+        Ok(())
+    }
+
+    /// 移除一个待确认项（超时清理）。
+    fn remove(&self, key: &str) {
+        self.pending.lock().unwrap().remove(key);
+    }
+}
+
+static APP_REGISTRY: std::sync::OnceLock<HostKeyRegistry> = std::sync::OnceLock::new();
+
+fn host_key_id(address: &str, port: u16) -> String {
+    format!("{address}:{port}")
+}
+
+/// 等待用户对未知主机密钥的确认（超时按拒绝处理）。
+/// 与各连接入口的外层超时统一为 60s，保证「弹窗倒计时 = 后端确认等待 =
+/// 外层连接超时」，避免用户在弹窗剩余时间内确认却已被外层超时杀掉。
+const HOST_KEY_CONFIRM_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn wait_host_key_confirmation(
+    registry: &HostKeyRegistry,
+    key: &str,
+    decision: Arc<HostKeyDecision>,
+    is_new: bool,
+    fingerprint: &str,
+    key_type: &str,
+) -> bool {
+    // 仅首次注册的连接发弹窗事件，并发连接复用同一决策、不重复弹窗
+    if is_new {
+        if let Some(app) = APP_HANDLE.get() {
+            let _ = app.emit(
+                "ssh:host-key-confirm",
+                serde_json::json!({
+                    "key": key,
+                    "host": key.rsplit_once(':').map(|(h, _)| h).unwrap_or(key),
+                    "port": key.rsplit_once(':').map(|(_, p)| p).unwrap_or("22"),
+                    "fingerprint": fingerprint,
+                    "key_type": key_type,
+                }),
+            );
+        }
+    }
+    tokio::time::timeout(HOST_KEY_CONFIRM_TIMEOUT, async {
+        loop {
+            if let Some(d) = decision.get() {
+                return d;
+            }
+            decision.notify.notified().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        // 超时：移除 pending，按拒绝处理
+        registry.remove(key);
+        false
+    })
+}
+
+/// 确认并信任某主机的指纹（Tauri 命令：前端弹窗按钮调用）。
+#[tauri::command]
+pub fn ssh_confirm_host_key(key: String, trust: bool) -> Result<(), String> {
+    let registry = APP_REGISTRY.get_or_init(HostKeyRegistry::default);
+    registry.resolve(&key, trust)
+}
+
+/// 自定义 Handler：用 ~/.ssh/known_hosts 校验服务器主机密钥；
+/// 首次连接（未知主机）会弹窗让用户确认指纹（TOFU + 显式确认），
+/// 已记录主机指纹变化时直接拒绝（严格校验）。
 #[derive(Clone)]
 pub struct ClientHandler {
     host: Host,
@@ -42,21 +165,45 @@ impl client::Handler for ClientHandler {
         ) {
             Ok(true) => Ok(true),
             Ok(false) => {
-                // 首次连接：信任并记录，后续严格校验
-                append_known_host(
-                    &known_hosts,
-                    &self.host.address,
-                    self.host.port,
-                    server_public_key,
-                );
-                Ok(true)
+                // 首次连接：弹窗确认指纹，用户信任后才记录
+                let registry = APP_REGISTRY.get_or_init(HostKeyRegistry::default);
+                let key = host_key_id(&self.host.address, self.host.port);
+                let fingerprint = server_public_key
+                    .fingerprint(ssh_key::HashAlg::Sha256)
+                    .to_string();
+                let key_type = server_public_key.algorithm().to_string();
+                let (decision, is_new) = registry.register(&key);
+                if wait_host_key_confirmation(
+                    &registry,
+                    &key,
+                    decision,
+                    is_new,
+                    &fingerprint,
+                    &key_type,
+                )
+                .await
+                {
+                    append_known_host(
+                        &known_hosts,
+                        &self.host.address,
+                        self.host.port,
+                        server_public_key,
+                    );
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
             }
             Err(_) => Ok(false),
         }
     }
 }
 
-/// 首次连接：把主机指纹追加到 known_hosts（TOFU，等同 ssh accept-new），
+/// 进程内 known_hosts 追加锁：多个首次连接并发写同一文件时串行化，
+/// 并用「临时文件 + rename」保证原子性，避免交错写坏文件。
+static KNOWN_HOSTS_LOCK: Mutex<()> = Mutex::new(());
+
+/// 首次连接：把主机指纹追加到 known_hosts（TOFU + 用户确认），
 /// 之后再次连接会严格校验，指纹变化会立即被拒绝。
 fn append_known_host(path: &PathBuf, host: &str, port: u16, key: &keys::PublicKey) {
     let Ok(openssh) = key.to_openssh() else {
@@ -68,16 +215,31 @@ fn append_known_host(path: &PathBuf, host: &str, port: u16, key: &keys::PublicKe
         format!("[{host}]:{port}")
     };
     let line = format!("{hostname} {openssh}\n");
+    let _guard = KNOWN_HOSTS_LOCK.lock().unwrap();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        use std::io::Write;
-        let _ = file.write_all(line.as_bytes());
+    // 读取现有内容（不存在则视为空），追加后原子替换
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    // 已记录过该主机（并发首次连接共享同一决策时可能重复触发）→ 跳过，避免重复行
+    let prefix = format!("{hostname} ");
+    if existing.lines().any(|l| l.starts_with(&prefix)) {
+        return;
+    }
+    let tmp = path.with_extension("known_hosts.tmp");
+    let content = format!("{existing}{line}");
+    if std::fs::write(&tmp, content.as_bytes()).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    } else {
+        // 临时文件写入失败时退化为直接追加（尽力而为）
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            use std::io::Write;
+            let _ = file.write_all(line.as_bytes());
+        }
     }
 }
 
@@ -114,16 +276,30 @@ impl RusshManager {
             match exec_on(handle, command, timeout).await {
                 Ok(r) => return Ok(r),
                 Err(_) => {
-                    // 连接失效，丢弃并重连
                     *guard = None;
+                    // 写命令失败可能是「请求已提交后连接中断」：远端可能已执行，
+                    // 重连重试会造成重复副作用，因此写操作一律不自动重试
+                    if crate::safety::is_write_operation(command) {
+                        return Err(
+                            "连接在命令执行期间中断。该命令为写操作，为避免重复执行已停止，请人工确认远端状态后重试"
+                                .to_string(),
+                        );
+                    }
                 }
             }
         }
 
         let mut handle = connect(host).await?;
-        let result = exec_on(&mut handle, command, timeout).await?;
-        *guard = Some(handle);
-        Ok(result)
+        let result = exec_on(&mut handle, command, timeout).await;
+        match result {
+            Ok(_) => {
+                *guard = Some(handle);
+            }
+            Err(_) => {
+                *guard = None;
+            }
+        }
+        result
     }
 
     /// 测试主机连接：连接 + 认证，成功返回提示
@@ -133,11 +309,12 @@ impl RusshManager {
         password: Option<String>,
     ) -> Result<String, String> {
         let _handle = tokio::time::timeout(
-            Duration::from_secs(10),
+            // 需覆盖首次连接的主机指纹确认窗口（60s）
+            Duration::from_secs(60),
             do_connect(host, password),
         )
         .await
-        .map_err(|_| "连接超时（10 秒）".to_string())??;
+        .map_err(|_| "连接超时（60 秒）".to_string())??;
         Ok(format!(
             "连接成功（{}@{}:{}）",
             host.username, host.address, host.port
@@ -146,9 +323,10 @@ impl RusshManager {
 }
 
 async fn connect(host: &Host) -> Result<Handle<ClientHandler>, String> {
-    tokio::time::timeout(Duration::from_secs(15), do_connect(host, None))
+    // 需覆盖首次连接的主机指纹确认窗口（60s）
+    tokio::time::timeout(Duration::from_secs(60), do_connect(host, None))
         .await
-        .map_err(|_| "SSH 连接超时（15 秒）".to_string())?
+        .map_err(|_| "SSH 连接超时（60 秒）".to_string())?
 }
 
 pub(crate) async fn do_connect(
@@ -220,6 +398,10 @@ pub(crate) async fn do_connect(
     Ok(session)
 }
 
+/// exec 输出累积上限（8MB）：超出后停止累积并在结果中标注截断，
+/// 防止失控命令的输出撑爆内存。
+const MAX_EXEC_OUTPUT: usize = 8 * 1024 * 1024;
+
 async fn exec_on(
     handle: &mut Handle<ClientHandler>,
     command: &str,
@@ -237,6 +419,7 @@ async fn exec_on(
     let mut stdout = Vec::new();
     let mut exit_code = None;
     let mut timed_out = false;
+    let mut truncated = false;
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -252,23 +435,65 @@ async fn exec_on(
             }
         };
         match msg {
-            Some(ChannelMsg::Data { data }) => stdout.extend_from_slice(&data),
-            Some(ChannelMsg::ExtendedData { data, .. }) => stdout.extend_from_slice(&data),
+            Some(ChannelMsg::Data { data }) => {
+                if stdout.len() + data.len() > MAX_EXEC_OUTPUT {
+                    let room = MAX_EXEC_OUTPUT.saturating_sub(stdout.len());
+                    stdout.extend_from_slice(&data[..room]);
+                    truncated = true;
+                } else {
+                    stdout.extend_from_slice(&data);
+                }
+            }
+            Some(ChannelMsg::ExtendedData { data, .. }) => {
+                if stdout.len() + data.len() > MAX_EXEC_OUTPUT {
+                    let room = MAX_EXEC_OUTPUT.saturating_sub(stdout.len());
+                    stdout.extend_from_slice(&data[..room]);
+                    truncated = true;
+                } else {
+                    stdout.extend_from_slice(&data);
+                }
+            }
             Some(ChannelMsg::ExitStatus { exit_status }) => exit_code = Some(exit_status),
             Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
             _ => {}
         }
     }
+    if timed_out {
+        // 超时：向远端发送 KILL 信号尽力终止命令，避免留下孤儿进程
+        let _ = channel.signal(russh::Sig::KILL).await;
+    }
     let _ = channel.close().await;
+    let mut text = String::from_utf8_lossy(&stdout).to_string();
+    if truncated {
+        text.push_str("\n[输出超过 8MB，已截断]");
+    }
     Ok(ExecResult {
-        text: String::from_utf8_lossy(&stdout).to_string(),
+        text,
         exit_code,
         timed_out,
     })
 }
 
+/// 跨平台用户主目录：优先 HOME（macOS/Linux），Windows 回退 USERPROFILE / HOMEDRIVE+HOMEPATH。
+fn home_dir() -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return home;
+        }
+    }
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        if !profile.is_empty() {
+            return profile;
+        }
+    }
+    match (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+        (Ok(drive), Ok(path)) => format!("{drive}{path}"),
+        _ => String::new(),
+    }
+}
+
 fn default_key_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = home_dir();
     for name in ["id_ed25519", "id_ecdsa", "id_rsa"] {
         let p = format!("{home}/.ssh/{name}");
         if std::path::Path::new(&p).exists() {
@@ -279,5 +504,5 @@ fn default_key_path() -> String {
 }
 
 fn default_known_hosts_path() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".ssh/known_hosts")
+    PathBuf::from(home_dir()).join(".ssh/known_hosts")
 }

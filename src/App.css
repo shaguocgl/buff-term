@@ -4079,6 +4079,41 @@ input::placeholder {
   margin-top: 4px;
 }
 
+/* 主机指纹确认弹窗 */
+
+.hostkey-fingerprint {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--panel-3);
+  border: 1px solid var(--border);
+}
+
+.hostkey-fingerprint .hostkey-type {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.hostkey-fingerprint code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+  word-break: break-all;
+  user-select: text;
+}
+
+.hostkey-tip {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
 /* 终端危险命令拦截 */
 
 .guard-approval-icon {

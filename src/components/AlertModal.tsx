@@ -58,7 +58,7 @@ export default function AlertModal({ onClose }: Props) {
       const res = await testAlertSettings(settings);
       setTestResult(`${res.ok ? '✓' : '!'} ${res.message}`);
     } catch (e) {
-      setTestResult(`! ${e}`);
+      setTestResult(`! ${fmtError(e)}`);
     } finally {
       setTesting(false);
     }

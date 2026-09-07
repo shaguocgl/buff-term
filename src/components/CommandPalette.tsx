@@ -77,6 +77,13 @@ export default function CommandPalette({
     setActive(0);
   }, [query]);
 
+  // 列表缩短（主机删除/过滤）时避免选中项越界
+  useEffect(() => {
+    if (active >= items.length && items.length > 0) {
+      setActive(Math.max(0, items.length - 1));
+    }
+  }, [items.length, active]);
+
   useEffect(() => {
     const el = listRef.current?.querySelector(`[data-idx="${active}"]`);
     el?.scrollIntoView({ block: 'nearest' });

@@ -14,13 +14,27 @@ pub struct TestResult {
 
 #[tauri::command]
 pub fn get_alert_settings(db: State<'_, Arc<Db>>) -> Result<AlertSettings, String> {
-    db.get_alert_settings()
-        .map_err(|e| format!("读取邮件设置失败: {e}"))
+    let mut settings = db
+        .get_alert_settings()
+        .map_err(|e| format!("读取邮件设置失败: {e}"))?;
+    // SMTP 密码加密存凭据表，读取时解密回填供前端展示
+    if settings.smtp_password.is_none() {
+        settings.smtp_password = crate::credentials::get_smtp_password();
+    }
+    Ok(settings)
 }
 
 #[tauri::command]
 pub fn save_alert_settings(db: State<'_, Arc<Db>>, settings: AlertSettings) -> Result<(), String> {
-    db.save_alert_settings(&settings)
+    // 密码单独加密存储，不随 JSON 明文落库
+    if let Some(password) = settings.smtp_password.clone() {
+        if !password.trim().is_empty() {
+            crate::credentials::save_smtp_password(&password)?;
+        }
+    }
+    let mut to_save = settings;
+    to_save.smtp_password = None;
+    db.save_alert_settings(&to_save)
         .map_err(|e| format!("保存邮件设置失败: {e}"))
 }
 
@@ -60,7 +74,12 @@ pub(crate) async fn send_html_email(
         .smtp_username
         .clone()
         .ok_or_else(|| "未配置 SMTP 用户名".to_string())?;
-    let password = settings.smtp_password.clone().unwrap_or_default();
+    let password = settings
+        .smtp_password
+        .clone()
+        .filter(|p| !p.trim().is_empty())
+        .or_else(crate::credentials::get_smtp_password)
+        .unwrap_or_default();
     let from = settings
         .smtp_from
         .clone()
@@ -103,8 +122,10 @@ pub(crate) async fn send_html_email(
             smtp_builder.tls(Tls::Required(params)).build()
         }
     };
-    transport
-        .send(&email)
+    // lettre 的 send 是同步阻塞调用（网络 IO），放到 spawn_blocking 避免卡住 tokio worker
+    tokio::task::spawn_blocking(move || transport.send(&email))
+        .await
+        .map_err(|e| format!("邮件发送线程异常: {e}"))?
         .map_err(|e| format!("HTML 邮件发送失败: {e}"))?;
     Ok(())
 }

@@ -158,7 +158,7 @@ export interface McpService {
 export interface McpServiceInput {
   enabled: boolean;
   host_ids: string[];
-  permission_mode: string;
+  permission_mode: McpService['permission_mode'];
 }
 
 export interface McpRule {
@@ -196,6 +196,16 @@ export interface McpApprovalRequest {
   host: string;
   host_label: string;
   command: string;
+  /** 审批倒计时秒数，超时按拒绝处理 */
+  timeout_secs?: number;
+}
+
+export interface HostKeyConfirmRequest {
+  key: string;
+  host: string;
+  port: string;
+  fingerprint: string;
+  key_type: string;
 }
 
 export type InspectionStatus =

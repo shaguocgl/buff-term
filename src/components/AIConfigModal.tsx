@@ -55,6 +55,7 @@ interface FormState {
   preset: string;
   name: string;
   base_url: string;
+  protocol: string;
   models: FormModel[];
   apiKey: string;
 }
@@ -64,6 +65,7 @@ function formFromPreset(preset: Preset): FormState {
     preset: preset.name,
     name: preset.name,
     base_url: preset.base_url,
+    protocol: 'openai-compatible',
     models: [],
     apiKey: '',
   };
@@ -138,6 +140,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
       preset: '自定义',
       name: p.name,
       base_url: p.base_url,
+      protocol: p.protocol,
       models: p.models.map((m) => ({
         id: m.id,
         label: m.label,
@@ -162,6 +165,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
         preset: '自定义',
         name: '',
         base_url: '',
+        protocol: 'openai-compatible',
         models: [],
         apiKey: '',
       });
@@ -243,6 +247,8 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
         {
           name: form.name.trim(),
           base_url: form.base_url.trim(),
+          // 保留 protocol（编辑时后端默认值会覆盖为 openai-compatible，这里显式传回）
+          protocol: form.protocol || 'openai-compatible',
           enabled,
           models,
           ...(form.apiKey.trim() ? { api_key: form.apiKey.trim() } : {}),
@@ -661,7 +667,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
               )}
 
               {form.models.map((m, idx) => (
-                <div className="model-row" key={idx}>
+                <div className="model-row" key={m.id ?? `model-${idx}`}>
                   <input
                     value={m.label}
                     placeholder="显示名称，如 DeepSeek V4 Flash"

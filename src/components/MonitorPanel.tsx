@@ -7,6 +7,8 @@ import { ActivityIcon, RefreshIcon, XIcon } from './Icons';
 interface Props {
   host: Host;
   panelWidth?: number;
+  /** 面板隐藏时保持挂载但暂停 5s 轮询（避免后台无效采集） */
+  hidden?: boolean;
   onClose: () => void;
 }
 
@@ -220,17 +222,23 @@ function formatAgo(sec: number): string {
   return `${Math.round(minutes / 60)}小时前`;
 }
 
-export default function MonitorPanel({ host, panelWidth = 400, onClose }: Props) {
+export default function MonitorPanel({
+  host,
+  panelWidth = 400,
+  hidden = false,
+  onClose,
+}: Props) {
   const [snap, setSnap] = useState<MonitorSnapshot | null>(null);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  // 首次加载默认 true，避免面板打开瞬间出现空白
+  const [loading, setLoading] = useState(true);
   const firstLoad = useRef(true);
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const s = await monitorSnapshot(host);
+      const s = await monitorSnapshot(host.id);
       setSnap(s);
       setHistory((prev) => {
         const next = [...prev, { ts: Date.now() / 1000, cpu: s.cpu_percent, mem: s.mem.percent }];
@@ -242,6 +250,7 @@ export default function MonitorPanel({ host, panelWidth = 400, onClose }: Props)
       setError(fmtError(e));
     } finally {
       firstLoad.current = false;
+      setLoading(false);
     }
   }, [host]);
 
@@ -261,14 +270,19 @@ export default function MonitorPanel({ host, panelWidth = 400, onClose }: Props)
       .catch(() => {});
   }, [host.id]);
 
+  // 面板隐藏时暂停轮询（不再后台采集），重新可见时立即刷新一次
   useEffect(() => {
+    if (hidden) return;
     load();
     const timer = window.setInterval(load, 5000);
     return () => window.clearInterval(timer);
-  }, [load]);
+  }, [load, hidden]);
 
   return (
-    <aside className="monitor-panel" style={{ width: panelWidth }}>
+    <aside
+      className="monitor-panel"
+      style={{ width: panelWidth, display: hidden ? 'none' : undefined }}
+    >
       <div className="sftp-header">
         <div className="sftp-path">
           <ActivityIcon size={14} /> 资源监控（每 5 秒刷新）
@@ -332,7 +346,7 @@ export default function MonitorPanel({ host, panelWidth = 400, onClose }: Props)
             <div className="monitor-procs">
               {snap.top.map((p, idx) => (
                 <ProcRow
-                  key={idx}
+                  key={`${p.cmd}-${p.cpu}-${p.mem}-${idx}`}
                   rank={idx + 1}
                   user={p.user}
                   cpu={p.cpu}

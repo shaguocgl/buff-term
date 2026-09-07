@@ -63,16 +63,7 @@ pub fn save_ai_provider(
     id: Option<String>,
 ) -> Result<AiProvider, String> {
     let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let exists = db
-        .list_ai_providers()
-        .map_err(|e| format!("读取 AI 配置失败: {e}"))?
-        .iter()
-        .any(|p| p.id == id);
 
-    if input.enabled {
-        db.disable_all_ai_providers()
-            .map_err(|e| format!("更新 AI 配置失败: {e}"))?;
-    }
     if let Some(key) = &input.api_key {
         if !key.trim().is_empty() {
             credentials::save_api_key(&id, key)?;
@@ -88,13 +79,6 @@ pub fn save_ai_provider(
         created_at: now(),
         models: Vec::new(),
     };
-    if exists {
-        db.update_ai_provider(&provider)
-            .map_err(|e| format!("更新 AI 配置失败: {e}"))?;
-    } else {
-        db.insert_ai_provider(&provider)
-            .map_err(|e| format!("保存 AI 配置失败: {e}"))?;
-    }
 
     // 模型列表：至少保留一个有效模型，默认激活第一个
     let models: Vec<AiModel> = input
@@ -111,8 +95,9 @@ pub fn save_ai_provider(
             }
         })
         .collect();
-    db.replace_ai_models(&id, &models)
-        .map_err(|e| format!("保存模型列表失败: {e}"))?;
+    // 禁用其他提供方 + upsert 提供方 + 全量替换模型，放在同一事务里原子完成
+    db.save_ai_provider_tx(&provider, &models, input.enabled)
+        .map_err(|e| format!("保存 AI 配置失败: {e}"))?;
 
     db.list_ai_providers()
         .map_err(|e| format!("读取 AI 配置失败: {e}"))?
@@ -141,9 +126,7 @@ pub fn set_active_ai_model(
 
 #[tauri::command]
 pub fn set_active_ai_provider(db: State<'_, Arc<Db>>, provider_id: String) -> Result<(), String> {
-    db.disable_all_ai_providers()
-        .map_err(|e| format!("切换平台失败: {e}"))?;
-    db.set_ai_provider_enabled(&provider_id, true)
+    db.activate_ai_provider_tx(&provider_id)
         .map_err(|e| format!("切换平台失败: {e}"))
 }
 
@@ -183,21 +166,45 @@ pub struct RemoteAiModel {
 }
 
 /// 解析 API Key：表单传入的优先，否则回退到 keychain 中已保存的（编辑场景）。
-/// 与 test_ai_provider 不同，这里允许 key 为空（Ollama 等本地服务无需鉴权）。
-fn resolve_api_key(api_key: Option<String>, id: Option<String>) -> String {
-    match api_key {
-        Some(k) if !k.trim().is_empty() => k,
-        _ => id
-            .as_deref()
-            .and_then(credentials::get_api_key)
-            .unwrap_or_default(),
+/// 安全约束：仅当传入的 base_url 与库中该 provider 记录的 base_url 一致时才允许
+/// 回退到已保存的 Key，防止把本地保存的 API Key 发送到任意服务器（凭据重定向）。
+fn resolve_api_key(
+    db: &Db,
+    base_url: &str,
+    api_key: Option<String>,
+    id: Option<String>,
+) -> Result<String, String> {
+    if let Some(k) = api_key {
+        if !k.trim().is_empty() {
+            return Ok(k);
+        }
     }
+    if let Some(id) = id {
+        if let Some(provider) = db
+            .get_ai_provider(&id)
+            .map_err(|e| format!("读取 AI 配置失败: {e}"))?
+        {
+            let saved = provider.base_url.trim_end_matches('/');
+            let given = base_url.trim_end_matches('/');
+            if saved == given {
+                if let Some(key) = credentials::get_api_key(&id) {
+                    return Ok(key);
+                }
+            } else {
+                return Err(
+                    "Base URL 与已保存配置不一致，请显式输入 API Key 后再测试".to_string()
+                );
+            }
+        }
+    }
+    Ok(String::new())
 }
 
 /// 拉取远端 OpenAI 兼容平台的可用模型列表（GET {base_url}/models）。
 /// 返回结果按 model id 升序去重。错误信息按 HTTP 状态分层，便于前端提示。
 #[tauri::command]
 pub async fn list_remote_ai_models(
+    db: State<'_, Arc<Db>>,
     base_url: String,
     api_key: Option<String>,
     id: Option<String>,
@@ -207,7 +214,7 @@ pub async fn list_remote_ai_models(
         return Err("请先填写 Base URL".to_string());
     }
     let url = format!("{}/models", base.trim_end_matches('/'));
-    let key = resolve_api_key(api_key, id);
+    let key = resolve_api_key(&db, base, api_key, id)?;
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -281,18 +288,14 @@ pub struct TestResult {
 
 #[tauri::command]
 pub async fn test_ai_provider(
+    db: State<'_, Arc<Db>>,
     base_url: String,
     model: String,
     api_key: Option<String>,
     id: Option<String>,
 ) -> Result<TestResult, String> {
-    let key = match api_key {
-        Some(k) if !k.trim().is_empty() => k,
-        _ => id
-            .as_deref()
-            .and_then(credentials::get_api_key)
-            .unwrap_or_default(),
-    };
+    let base = base_url.trim();
+    let key = resolve_api_key(&db, base, api_key, id)?;
     if key.is_empty() {
         return Ok(TestResult {
             ok: false,
@@ -300,7 +303,7 @@ pub async fn test_ai_provider(
         });
     }
 
-    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()

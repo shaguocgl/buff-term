@@ -8,14 +8,35 @@ use crate::russh::RusshManager;
 use crate::safety::{normalize_tool, sanitize};
 use crate::util::{format_exec_output, now, shq};
 
-pub(crate) fn system_prompt(host: &Host, provider: &AiProvider, model: &str) -> String {
+pub(crate) fn system_prompt(
+    host: &Host,
+    provider: &AiProvider,
+    model: &str,
+    permission_mode: crate::models::PermissionMode,
+) -> String {
+    // 审批规则的说明必须与后端实际判定一致，避免误导模型：
+    // - all：全部需要批准；smart：只读自动执行，写/危险命令需批准；none：直接执行
+    let approval_rule = match permission_mode {
+        crate::models::PermissionMode::All => {
+            "所有 exec_command 都会经过用户批准，获批后才执行，请先说明意图。".to_string()
+        }
+        crate::models::PermissionMode::Smart => {
+            "exec_command 中只读命令会自动执行；写操作（修改、删除、安装、下载等）、\
+             命中危险规则或你标记 requires_approval 的命令会经过用户批准，获批后才执行，\
+             请先说明意图。".to_string()
+        }
+        crate::models::PermissionMode::None => {
+            "exec_command 会直接执行、不再逐条审批；但破坏性操作（删除、格式化、改权限、\
+             停服务等）仍应明确提示风险并给出命令原文。".to_string()
+        }
+    };
     format!(
         "你是 buffTerm，运行在用户本地的 SSH 管理工具中，帮助用户管理远程服务器。\n\
          当前由 {} 平台提供能力，当前配置的底层模型是 {}。\n\
          当前连接的服务器：{}（{}@{}:{}）\n\
          可用工具：exec_command（执行命令）、read_file（读文件）、list_dir（列目录）、resource_usage（资源占用）、query_history（查询历史指标趋势）。\n\
          规则：\n\
-         1. 所有 exec_command 都会经过用户批准，获批后才执行，请先说明意图。\n\
+         1. {}\n\
          2. 命令输出可能被截断，只基于已有信息回答，不要编造。\n\
          3. 遇到破坏性操作（删除、格式化、改权限、停服务等）时，明确提示风险并给出命令原文。\n\
          4. 使用中文回答，简洁、专业、有条理。\n\
@@ -36,6 +57,7 @@ pub(crate) fn system_prompt(host: &Host, provider: &AiProvider, model: &str) -> 
         host.username,
         host.address,
         host.port,
+        approval_rule,
         provider.name,
         model
     )
@@ -171,7 +193,11 @@ pub(crate) async fn execute_tool(
                 .get("command")
                 .and_then(|c| c.as_str())
                 .ok_or_else(|| "缺少 command 参数".to_string())?;
-            let timeout = args.get("timeout_secs").and_then(|t| t.as_u64()).unwrap_or(30);
+            let timeout = args
+                .get("timeout_secs")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(30)
+                .clamp(1, 600);
             let out = russh
                 .exec(host, command, std::time::Duration::from_secs(timeout))
                 .await?;
@@ -183,14 +209,14 @@ pub(crate) async fn execute_tool(
                 .and_then(|p| p.as_str())
                 .ok_or_else(|| "缺少 path 参数".to_string())?;
             let out = russh
-                .exec(host, &format!("cat {}", shq(path)), std::time::Duration::from_secs(15))
+                .exec(host, &format!("cat -- {}", shq(path)), std::time::Duration::from_secs(15))
                 .await?;
             Ok(sanitize(&format_exec_output(&out)))
         }
         "list_dir" => {
             let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
             let out = russh
-                .exec(host, &format!("ls -lah {}", shq(path)), std::time::Duration::from_secs(15))
+                .exec(host, &format!("ls -lah -- {}", shq(path)), std::time::Duration::from_secs(15))
                 .await?;
             Ok(sanitize(&format_exec_output(&out)))
         }
@@ -218,9 +244,9 @@ pub(crate) async fn execute_tool(
                 });
             let since = now().saturating_sub((window_h * 3600.0) as u64);
             // 查询上限按窗口大小动态计算，覆盖最小采样间隔（60s）下窗口内可能出现的
-            // 全部行数，避免长窗口 + 密集采样时旧的固定上限悄悄丢最新数据；同时设硬
-            // 上限保护内存/性能。最终发给模型的文本经聚合/降采样后长度与此无关。
-            let limit = (((window_h * 3600.0 / 60.0) as u64).saturating_add(500)).min(200_000) as u32;
+            // 全部行数；同时设硬上限（5 万行）保护内存/性能，超过时保留最新样本，
+            // 日粒度/小时粒度的趋势聚合不受影响
+            let limit = (((window_h * 3600.0 / 60.0) as u64).saturating_add(500)).min(50_000) as u32;
             let rows = db
                 .list_metrics(&host.id, since, limit)
                 .map_err(|e| format!("查询历史指标失败: {e}"))?;

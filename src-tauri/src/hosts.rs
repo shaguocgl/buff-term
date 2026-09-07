@@ -50,6 +50,16 @@ pub fn list(db: &Db) -> Result<Vec<Host>, String> {
     db.list().map_err(|e| format!("读取主机列表失败: {e}"))
 }
 
+/// 按 id 从数据库加载主机（凭据类操作的唯一受信来源）。
+/// 所有需要连接主机的命令都应只接收 host_id 并从这里取 Host，
+/// 避免前端传入的 Host 对象把 address/username 指向恶意服务器、
+/// 却仍用该 id 对应的已保存密码认证（凭据重定向）。
+pub fn load_host(db: &Db, host_id: &str) -> Result<Host, String> {
+    db.get_host(host_id)
+        .map_err(|e| format!("读取主机失败: {e}"))?
+        .ok_or_else(|| "主机不存在或已被删除".to_string())
+}
+
 pub fn create(db: &Db, input: HostInput) -> Result<Host, String> {
     let host = host_from_input(input);
     db.insert(&host)
@@ -62,7 +72,9 @@ pub fn update(db: &Db, host: Host) -> Result<(), String> {
 }
 
 pub fn delete(db: &Db, id: String) -> Result<(), String> {
-    db.delete(&id).map_err(|e| format!("删除主机失败: {e}"))?;
+    // 级联清理该主机的指标/审计/巡检/整改，避免孤儿数据
+    db.delete_host_cascade(&id)
+        .map_err(|e| format!("删除主机失败: {e}"))?;
     credentials::delete_password(&id);
     Ok(())
 }
@@ -143,11 +155,42 @@ pub fn save_host_credentials(app: AppHandle, id: String, password: String) -> Re
     credentials::save_password(&id, &password)
 }
 
+/// 测试主机连接。传入的 Host 来自前端表单（可能是未保存的新主机）。
+/// 安全约束：仅当传入的 id 已在库中且 address/port/username 与库中记录一致时，
+/// 才允许回退使用该 id 已保存的密码；否则密码认证必须显式传入 password，
+/// 防止把已保存凭据发送到任意地址（凭据重定向）。
 #[tauri::command]
 pub async fn test_host_connection(
+    db: State<'_, Arc<Db>>,
     host: Host,
     password: Option<String>,
 ) -> Result<TestResult, String> {
+    let saved = db
+        .get_host(&host.id)
+        .map_err(|e| format!("读取主机失败: {e}"))?;
+    if let Some(saved) = saved {
+        let matches = saved.address == host.address
+            && saved.port == host.port
+            && saved.username == host.username;
+        if !matches {
+            // 库中已有该 id，但传入的地址/用户不一致：禁止复用已保存密码
+            if host.auth_type == AuthType::Password {
+                if password.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                    return Ok(TestResult {
+                        ok: false,
+                        message: "主机的连接信息与已保存记录不一致，请显式输入密码后再测试".to_string(),
+                    });
+                }
+            }
+        }
+    } else if host.auth_type == AuthType::Password
+        && password.as_deref().map(str::trim).unwrap_or("").is_empty()
+    {
+        return Ok(TestResult {
+            ok: false,
+            message: "密码认证需要输入密码后再测试".to_string(),
+        });
+    }
     let russh = crate::russh::RusshManager::new();
     match russh.test_connection(&host, password).await {
         Ok(message) => Ok(TestResult {

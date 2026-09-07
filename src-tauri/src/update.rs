@@ -30,6 +30,9 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     let client = reqwest::Client::builder()
         .user_agent(concat!("buffTerm/", env!("CARGO_PKG_VERSION")))
+        // GitHub 不可达时快速失败，避免 Tauri command 长时间挂起
+        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("初始化更新检查失败: {e}"))?;
     let response = client

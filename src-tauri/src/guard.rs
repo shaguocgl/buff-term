@@ -49,6 +49,18 @@ pub const PRESET_TERMINAL_RULES: &[&str] = &[
 
 // ---------- 配置快照 ----------
 
+/// 防护规则/设置的版本号：任何增删改都会递增，供 SessionManager 缓存失效判断，
+/// 避免每次按键都重新读数据库。
+static RULES_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn rules_version() -> u64 {
+    RULES_VERSION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn bump_rules_version() {
+    RULES_VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GuardConfig {
     pub enabled: bool,
@@ -166,6 +178,11 @@ impl GuardEngine {
 
     pub fn set_config(&mut self, config: GuardConfig) {
         self.config = config;
+    }
+
+    /// 当前生效的审批超时秒数（会话消费者弹出审批时使用）
+    pub fn timeout_secs(&self) -> u64 {
+        self.config.timeout_secs
     }
 
     /// 行内容是否处于不可信状态（Tab / 方向键 / 编辑键后），
@@ -394,7 +411,11 @@ impl GuardEngine {
         let authoritative = console_line
             .map(extract_command_from_console_line)
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            // 一致性校验：提取结果必须与本地追踪的行一致（或互为子串）。
+            // 若远端提示符不含 # $ % > 标记，命令本身含这些字符时提取会被截断
+            // （如 `rm -rf /; echo $x` 被截成 `x`），此时回退本地行，避免漏判。
+            .filter(|cmd| console_line_consistent(cmd, &self.line));
         let full: Vec<u8> = match &authoritative {
             Some(cmd) => cmd.as_bytes().to_vec(),
             None => {
@@ -468,6 +489,7 @@ impl GuardEngine {
             .map(extract_command_from_console_line)
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+            .filter(|cmd| console_line_consistent(cmd, &self.line))
         {
             let display = cmd.clone();
             self.sync_buf.clear();
@@ -625,6 +647,18 @@ fn extract_command_from_console_line(line: &str) -> String {
         }
     }
     t.to_string()
+}
+
+/// console_line 提取出的命令是否与本地追踪行一致（提取结果应包含本地行，
+/// 补全/历史只会扩展本地输入）。不一致说明提示符启发式把命令截断了
+/// （无标记提示符 + 命令含 # $ % >），回退本地追踪行参与判定，避免危险前缀
+/// 被截掉导致漏判。本地行为空（历史回放等）时无法校验，直接信任前端行。
+fn console_line_consistent(extracted: &str, local: &[u8]) -> bool {
+    let local = String::from_utf8_lossy(local).trim().to_string();
+    if local.is_empty() {
+        return true;
+    }
+    extracted.contains(&local)
 }
 
 /// 弹窗展示文本：用“Suspended 时的本地输入快照 + 回显中的补全后缀 +
@@ -869,6 +903,7 @@ pub fn save_terminal_guard_settings(
 ) -> Result<TerminalGuardSettings, String> {
     db.save_terminal_guard_settings(&settings)
         .map_err(|e| format!("保存终端防护配置失败: {e}"))?;
+    bump_rules_version();
     Ok(settings)
 }
 
@@ -893,19 +928,25 @@ pub fn add_terminal_rule(db: State<'_, Arc<Db>>, pattern: String) -> Result<Term
     };
     db.insert_terminal_rule(&rule)
         .map_err(|e| format!("保存规则失败: {e}"))?;
+    bump_rules_version();
     Ok(rule)
 }
 
 #[tauri::command]
 pub fn delete_terminal_rule(db: State<'_, Arc<Db>>, id: String) -> Result<(), String> {
     db.delete_terminal_rule(&id)
-        .map_err(|e| format!("删除规则失败: {e}"))
+        .map_err(|e| format!("删除规则失败: {e}"))?;
+    bump_rules_version();
+    Ok(())
 }
 
 #[tauri::command]
 pub fn reset_terminal_rules(db: State<'_, Arc<Db>>) -> Result<Vec<TerminalRule>, String> {
-    db.reset_terminal_rules()
-        .map_err(|e| format!("恢复预置规则失败: {e}"))
+    let rules = db
+        .reset_terminal_rules()
+        .map_err(|e| format!("恢复预置规则失败: {e}"))?;
+    bump_rules_version();
+    Ok(rules)
 }
 
 #[tauri::command]
@@ -1254,6 +1295,39 @@ mod tests {
         assert_eq!(strip_ansi("\x1b]0;title\x07hi"), "hi");
         assert_eq!(strip_ansi("\x1b[Kplain"), "plain");
         assert_eq!(strip_ansi("中文\x1b[1;31m红"), "中文红");
+    }
+
+    /// 回归测试：无标记提示符 + 命令含 $ 时，console_line 提取会被截断，
+    /// 一致性校验应回退本地行，危险前缀不能漏判。
+    #[test]
+    fn markerless_prompt_with_dollar_in_command_still_blocks() {
+        let mut g = GuardEngine::new(config(&["rm -rf"]));
+        let _ = g.process(b"rm -rf /; echo $x");
+        let out = g.process_with_console_line(b"\r", Some("world rm -rf /; echo $x"));
+        assert!(
+            out.approval.is_some(),
+            "命令中的 $ 不应让危险前缀漏判（command={:?}）",
+            out.approval.as_ref().map(|a| a.command.clone())
+        );
+    }
+
+    /// 正常提示符（含 # 标记）下，console_line 提取完整命令，判定不受影响
+    #[test]
+    fn normal_prompt_console_line_still_blocks() {
+        let mut g = GuardEngine::new(config(&["rm -rf"]));
+        let _ = g.process(b"rm -rf /");
+        let out = g.process_with_console_line(b"\r", Some("root@host:~# rm -rf /"));
+        assert!(out.approval.is_some());
+    }
+
+    /// 安全命令带正常提示符时正常放行
+    #[test]
+    fn normal_prompt_console_line_allows_safe() {
+        let mut g = GuardEngine::new(config(&["rm -rf"]));
+        let _ = g.process(b"ls -la");
+        let out = g.process_with_console_line(b"\r", Some("root@host:~# ls -la"));
+        assert!(out.approval.is_none());
+        assert_eq!(forward(&out), "\r");
     }
 
     #[test]

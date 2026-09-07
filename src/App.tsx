@@ -18,14 +18,16 @@ import {
   listHosts,
   mcpApprove,
   onMcpApprovalRequest,
-  onSessionNotice,
+  onHostKeyConfirm,
   onTerminalGuardApproval,
   sessionGuardApprove,
+  sshConfirmHostKey,
 } from './api';
 import './App.css';
 import type {
   AiProvider,
   Host,
+  HostKeyConfirmRequest,
   McpApprovalRequest,
   TerminalGuardApproval,
   UpdateInfo,
@@ -38,6 +40,7 @@ import CommandPalette from './components/CommandPalette';
 import ConfirmModal from './components/ConfirmModal';
 import GuardApprovalModal from './components/GuardApprovalModal';
 import HostForm from './components/HostForm';
+import HostKeyModal from './components/HostKeyModal';
 import InspectionPanel from './components/InspectionPanel';
 import McpApprovalModal from './components/McpApprovalModal';
 import McpServiceModal from './components/McpServiceModal';
@@ -110,6 +113,8 @@ function App() {
   const [mcpApproval, setMcpApproval] = useState<McpApprovalRequest | null>(null);
   const [guardApproval, setGuardApproval] =
     useState<TerminalGuardApproval | null>(null);
+  const [hostKeyApproval, setHostKeyApproval] =
+    useState<HostKeyConfirmRequest | null>(null);
   const [chatOpen, setChatOpen] = useState(true);
   const [sftpOpen, setSftpOpen] = useState(false);
   const [monitorOpen, setMonitorOpen] = useState(false);
@@ -121,6 +126,11 @@ function App() {
   const [deleteHostTarget, setDeleteHostTarget] = useState<Host | null>(null);
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeKey, setActiveKey] = useState<number | null>(null);
+  // 供全局快捷键 effect 读取最新状态（refs 让 effect 依赖保持稳定，listener 只挂一次）
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  const activeKeyRef = useRef(activeKey);
+  activeKeyRef.current = activeKey;
   const [loadingHostId, setLoadingHostId] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [appVersion, setAppVersion] = useState<string | null>(null);
@@ -223,19 +233,6 @@ function App() {
   useEffect(() => {
     let un: (() => void) | undefined;
     let cancelled = false;
-    onSessionNotice((_sessionId, message) => showToast('info', message)).then((fn) => {
-      if (cancelled) fn();
-      else un = fn;
-    });
-    return () => {
-      cancelled = true;
-      un?.();
-    };
-  }, [showToast]);
-
-  useEffect(() => {
-    let un: (() => void) | undefined;
-    let cancelled = false;
     onMcpApprovalRequest((req) => setMcpApproval(req)).then((fn) => {
       if (cancelled) fn();
       else un = fn;
@@ -247,15 +244,21 @@ function App() {
   }, []);
 
   useEffect(() => {
-    let un: (() => void) | undefined;
+    let unGuard: (() => void) | undefined;
+    let unKey: (() => void) | undefined;
     let cancelled = false;
     onTerminalGuardApproval((req) => setGuardApproval(req)).then((fn) => {
       if (cancelled) fn();
-      else un = fn;
+      else unGuard = fn;
+    });
+    onHostKeyConfirm((req) => setHostKeyApproval(req)).then((fn) => {
+      if (cancelled) fn();
+      else unKey = fn;
     });
     return () => {
       cancelled = true;
-      un?.();
+      unGuard?.();
+      unKey?.();
     };
   }, []);
 
@@ -269,6 +272,21 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [guardApproval]);
 
+  // MCP 审批弹窗超时自动关闭（后端超时按拒绝处理）
+  useEffect(() => {
+    if (!mcpApproval) return;
+    const secs = mcpApproval.timeout_secs ?? 600;
+    const timer = window.setTimeout(() => setMcpApproval(null), secs * 1000);
+    return () => window.clearTimeout(timer);
+  }, [mcpApproval]);
+
+  // 主机指纹确认弹窗超时自动关闭（后端 60s 超时按拒绝处理，与倒计时一致）
+  useEffect(() => {
+    if (!hostKeyApproval) return;
+    const timer = window.setTimeout(() => setHostKeyApproval(null), 60_000);
+    return () => window.clearTimeout(timer);
+  }, [hostKeyApproval]);
+
   const resolveMcpApproval = async (allow: boolean) => {
     const req = mcpApproval;
     if (!req) return;
@@ -277,7 +295,8 @@ function App() {
     } catch (e) {
       showToast('error', fmtError(e));
     } finally {
-      setMcpApproval(null);
+      // 只关闭自己对应的弹窗，避免并发审批时误关新请求的弹窗
+      setMcpApproval((cur) => (cur?.request_id === req.request_id ? null : cur));
     }
   };
 
@@ -289,11 +308,22 @@ function App() {
     } catch (e) {
       showToast('error', fmtError(e));
     } finally {
-      setGuardApproval(null);
+      setGuardApproval((cur) => (cur?.request_id === req.request_id ? null : cur));
       // 审批/取消后把键盘焦点还给终端，避免需要手动点击才能继续输入
       window.setTimeout(() => {
         window.dispatchEvent(new CustomEvent('buffterm:refocus-terminal'));
       }, 0);
+    }
+  };
+
+  const resolveHostKeyApproval = async (trust: boolean) => {
+    const req = hostKeyApproval;
+    if (!req) return;
+    setHostKeyApproval(null);
+    try {
+      await sshConfirmHostKey(req.key, trust);
+    } catch (e) {
+      showToast('error', fmtError(e));
     }
   };
 
@@ -345,48 +375,68 @@ function App() {
     restorePanel();
   };
 
-  const closeTab = (key: number) => {
-    const idx = tabs.findIndex((t) => t.key === key);
+  // useCallback + refs 保证引用稳定：避免每次 render 重建导致全局快捷键 effect 反复卸载/挂载
+  const closeTab = useCallback((key: number) => {
+    const idx = tabsRef.current.findIndex((t) => t.key === key);
+    const closing = tabsRef.current[idx];
     setTabs((prev) => prev.filter((t) => t.key !== key));
-    if (activeKey === key) {
-      const remaining = tabs.filter((t) => t.key !== key);
+    if (activeKeyRef.current === key) {
+      const remaining = tabsRef.current.filter((t) => t.key !== key);
       const neighbor = remaining[Math.min(idx, remaining.length - 1)];
       setActiveKey(neighbor?.key ?? null);
     }
-  };
+    // 连接中的主机被关闭时清理 loading 指示
+    if (closing) {
+      setLoadingHostId((cur) => (cur === closing.host.id ? null : cur));
+    }
+  }, []);
 
   // 全局快捷键：Cmd/Ctrl+K 命令面板、Cmd/Ctrl+F 终端搜索、Cmd/Ctrl+T 新建主机、
   // Cmd/Ctrl+W 关闭标签、Ctrl+Tab / Ctrl+Shift+Tab 切换标签。
   // 注意：macOS 系统菜单可能拦截 Cmd+W/Cmd+T（按键到不了 WebView），此时改用 Ctrl 组合键。
+  // 焦点保护：输入框/弹窗/终端内不劫持 K/T/W（这些组合在终端里是 shell 编辑键，
+  // 如 Ctrl+W 删词、Ctrl+K 删行），否则会双重触发——既误关标签又污染 shell 输入。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.isComposing) return;
+      const target = e.target as HTMLElement | null;
+      const inField = !!target?.closest(
+        'input, textarea, select, [role="dialog"], .modal',
+      );
+      const inTerminal = !!target?.closest('.xterm');
       const mod = e.metaKey || e.ctrlKey;
       if (mod && (e.key === 'k' || e.key === 'K')) {
+        if (inField || inTerminal) return;
         e.preventDefault();
         setPaletteOpen((v) => !v);
       } else if (mod && (e.key === 'f' || e.key === 'F')) {
+        // 终端内 Cmd+F 打开终端搜索（终端功能）；输入框内交给系统/浏览器
+        if (inField) return;
         e.preventDefault();
         window.dispatchEvent(new CustomEvent('buffterm:open-terminal-search'));
       } else if (mod && (e.key === 't' || e.key === 'T')) {
+        if (inField || inTerminal) return;
         e.preventDefault();
         setEditingHost(null);
         setShowForm(true);
       } else if (mod && (e.key === 'w' || e.key === 'W')) {
+        if (inField || inTerminal) return;
         e.preventDefault();
-        if (activeKey !== null) closeTab(activeKey);
+        const current = activeKeyRef.current;
+        if (current !== null) closeTab(current);
       } else if (e.ctrlKey && e.key === 'Tab') {
         e.preventDefault();
-        if (tabs.length === 0) return;
-        const idx = tabs.findIndex((t) => t.key === activeKey);
+        const tabsNow = tabsRef.current;
+        if (tabsNow.length === 0) return;
+        const idx = tabsNow.findIndex((t) => t.key === activeKeyRef.current);
         const dir = e.shiftKey ? -1 : 1;
-        const next = tabs[(idx + dir + tabs.length) % tabs.length];
+        const next = tabsNow[(idx + dir + tabsNow.length) % tabsNow.length];
         if (next) setActiveKey(next.key);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [tabs, activeKey, closeTab]);
+  }, [closeTab]);
 
   const handleDelete = async (host: Host) => {
     setDeleteHostTarget(null);
@@ -958,7 +1008,12 @@ function App() {
                       setTabs((prev) =>
                         prev.map((t) => (t.key === key ? { ...t, status: 'exited' } : t)),
                       );
-                      setLoadingHostId(null);
+                      // 只清当前失败主机的 loading，避免快速连两台主机时
+                      // 前一个失败回调误清后一个的 loading
+                      setLoadingHostId((cur) => {
+                        const tab = tabs.find((t) => t.key === key);
+                        return tab && cur === tab.host.id ? null : cur;
+                      });
                       showToast('error', `连接失败: ${message}`);
                     }}
                     onExited={(key) => {
@@ -978,13 +1033,17 @@ function App() {
                 />
               )}
 
-              {activeTab && activeTab.sessionId !== null && chatOpen && (
+              {/* 四个右侧面板保持挂载（用 display 隐藏而非卸载）：
+                  切换面板不会中断正在运行的 AI 会话 / SFTP 传输 / 巡检任务，
+                  再次打开时状态与进度仍然保留 */}
+              {activeTab && activeTab.sessionId !== null && (
                 <ChatPanel
                   key={activeTab.sessionId}
                   sessionId={activeTab.sessionId}
                   hostId={activeTab.host.id}
                   hostName={activeTab.title}
                   panelWidth={rightPanelWidth}
+                  hidden={!chatOpen}
                   providerLabel={
                     activeProvider
                       ? `${activeProvider.name} · ${activeModelLabel}`
@@ -1001,28 +1060,31 @@ function App() {
                 />
               )}
 
-              {activeTab && activeTab.sessionId !== null && sftpOpen && (
+              {activeTab && activeTab.sessionId !== null && (
                 <SftpPanel
                   key={`sftp-${activeTab.sessionId}`}
                   host={activeTab.host}
+                  hidden={!sftpOpen}
                   onClose={() => applyPanel('none')}
                   panelWidth={rightPanelWidth}
                 />
               )}
 
-              {activeTab && activeTab.sessionId !== null && monitorOpen && (
+              {activeTab && activeTab.sessionId !== null && (
                 <MonitorPanel
                   key={`mon-${activeTab.sessionId}`}
                   host={activeTab.host}
+                  hidden={!monitorOpen}
                   onClose={() => applyPanel('none')}
                   panelWidth={rightPanelWidth}
                 />
               )}
 
-              {activeTab && activeTab.sessionId !== null && inspectionOpen && (
+              {activeTab && activeTab.sessionId !== null && (
                 <InspectionPanel
                   key={`inspect-${activeTab.sessionId}`}
                   host={activeTab.host}
+                  hidden={!inspectionOpen}
                   onClose={() => applyPanel('none')}
                   panelWidth={rightPanelWidth}
                 />
@@ -1131,6 +1193,13 @@ function App() {
         <GuardApprovalModal
           request={guardApproval}
           onResolve={resolveGuardApproval}
+        />
+      )}
+
+      {hostKeyApproval && (
+        <HostKeyModal
+          request={hostKeyApproval}
+          onResolve={resolveHostKeyApproval}
         />
       )}
 

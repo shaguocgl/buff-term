@@ -56,11 +56,18 @@ struct RunningMcp {
 #[derive(Default)]
 pub struct McpServiceManager {
     inner: Mutex<Option<RunningMcp>>,
+    /// 生命周期互斥：is_running 检查与 start/stop 之间加锁，
+    /// 防止并发调用同时看到「未运行」而启动多个服务线程
+    lifecycle: Mutex<()>,
 }
 
 impl McpServiceManager {
     pub fn is_running(&self) -> bool {
         self.inner.lock().unwrap().is_some()
+    }
+
+    pub fn lock_lifecycle(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.lifecycle.lock().unwrap()
     }
 
     fn set(&self, running: Option<RunningMcp>) {
@@ -98,9 +105,13 @@ pub fn get_mcp_service(
     db: State<'_, Arc<Db>>,
     manager: State<'_, McpServiceManager>,
 ) -> Result<McpServiceView, String> {
-    let config = db
+    let mut config = db
         .get_mcp_service()
         .map_err(|e| format!("读取 MCP 服务配置失败: {e}"))?;
+    // token 加密存储在凭据表，读取时解密回填供前端展示
+    if config.token.is_none() {
+        config.token = crate::credentials::get_mcp_token();
+    }
     Ok(McpServiceView {
         running: manager.is_running(),
         config,
@@ -127,7 +138,9 @@ pub async fn save_mcp_service(
     config.updated_at = now();
 
     if !config.enabled {
+        let _life = manager.lock_lifecycle();
         stop_service(&manager);
+        drop(_life);
         config.port = None;
         db.save_mcp_service(&config)
             .map_err(|e| format!("保存 MCP 服务配置失败: {e}"))?;
@@ -137,17 +150,29 @@ pub async fn save_mcp_service(
         });
     }
 
-    // 首次启用时生成 token
-    if config.token.is_none() {
+    // 首次启用时生成 token；token 加密存凭据表（DB 列恒为 None），
+    // 因此仅当凭据表中也没有 token 时才生成，避免每次改配置都轮换 token
+    if config.token.is_none() && crate::credentials::get_mcp_token().is_none() {
         config.token = Some(generate_token());
     }
-    // 未运行时才启动；已运行时只需更新配置（请求时实时读取）
+    // token 加密存凭据表，不落明文到 mcp_service 表
+    if let Some(token) = config.token.clone() {
+        crate::credentials::save_mcp_token(&token)
+            .map_err(|e| format!("保存 MCP token 失败: {e}"))?;
+    }
+    config.token = None;
+    // 未运行时才启动；已运行时只需更新配置（请求时实时读取）。
+    // 检查与启动之间持生命周期锁，避免并发调用启动多个服务线程
+    let _life = manager.lock_lifecycle();
     if !manager.is_running() {
         let port = start_service(&app, &manager)?;
         config.port = Some(port);
     }
     db.save_mcp_service(&config)
         .map_err(|e| format!("保存 MCP 服务配置失败: {e}"))?;
+    drop(_life);
+    // 回填明文 token 供前端展示
+    config.token = crate::credentials::get_mcp_token();
     Ok(McpServiceView {
         running: true,
         config,
@@ -162,10 +187,14 @@ pub fn rotate_mcp_token(
     let mut config = db
         .get_mcp_service()
         .map_err(|e| format!("读取 MCP 服务配置失败: {e}"))?;
-    config.token = Some(generate_token());
+    let token = generate_token();
+    crate::credentials::save_mcp_token(&token)
+        .map_err(|e| format!("保存 MCP token 失败: {e}"))?;
+    config.token = None;
     config.updated_at = now();
     db.save_mcp_service(&config)
         .map_err(|e| format!("保存 MCP 服务配置失败: {e}"))?;
+    config.token = Some(token);
     Ok(McpServiceView {
         running: manager.is_running(),
         config,
@@ -226,7 +255,7 @@ pub(crate) fn start_service(app: &AppHandle, manager: &McpServiceManager) -> Res
     Ok(port)
 }
 
-fn stop_service(manager: &McpServiceManager) {
+pub(crate) fn stop_service(manager: &McpServiceManager) {
     if let Some(running) = manager.inner.lock().unwrap().take() {
         let _ = running.shutdown.send(());
     }
@@ -285,20 +314,48 @@ fn mcp_server_main(
 
 // ---------- HTTP 层 ----------
 
-fn cors_headers() -> Vec<Header> {
-    vec![
-        Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap(),
-        Header::from_bytes(
-            &b"Access-Control-Allow-Headers"[..],
-            &b"Authorization, Content-Type, MCP-Protocol-Version, MCP-Session-Id"[..],
-        )
-        .unwrap(),
-        Header::from_bytes(
-            &b"Access-Control-Allow-Methods"[..],
-            &b"GET, POST, OPTIONS"[..],
-        )
-        .unwrap(),
-    ]
+/// 仅对本地回环/应用自身的 Origin 回显 CORS 头；MCP 客户端（Codex、Claude Desktop）
+/// 是本地进程不走浏览器，不需要 CORS。不返回 CORS 头时浏览器会阻止跨域读取，
+/// 从而避免任意网页在 token 泄露后直接调用本地服务。
+fn allowed_origin(origin: &str) -> bool {
+    let o = origin.trim();
+    o == "http://localhost"
+        || o == "http://127.0.0.1"
+        || o.starts_with("http://localhost:")
+        || o.starts_with("http://127.0.0.1:")
+        || o == "tauri://localhost"
+        || o == "https://tauri.localhost"
+}
+
+fn cors_headers(request: &Request) -> Vec<Header> {
+    let mut headers = Vec::new();
+    let origin = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Origin"))
+        .map(|h| h.value.as_str())
+        .unwrap_or("");
+    if !origin.is_empty() && allowed_origin(origin) {
+        headers.push(
+            Header::from_bytes(&b"Access-Control-Allow-Origin"[..], origin.as_bytes()).unwrap(),
+        );
+        headers.push(Header::from_bytes(&b"Vary"[..], &b"Origin"[..]).unwrap());
+        headers.push(
+            Header::from_bytes(
+                &b"Access-Control-Allow-Headers"[..],
+                &b"Authorization, Content-Type, MCP-Protocol-Version, MCP-Session-Id"[..],
+            )
+            .unwrap(),
+        );
+        headers.push(
+            Header::from_bytes(
+                &b"Access-Control-Allow-Methods"[..],
+                &b"GET, POST, OPTIONS"[..],
+            )
+            .unwrap(),
+        );
+    }
+    headers
 }
 
 fn attach_headers<R: Read>(response: Response<R>, headers: Vec<Header>) -> Response<R> {
@@ -307,16 +364,39 @@ fn attach_headers<R: Read>(response: Response<R>, headers: Vec<Header>) -> Respo
         .fold(response, |resp, header| resp.with_header(header))
 }
 
+/// 常量时间 token 比较：固定长度随机 token，逐字节异或累积，
+/// 避免通过响应时间差逐位猜测（本地服务 + 高并发请求场景）。
+fn token_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        // 长度不同也执行一轮等长比较，避免长度信息通过时序泄露
+        let mut diff = (a.len() ^ b.len()) as u8;
+        let max = a.len().max(b.len());
+        for i in 0..max {
+            let x = a.get(i).copied().unwrap_or(0);
+            let y = b.get(i).copied().unwrap_or(0);
+            diff |= x ^ y;
+        }
+        return diff == 0;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 fn check_auth(app: &AppHandle, request: &Request) -> bool {
     let db = match app.try_state::<Arc<Db>>() {
         Some(db) => db,
         None => return false,
     };
-    let token = db
-        .get_mcp_service()
-        .ok()
-        .and_then(|c| c.token)
-        .unwrap_or_default();
+    // token 加密存凭据表；DB 列仅在旧版本遗留明文（迁移后为空）
+    let token = match db.get_mcp_service().ok().and_then(|c| c.token) {
+        Some(t) if !t.is_empty() => t,
+        _ => crate::credentials::get_mcp_token().unwrap_or_default(),
+    };
     if token.is_empty() {
         return false;
     }
@@ -326,16 +406,16 @@ fn check_auth(app: &AppHandle, request: &Request) -> bool {
         .find(|h| h.field.equiv("Authorization"))
     {
         let v = h.value.as_str();
-        if v == token {
+        if token_eq(v, &token) {
             return true;
         }
         if let Some(bearer) = v.strip_prefix("Bearer ") {
-            if bearer == token {
+            if token_eq(bearer, &token) {
                 return true;
             }
         }
         if let Some(bearer) = v.strip_prefix("bearer ") {
-            if bearer == token {
+            if token_eq(bearer, &token) {
                 return true;
             }
         }
@@ -344,7 +424,7 @@ fn check_auth(app: &AppHandle, request: &Request) -> bool {
         for pair in query.split('&') {
             if let Some(v) = pair.strip_prefix("access_token=") {
                 let decoded = percent_encoding::percent_decode_str(v).decode_utf8_lossy();
-                if decoded == token {
+                if token_eq(&decoded, &token) {
                     return true;
                 }
             }
@@ -359,53 +439,57 @@ fn handle_http(app: AppHandle, rt: Arc<tokio::runtime::Runtime>, mut request: Re
     let path = url.split('?').next().unwrap_or("/");
 
     if method == Method::Options {
-        let resp = attach_headers(Response::empty(StatusCode(204)), cors_headers());
+        let headers = cors_headers(&request);
+        let resp = attach_headers(Response::empty(StatusCode(204)), headers);
         let _ = request.respond(resp);
         return;
     }
     if path != "/mcp" && path != "/" {
-        let _ = request.respond(
-            attach_headers(
-                Response::from_string("not found").with_status_code(StatusCode(404)),
-                cors_headers(),
-            ),
+        let headers = cors_headers(&request);
+        let resp = attach_headers(
+            Response::from_string("not found").with_status_code(StatusCode(404)),
+            headers,
         );
+        let _ = request.respond(resp);
         return;
     }
     if !check_auth(&app, &request) {
-        let _ = request.respond(
-            attach_headers(
-                Response::from_string("未授权：请检查 MCP 配置中的 token")
-                    .with_status_code(StatusCode(401)),
-                cors_headers(),
-            ),
+        let headers = cors_headers(&request);
+        let resp = attach_headers(
+            Response::from_string("未授权：请检查 MCP 配置中的 token")
+                .with_status_code(StatusCode(401)),
+            headers,
         );
+        let _ = request.respond(resp);
         return;
     }
 
     match method {
         Method::Get => handle_sse(request),
         Method::Post => {
+            // 限制请求体大小，避免本地恶意/异常客户端无界占用内存
+            const MAX_BODY: u64 = 1024 * 1024;
             let mut body = String::new();
-            if request.as_reader().read_to_string(&mut body).is_err() {
-                let _ = request.respond(
-                    attach_headers(
-                        Response::from_string("读取请求体失败")
-                            .with_status_code(StatusCode(400)),
-                        cors_headers(),
-                    ),
+            let mut limited = request.as_reader().take(MAX_BODY + 1);
+            if limited.read_to_string(&mut body).is_err() || body.len() as u64 > MAX_BODY {
+                let headers = cors_headers(&request);
+                let resp = attach_headers(
+                    Response::from_string("请求体过大或读取失败（上限 1MB）")
+                        .with_status_code(StatusCode(413)),
+                    headers,
                 );
+                let _ = request.respond(resp);
                 return;
             }
             let response = rt.block_on(handle_jsonrpc(&app, &body));
-            let mut headers = cors_headers();
+            let mut headers = cors_headers(&request);
             headers.push(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
             let _ = request.respond(attach_headers(Response::from_string(response), headers));
         }
         _ => {
-            let _ = request.respond(
-                attach_headers(Response::empty(StatusCode(405)), cors_headers()),
-            );
+            let headers = cors_headers(&request);
+            let resp = attach_headers(Response::empty(StatusCode(405)), headers);
+            let _ = request.respond(resp);
         }
     }
 }
@@ -413,14 +497,25 @@ fn handle_http(app: AppHandle, rt: Arc<tokio::runtime::Runtime>, mut request: Re
 fn handle_sse(request: Request) {
     // tiny_http 的 respond 会把响应写入 BufWriter，无限流 body 阻塞读取时
     // header 永远无法 flush；这里直接用 into_writer 手动写头并立即 flush。
+    let origin = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Origin"))
+        .map(|h| h.value.as_str())
+        .unwrap_or("")
+        .to_string();
     let mut writer = request.into_writer();
+    let cors = if !origin.is_empty() && allowed_origin(&origin) {
+        format!("Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\n")
+    } else {
+        String::new()
+    };
     let headers = format!(
         "HTTP/1.1 200 OK\r\n\
          Content-Type: text/event-stream\r\n\
          Cache-Control: no-cache\r\n\
          Connection: keep-alive\r\n\
-         Access-Control-Allow-Origin: *\r\n\
-         \r\n"
+         {cors}\r\n"
     );
     if writer.write_all(headers.as_bytes()).is_err() {
         return;
@@ -624,12 +719,12 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
                 .get("path")
                 .and_then(|p| p.as_str())
                 .ok_or_else(|| "缺少 path 参数".to_string())?;
-            let script = format!("cat {}", shq(path));
+            let script = format!("cat -- {}", shq(path));
             run_and_log(app, host, name, &script, 15, None).await
         }
         "list_dir" => {
             let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
-            let script = format!("ls -lah {}", shq(path));
+            let script = format!("ls -lah -- {}", shq(path));
             run_and_log(app, host, name, &script, 15, None).await
         }
         "exec_command" => {
@@ -641,7 +736,8 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
             let timeout = args
                 .get("timeout_secs")
                 .and_then(|t| t.as_u64())
-                .unwrap_or(30);
+                .unwrap_or(30)
+                .clamp(1, 600);
             let mut approval: Option<bool> = None;
             if config.permission_mode == McpPermissionMode::Readonly {
                 // 只读模式：允许只读命令，拒绝任何写操作
@@ -652,14 +748,17 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
                             .to_string(),
                     );
                 }
-            } else if config.permission_mode == McpPermissionMode::Confirm
-                && check_mcp_rule_match(app, &command)
-            {
-                // 管控模式：仅自定义管控规则命中时弹窗审批
-                approval = Some(request_approval(app, host, &command).await?);
-                if approval == Some(false) {
-                    let _ = write_audit(app, host, "mcp:exec_command", &command, "denied");
-                    return Err("用户拒绝执行该命令".to_string());
+            } else if config.permission_mode == McpPermissionMode::Confirm {
+                // 管控模式：命中自定义管控规则 **或** 内置写/危险判定时弹窗审批。
+                // 若只按自定义规则判定，规则为空时 confirm 会退化成 allow，与模式语义不符。
+                let rule_hit = check_mcp_rule_match(app, &command);
+                let builtin_hit = is_write_operation(&command);
+                if rule_hit || builtin_hit {
+                    approval = Some(request_approval(app, host, &command).await?);
+                    if approval == Some(false) {
+                        let _ = write_audit(app, host, "mcp:exec_command", &command, "denied");
+                        return Err("用户拒绝执行该命令".to_string());
+                    }
                 }
             }
             run_and_log(app, host, name, &command, timeout, approval).await
@@ -722,7 +821,8 @@ async fn request_approval(
             "request_id": request_id,
             "host": host.name,
             "host_label": host.label_address(),
-            "command": command
+            "command": command,
+            "timeout_secs": 600
         }),
     );
     match tokio::time::timeout(Duration::from_secs(600), rx).await {
@@ -747,7 +847,8 @@ fn write_audit(
         host_id: host.id.clone(),
         host_label: format!("{} ({})", host.name, host.label_address()),
         tool_name: tool_name.to_string(),
-        summary: summary.chars().take(500).collect(),
+        // 命令本身可能包含密码/Token，落库前统一脱敏
+        summary: sanitize(summary).chars().take(500).collect(),
         permission_mode: "mcp".to_string(),
         approval: approval.to_string(),
         status: "ok".to_string(),

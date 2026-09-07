@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
-import { createHost, saveHostPassword, testHostConnection, updateHost } from '../api';
+import { createHost, deleteHost, saveHostPassword, testHostConnection, updateHost } from '../api';
 import type { Host, HostInput, TestResult } from '../types';
 import { fmtError } from '../utils/errors';
 import Modal from './Modal';
@@ -106,15 +106,27 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
       } else {
         const host = await createHost(input);
         if (authType === 'password' && password) {
-          await saveHostPassword(host.id, password).catch(() => {
-            setError('主机已保存，但密码写入系统钥匙串失败');
-          });
+          // 密码写入失败必须中止保存流程：回滚刚创建的主机，
+          // 避免用户重试时重复创建记录
+          try {
+            await saveHostPassword(host.id, password);
+          } catch (e) {
+            await deleteHost(host.id).catch(() => {});
+            setError(`主机信息已保存但密码写入失败，已撤销本次新建：${fmtError(e)}`);
+            setSaving(false);
+            return;
+          }
         }
       }
       if (initial && authType === 'password' && password) {
-        await saveHostPassword(initial.id, password).catch(() => {
-          setError('主机已保存，但密码写入系统钥匙串失败');
-        });
+        try {
+          await saveHostPassword(initial.id, password);
+        } catch (e) {
+          // 编辑场景：主机信息已更新（幂等），仅密码未保存，停留表单便于重试
+          setError(`主机已保存，但密码写入系统钥匙串失败：${fmtError(e)}`);
+          setSaving(false);
+          return;
+        }
       }
       onSaved();
     } catch (err) {

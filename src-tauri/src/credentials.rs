@@ -205,6 +205,84 @@ pub fn delete_api_key(provider_id: &str) {
     }
 }
 
+// ---------- MCP 服务 token ----------
+
+/// MCP 对外服务的认证 token：与主机密码/API Key 一样 AES-256-GCM 加密存储，
+/// 避免数据库文件泄露后直接拿到 token 调用本地 MCP 服务。
+pub fn save_mcp_token(token: &str) -> Result<(), String> {
+    let db = db().ok_or_else(|| "数据库未就绪".to_string())?;
+    let enc = encrypt_secret(token)?;
+    db.set_credential("mcp:token", "token", &enc)
+        .map_err(|e| format!("保存 MCP token 失败: {e}"))?;
+    // 同步刷新内存缓存：轮换 token 后 check_auth 立刻使用新值，
+    // 否则缓存里残留旧 token 会让新 token 全部 401
+    cache_set("mcp-token", "token", token.to_string());
+    Ok(())
+}
+
+pub fn get_mcp_token() -> Option<String> {
+    if let Some(cached) = cache_get("mcp-token", "token") {
+        return Some(cached);
+    }
+    let db = db()?;
+    let enc = db.get_credential("mcp:token", "token").ok()??;
+    let plain = decrypt_secret(&enc).ok()?;
+    cache_set("mcp-token", "token", plain.clone());
+    Some(plain)
+}
+
+// ---------- SMTP 密码 ----------
+
+pub fn save_smtp_password(password: &str) -> Result<(), String> {
+    let db = db().ok_or_else(|| "数据库未就绪".to_string())?;
+    let enc = encrypt_secret(password)?;
+    db.set_credential("alert:smtp", "password", &enc)
+        .map_err(|e| format!("保存 SMTP 密码失败: {e}"))?;
+    // 同步刷新内存缓存，避免重新读取时拿到旧密码
+    cache_set("smtp-password", "password", password.to_string());
+    Ok(())
+}
+
+pub fn get_smtp_password() -> Option<String> {
+    if let Some(cached) = cache_get("smtp-password", "password") {
+        return Some(cached);
+    }
+    let db = db()?;
+    let enc = db.get_credential("alert:smtp", "password").ok()??;
+    let plain = decrypt_secret(&enc).ok()?;
+    cache_set("smtp-password", "password", plain.clone());
+    Some(plain)
+}
+
+/// 迁移历史明文凭据（升级自旧版本）：MCP token 明文在 mcp_service 表、
+/// SMTP 密码明文在 settings 表的 alert_settings JSON 中，统一转为加密存储。
+pub fn migrate_plaintext_secrets() {
+    let Some(db) = db() else { return };
+    // MCP token：DB 列有明文且凭据表无加密值 → 加密并清空明文列
+    if let Ok(config) = db.get_mcp_service() {
+        if let Some(plain) = config.token.clone() {
+            if get_mcp_token().is_none() && !plain.is_empty() {
+                if save_mcp_token(&plain).is_ok() {
+                    let mut next = config;
+                    next.token = None;
+                    let _ = db.save_mcp_service(&next);
+                }
+            }
+        }
+    }
+    // SMTP 密码：settings JSON 含明文 → 加密并从 JSON 移除
+    if let Ok(mut settings) = db.get_alert_settings() {
+        if let Some(plain) = settings.smtp_password.clone() {
+            if get_smtp_password().is_none() && !plain.is_empty() {
+                if save_smtp_password(&plain).is_ok() {
+                    settings.smtp_password = None;
+                    let _ = db.save_alert_settings(&settings);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

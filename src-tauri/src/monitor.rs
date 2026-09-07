@@ -48,8 +48,10 @@ pub struct MonitorSnapshot {
 pub async fn monitor_snapshot(
     app: AppHandle,
     russh: State<'_, RusshManager>,
-    host: Host,
+    db: State<'_, std::sync::Arc<Db>>,
+    host_id: String,
 ) -> Result<MonitorSnapshot, String> {
+    let host = crate::hosts::load_host(&db, &host_id)?;
     let snap = collect_russh(&host, &russh).await?;
     if let Some(db) = app.try_state::<std::sync::Arc<Db>>() {
         let _ = save_metric(&db, &host.id, &snap, "manual");

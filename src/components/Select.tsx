@@ -26,6 +26,7 @@ export default function Select<T extends string>({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const focusTimerRef = useRef<number | null>(null);
 
   const selected = options.find((o) => o.value === value);
 
@@ -40,6 +41,16 @@ export default function Select<T extends string>({
     return () => document.removeEventListener('mousedown', onMouseDown);
   }, [open]);
 
+  // 卸载时清理聚焦定时器，避免对已卸载组件 setState
+  useEffect(
+    () => () => {
+      if (focusTimerRef.current !== null) {
+        window.clearTimeout(focusTimerRef.current);
+      }
+    },
+    [],
+  );
+
   const focusOption = (idx: number) => {
     optionRefs.current[idx]?.focus();
   };
@@ -49,7 +60,10 @@ export default function Select<T extends string>({
       if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
         e.preventDefault();
         setOpen(true);
-        window.setTimeout(() => optionRefs.current[0]?.focus(), 0);
+        focusTimerRef.current = window.setTimeout(
+          () => optionRefs.current[0]?.focus(),
+          0,
+        );
       }
       return;
     }

@@ -1,3 +1,4 @@
+use crate::db::Db;
 use crate::models::Host;
 use crate::russh::do_connect;
 use chrono::{DateTime, Utc};
@@ -24,6 +25,22 @@ fn success(text: impl Into<String>) -> SftpResult {
         ok: true,
         text: text.into(),
     }
+}
+
+/// 校验本地路径：必须为绝对路径，且拒绝凭据类敏感目录，
+/// 防止恶意前端/注入把私钥、云凭据等本地文件上传到远端，
+/// 或覆盖下载到敏感位置。
+fn validate_local_path(local: &str) -> Result<(), String> {
+    if !std::path::Path::new(local).is_absolute() {
+        return Err("本地路径必须是绝对路径".to_string());
+    }
+    let lower = local.to_ascii_lowercase();
+    for bad in ["/.ssh/", "\\.ssh\\", "/.gnupg/", "\\.gnupg\\", "/.aws/", "\\.aws\\", "/.azure/"] {
+        if lower.contains(bad) {
+            return Err(format!("本地路径包含敏感目录（{bad}），已拒绝该操作"));
+        }
+    }
+    Ok(())
 }
 
 /// 进行中传输的取消标志（transfer_id -> flag），供前端随时取消。
@@ -67,7 +84,12 @@ pub fn sftp_cancel_transfer(
 
 /// 检查远端路径是否已存在（供上传前覆盖确认）。
 #[tauri::command]
-pub async fn sftp_exists(host: Host, path: String) -> Result<bool, String> {
+pub async fn sftp_exists(
+    db: State<'_, Arc<Db>>,
+    host_id: String,
+    path: String,
+) -> Result<bool, String> {
+    let host = crate::hosts::load_host(&db, &host_id)?;
     with_sftp(&host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
         Box::pin(async move { Ok(sftp.metadata(path.as_str()).await.is_ok()) })
@@ -149,9 +171,13 @@ async fn with_sftp<F, T>(host: &Host, timeout: Duration, f: F) -> Result<T, Stri
 where
     F: for<'a> Fn(&'a SftpSession) -> Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>,
 {
-    let handle = tokio::time::timeout(Duration::from_secs(15), do_connect(host, None))
-        .await
-        .map_err(|_| "SSH 连接超时（15 秒）".to_string())??;
+    let handle = tokio::time::timeout(
+        // 需覆盖首次连接的主机指纹确认窗口（60s）
+        Duration::from_secs(60),
+        do_connect(host, None),
+    )
+    .await
+    .map_err(|_| "SSH 连接超时（60 秒）".to_string())??;
 
     let op = async {
         let channel = handle
@@ -176,7 +202,12 @@ where
 }
 
 #[tauri::command]
-pub async fn sftp_list(host: Host, path: String) -> Result<SftpResult, String> {
+pub async fn sftp_list(
+    db: State<'_, Arc<Db>>,
+    host_id: String,
+    path: String,
+) -> Result<SftpResult, String> {
+    let host = crate::hosts::load_host(&db, &host_id)?;
     let text = with_sftp(&host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
         Box::pin(async move {
@@ -208,11 +239,14 @@ pub async fn sftp_list(host: Host, path: String) -> Result<SftpResult, String> {
 pub async fn sftp_download(
     app: AppHandle,
     registry: State<'_, SftpTransferRegistry>,
-    host: Host,
+    db: State<'_, Arc<Db>>,
+    host_id: String,
     remote: String,
     local: String,
     transfer_id: String,
 ) -> Result<SftpResult, String> {
+    let host = crate::hosts::load_host(&db, &host_id)?;
+    validate_local_path(&local)?;
     let cancelled = registry.register(&transfer_id);
     let result = with_sftp(&host, TRANSFER_TIMEOUT, |sftp| {
         let remote = remote.clone();
@@ -243,14 +277,16 @@ pub async fn sftp_download(
                 &cancelled,
             )
             .await;
+            if count.is_err() {
+                // 取消/失败时先清理半成品本地文件（尽力而为），
+                // 并直接返回原始错误，不被收尾操作（flush/close）掩盖
+                let _ = tokio::fs::remove_file(&local).await;
+                return count;
+            }
             dst.flush()
                 .await
                 .map_err(|e| format!("刷新本地文件失败: {e}"))?;
             let _ = src.close().await;
-            if count.is_err() {
-                // 取消/失败时清理半成品本地文件（尽力而为）
-                let _ = tokio::fs::remove_file(&local).await;
-            }
             count
         })
     })
@@ -264,11 +300,14 @@ pub async fn sftp_download(
 pub async fn sftp_upload(
     app: AppHandle,
     registry: State<'_, SftpTransferRegistry>,
-    host: Host,
+    db: State<'_, Arc<Db>>,
+    host_id: String,
     local: String,
     remote: String,
     transfer_id: String,
 ) -> Result<SftpResult, String> {
+    let host = crate::hosts::load_host(&db, &host_id)?;
+    validate_local_path(&local)?;
     let cancelled = registry.register(&transfer_id);
     let result = with_sftp(&host, TRANSFER_TIMEOUT, |sftp| {
         let local = local.clone();
@@ -298,9 +337,11 @@ pub async fn sftp_upload(
                 &cancelled,
             )
             .await;
-            // 取消/失败时先清理半成品远端文件，再关流（close 的失败不应阻断清理）
             if count.is_err() {
+                // 取消/失败时先清理半成品远端文件，并直接返回原始错误，
+                // 不被 close 的失败阻断/掩盖
                 let _ = sftp.remove_file(&remote).await;
+                return count;
             }
             dst.close()
                 .await
@@ -315,7 +356,12 @@ pub async fn sftp_upload(
 }
 
 #[tauri::command]
-pub async fn sftp_delete(host: Host, path: String) -> Result<SftpResult, String> {
+pub async fn sftp_delete(
+    db: State<'_, Arc<Db>>,
+    host_id: String,
+    path: String,
+) -> Result<SftpResult, String> {
+    let host = crate::hosts::load_host(&db, &host_id)?;
     with_sftp(&host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
         Box::pin(async move {
@@ -340,7 +386,12 @@ pub async fn sftp_delete(host: Host, path: String) -> Result<SftpResult, String>
 }
 
 #[tauri::command]
-pub async fn sftp_mkdir(host: Host, path: String) -> Result<SftpResult, String> {
+pub async fn sftp_mkdir(
+    db: State<'_, Arc<Db>>,
+    host_id: String,
+    path: String,
+) -> Result<SftpResult, String> {
+    let host = crate::hosts::load_host(&db, &host_id)?;
     with_sftp(&host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
         Box::pin(async move {
@@ -355,7 +406,13 @@ pub async fn sftp_mkdir(host: Host, path: String) -> Result<SftpResult, String> 
 }
 
 #[tauri::command]
-pub async fn sftp_rename(host: Host, from: String, to: String) -> Result<SftpResult, String> {
+pub async fn sftp_rename(
+    db: State<'_, Arc<Db>>,
+    host_id: String,
+    from: String,
+    to: String,
+) -> Result<SftpResult, String> {
+    let host = crate::hosts::load_host(&db, &host_id)?;
     with_sftp(&host, Duration::from_secs(20), |sftp| {
         let from = from.clone();
         let to = to.clone();

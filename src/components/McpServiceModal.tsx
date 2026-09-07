@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   addMcpRule,
   deleteMcpRule,
@@ -23,7 +23,7 @@ type Permission = 'readonly' | 'confirm' | 'allow';
 
 const PERMISSION_OPTIONS: SelectOption<Permission>[] = [
   { value: 'readonly', label: '只读模式（不能进行写操作）' },
-  { value: 'confirm', label: '管控模式（自定义管控规则）' },
+  { value: 'confirm', label: '管控模式（写操作/管控规则需确认）' },
   { value: 'allow', label: '全部放行（可执行任意命令）' },
 ];
 
@@ -31,7 +31,7 @@ const PERMISSION_HINTS: Record<Permission, string> = {
   readonly:
     '可以执行查看类命令（ps、df、cat 等），写操作（重定向写文件、修改、删除、安装、传输等）会被拒绝。',
   confirm:
-    '仅当命令模糊匹配到你添加的自定义管控规则时，执行前会弹出确认框由你批准；系统预置危险命令不参与审批。',
+    '命中内置写/危险判定或你添加的自定义管控规则时，执行前会弹出确认框由你批准。',
   allow: '可执行任意命令，仅记录审计日志。请确保信任外部 AI 的来源。',
 };
 
@@ -44,12 +44,22 @@ export default function McpServiceModal({ hosts, onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [rules, setRules] = useState<McpRule[]>([]);
   const [ruleInput, setRuleInput] = useState('');
+  const copyTimerRef = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+    },
+    [],
+  );
 
   const load = useCallback(async () => {
     const s = await getMcpService();
     setService(s);
     setHostIds(s.host_ids);
-    setPermission(s.permission_mode as Permission);
+    setPermission(s.permission_mode);
   }, []);
 
   useEffect(() => {
@@ -101,7 +111,10 @@ export default function McpServiceModal({ hosts, onClose }: Props) {
     if (!service?.token || !service?.port) return;
     if (await copyToClipboard(configJson(service))) {
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      copyTimerRef.current = window.setTimeout(() => setCopied(false), 2000);
     } else {
       setError('复制失败，请手动选择复制');
     }

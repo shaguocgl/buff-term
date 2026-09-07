@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import {
   onSftpProgress,
@@ -37,6 +37,8 @@ interface Entry {
 interface Props {
   host: Host;
   panelWidth?: number;
+  /** 面板隐藏时保持挂载（传输任务继续），仅隐藏显示 */
+  hidden?: boolean;
   onClose: () => void;
 }
 
@@ -86,7 +88,12 @@ function parseListing(text: string): Entry[] {
   return entries;
 }
 
-export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
+export default function SftpPanel({
+  host,
+  panelWidth = 400,
+  hidden = false,
+  onClose,
+}: Props) {
   const [cwd, setCwd] = useState('/');
   const [entries, setEntries] = useState<Entry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -103,6 +110,8 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
     remote: string;
   } | null>(null);
   const [pathInput, setPathInput] = useState('/');
+  // 目录请求序号：快速连续切换目录时忽略过期响应，避免旧目录覆盖新目录
+  const loadSeqRef = useRef(0);
 
   // 跟随后端 sftp:progress 事件刷新进度条
   useEffect(() => {
@@ -133,10 +142,12 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
 
   const load = useCallback(
     async (path: string) => {
+      const seq = ++loadSeqRef.current;
       setLoading(true);
       setError(null);
       try {
-        const res = await sftpList(host, path);
+        const res = await sftpList(host.id, path);
+        if (seq !== loadSeqRef.current) return; // 已有更新的请求，丢弃过期响应
         if (res.ok) {
           setEntries(parseListing(res.text));
           setCwd(path);
@@ -145,9 +156,10 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
           setError(res.text || '目录读取失败');
         }
       } catch (e) {
+        if (seq !== loadSeqRef.current) return;
         setError(fmtError(e));
       } finally {
-        setLoading(false);
+        if (seq === loadSeqRef.current) setLoading(false);
       }
     },
     [host],
@@ -193,8 +205,8 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
     try {
       const res =
         kind === 'upload'
-          ? await sftpUpload(host, local, remote, id)
-          : await sftpDownload(host, remote, local, id);
+          ? await sftpUpload(host.id, local, remote, id)
+          : await sftpDownload(host.id, remote, local, id);
       if (!res.ok) setError(res.text || '传输失败');
       else if (kind === 'upload') load(cwd);
     } catch (e) {
@@ -225,7 +237,7 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
     // 上传前检查远端是否已存在，存在则弹窗确认覆盖
     let exists = false;
     try {
-      exists = await sftpExists(host, remote);
+      exists = await sftpExists(host.id, remote);
     } catch {
       exists = false;
     }
@@ -250,7 +262,7 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
   const doDelete = async (entry: Entry) => {
     setConfirmDelete(null);
     const remote = joinPath(cwd, entry.name);
-    await run(() => sftpDelete(host, remote), () => load(cwd));
+    await run(() => sftpDelete(host.id, remote), () => load(cwd));
   };
 
   const handleMkdir = () => {
@@ -266,18 +278,21 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
     setPromptState(null);
     if (!p) return;
     if (p.kind === 'mkdir') {
-      void run(() => sftpMkdir(host, joinPath(cwd, value)), () => load(cwd));
+      void run(() => sftpMkdir(host.id, joinPath(cwd, value)), () => load(cwd));
     } else if (p.kind === 'rename' && value !== p.entry.name) {
       void run(
         () =>
-          sftpRename(host, joinPath(cwd, p.entry.name), joinPath(cwd, value)),
+          sftpRename(host.id, joinPath(cwd, p.entry.name), joinPath(cwd, value)),
         () => load(cwd),
       );
     }
   };
 
   return (
-    <aside className="sftp-panel" style={{ width: panelWidth }}>
+    <aside
+      className="sftp-panel"
+      style={{ width: panelWidth, display: hidden ? 'none' : undefined }}
+    >
       <div className="sftp-header">
         <input
           className="sftp-path-input"
@@ -436,6 +451,8 @@ export default function SftpPanel({ host, panelWidth = 400, onClose }: Props) {
       )}
       {promptState && (
         <PromptModal
+          // key 按 kind 区分：新建/重命名切换时强制重建，避免输入框残留上一次的值
+          key={promptState.kind === 'rename' ? `rename-${promptState.entry.name}` : 'mkdir'}
           title={promptState.kind === 'mkdir' ? '新建文件夹' : '重命名'}
           label={promptState.kind === 'mkdir' ? '文件夹名称' : '新名称'}
           initialValue={promptState.kind === 'rename' ? promptState.entry.name : ''}

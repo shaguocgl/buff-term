@@ -249,12 +249,6 @@ impl Db {
         Ok(())
     }
 
-    pub fn delete(&self, id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM hosts WHERE id=?1", params![id])?;
-        Ok(())
-    }
-
     // ---------- AI 配置 ----------
 
     pub fn list_ai_providers(&self) -> rusqlite::Result<Vec<AiProvider>> {
@@ -284,73 +278,20 @@ impl Db {
         rows.collect()
     }
 
-    pub fn insert_ai_provider(&self, p: &AiProvider) -> rusqlite::Result<()> {
+    pub fn get_ai_provider(&self, id: &str) -> rusqlite::Result<Option<AiProvider>> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO ai_providers (id, name, base_url, protocol, enabled, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                p.id,
-                p.name,
-                p.base_url,
-                p.protocol,
-                p.enabled as i64,
-                p.created_at as i64,
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_ai_provider(&self, p: &AiProvider) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE ai_providers SET name=?2, base_url=?3, protocol=?4, enabled=?5
-             WHERE id=?1",
-            params![p.id, p.name, p.base_url, p.protocol, p.enabled as i64],
-        )?;
-        Ok(())
-    }
-
-    pub fn disable_all_ai_providers(&self) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("UPDATE ai_providers SET enabled=0", [])?;
-        Ok(())
-    }
-
-    pub fn set_ai_provider_enabled(&self, id: &str, enabled: bool) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE ai_providers SET enabled=?2 WHERE id=?1",
-            params![id, enabled as i64],
-        )?;
-        Ok(())
-    }
-
-    pub fn replace_ai_models(
-        &self,
-        provider_id: &str,
-        models: &[AiModel],
-    ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM ai_models WHERE provider_id=?1",
-            params![provider_id],
-        )?;
-        for (idx, m) in models.iter().enumerate() {
-            conn.execute(
-                "INSERT INTO ai_models (id, provider_id, label, model, is_active, sort)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    m.id,
-                    provider_id,
-                    m.label,
-                    m.model,
-                    m.is_active as i64,
-                    idx as i64,
-                ],
-            )?;
+        let mut provider = conn
+            .query_row(
+                "SELECT id, name, base_url, protocol, enabled, created_at
+                 FROM ai_providers WHERE id=?1",
+                params![id],
+                row_to_ai,
+            )
+            .optional()?;
+        if let Some(p) = provider.as_mut() {
+            p.models = self.models_of(&conn, &p.id)?;
         }
-        Ok(())
+        Ok(provider)
     }
 
     pub fn set_active_ai_model(
@@ -371,10 +312,72 @@ impl Db {
     }
 
     pub fn delete_ai_provider(&self, id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM ai_models WHERE provider_id=?1", params![id])?;
-        conn.execute("DELETE FROM ai_providers WHERE id=?1", params![id])?;
-        Ok(())
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM ai_models WHERE provider_id=?1", params![id])?;
+        tx.execute("DELETE FROM ai_providers WHERE id=?1", params![id])?;
+        tx.commit()
+    }
+
+    /// 原子保存 AI 提供方及其模型列表：
+    /// 可选禁用其他提供方，随后 upsert 提供方 + 全量替换模型，中间失败整体回滚。
+    pub fn save_ai_provider_tx(
+        &self,
+        provider: &AiProvider,
+        models: &[AiModel],
+        disable_others: bool,
+    ) -> rusqlite::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        if disable_others {
+            tx.execute("UPDATE ai_providers SET enabled=0", [])?;
+        }
+        tx.execute(
+            "INSERT INTO ai_providers (id, name, base_url, protocol, enabled, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+               name=excluded.name, base_url=excluded.base_url,
+               protocol=excluded.protocol, enabled=excluded.enabled",
+            params![
+                provider.id,
+                provider.name,
+                provider.base_url,
+                provider.protocol,
+                provider.enabled as i64,
+                provider.created_at as i64,
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM ai_models WHERE provider_id=?1",
+            params![provider.id],
+        )?;
+        for (idx, m) in models.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO ai_models (id, provider_id, label, model, is_active, sort)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    m.id,
+                    provider.id,
+                    m.label,
+                    m.model,
+                    m.is_active as i64,
+                    idx as i64,
+                ],
+            )?;
+        }
+        tx.commit()
+    }
+
+    /// 原子切换启用提供方（禁用全部 + 启用目标）。
+    pub fn activate_ai_provider_tx(&self, provider_id: &str) -> rusqlite::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("UPDATE ai_providers SET enabled=0", [])?;
+        tx.execute(
+            "UPDATE ai_providers SET enabled=1 WHERE id=?1",
+            params![provider_id],
+        )?;
+        tx.commit()
     }
 
     pub fn list_ai_rules(&self) -> rusqlite::Result<Vec<AiRule>> {
@@ -777,7 +780,6 @@ impl Db {
                  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
              )
              ON CONFLICT(report_id) DO UPDATE SET
-                 id=excluded.id,
                  host_id=excluded.host_id,
                  host_label=excluded.host_label,
                  provider_id=excluded.provider_id,
@@ -788,7 +790,6 @@ impl Db {
                  steps_json=excluded.steps_json,
                  status=excluded.status,
                  error=excluded.error,
-                 created_at=excluded.created_at,
                  started_at=excluded.started_at,
                  finished_at=excluded.finished_at,
                  duration_ms=excluded.duration_ms",
@@ -950,6 +951,47 @@ impl Db {
             |row| row.get(0),
         )?;
         Ok(count as u64)
+    }
+
+    /// 删除主机及其全部关联数据（指标 / 审计 / 巡检报告 / 整改记录）。
+    /// 各表无外键约束，需在应用层级联清理，避免孤儿行。
+    pub fn delete_host_cascade(&self, host_id: &str) -> rusqlite::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM hosts WHERE id=?1", params![host_id])?;
+        tx.execute("DELETE FROM host_metrics WHERE host_id=?1", params![host_id])?;
+        tx.execute("DELETE FROM audit_logs WHERE host_id=?1", params![host_id])?;
+        tx.execute(
+            "DELETE FROM inspection_reports WHERE host_id=?1",
+            params![host_id],
+        )?;
+        tx.execute("DELETE FROM remediations WHERE host_id=?1", params![host_id])?;
+        tx.commit()
+    }
+
+    /// 删除 before_ts 之前的审计日志，返回删除行数（控制库体积）。
+    pub fn prune_audit_logs(&self, before_ts: u64) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM audit_logs WHERE ts < ?1",
+            params![before_ts as i64],
+        )
+    }
+
+    /// 启动时把上次异常退出遗留的「运行中」任务标记为已取消。
+    pub fn mark_stale_running_cancelled(&self) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE inspection_reports SET status='cancelled'
+             WHERE status='running' OR status='collect' OR status='analyze' OR status='exec' OR status='render' OR status='email'",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE remediations SET status='cancelled'
+             WHERE status='planning' OR status='executing'",
+            [],
+        )?;
+        Ok(())
     }
 }
 

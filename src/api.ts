@@ -67,33 +67,33 @@ export interface SftpResult {
   text: string;
 }
 
-export const sftpList = (host: Host, path: string) =>
-  invoke<SftpResult>('sftp_list', { host, path });
+export const sftpList = (hostId: string, path: string) =>
+  invoke<SftpResult>('sftp_list', { hostId, path });
 export const sftpDownload = (
-  host: Host,
+  hostId: string,
   remote: string,
   local: string,
   transferId: string,
-) => invoke<SftpResult>('sftp_download', { host, remote, local, transferId });
+) => invoke<SftpResult>('sftp_download', { hostId, remote, local, transferId });
 export const sftpUpload = (
-  host: Host,
+  hostId: string,
   local: string,
   remote: string,
   transferId: string,
-) => invoke<SftpResult>('sftp_upload', { host, local, remote, transferId });
-export const sftpExists = (host: Host, path: string) =>
-  invoke<boolean>('sftp_exists', { host, path });
+) => invoke<SftpResult>('sftp_upload', { hostId, local, remote, transferId });
+export const sftpExists = (hostId: string, path: string) =>
+  invoke<boolean>('sftp_exists', { hostId, path });
 export const sftpCancelTransfer = (transferId: string) =>
   invoke<boolean>('sftp_cancel_transfer', { transferId });
-export const sftpDelete = (host: Host, path: string) =>
-  invoke<SftpResult>('sftp_delete', { host, path });
-export const sftpMkdir = (host: Host, path: string) =>
-  invoke<SftpResult>('sftp_mkdir', { host, path });
-export const sftpRename = (host: Host, from: string, to: string) =>
-  invoke<SftpResult>('sftp_rename', { host, from, to });
+export const sftpDelete = (hostId: string, path: string) =>
+  invoke<SftpResult>('sftp_delete', { hostId, path });
+export const sftpMkdir = (hostId: string, path: string) =>
+  invoke<SftpResult>('sftp_mkdir', { hostId, path });
+export const sftpRename = (hostId: string, from: string, to: string) =>
+  invoke<SftpResult>('sftp_rename', { hostId, from, to });
 
-export const monitorSnapshot = (host: Host) =>
-  invoke<MonitorSnapshot>('monitor_snapshot', { host });
+export const monitorSnapshot = (hostId: string) =>
+  invoke<MonitorSnapshot>('monitor_snapshot', { hostId });
 export const monitorHistory = (hostId: string, windowSecs = 1800) =>
   invoke<HostMetricPoint[]>('monitor_history', { hostId, windowSecs });
 
@@ -107,8 +107,8 @@ export interface SftpProgressPayload {
 export const onSftpProgress = (cb: (payload: SftpProgressPayload) => void) =>
   listen<SftpProgressPayload>('sftp:progress', (event) => cb(event.payload));
 
-export const startInspection = (host: Host) =>
-  invoke<string>('start_inspection', { host });
+export const startInspection = (hostId: string) =>
+  invoke<string>('start_inspection', { hostId });
 export const getInspectionReport = (id: string) =>
   invoke<InspectionReport | null>('get_inspection_report', { id });
 export const listInspectionReports = (hostId?: string, limit?: number) =>
@@ -213,6 +213,23 @@ export const onTerminalGuardApproval = (
   listen<TerminalGuardApproval>('terminal:guard-approval', (event) =>
     cb(event.payload),
   );
+
+export interface HostKeyConfirmPayload {
+  key: string;
+  host: string;
+  port: string;
+  fingerprint: string;
+  key_type: string;
+}
+
+export const onHostKeyConfirm = (
+  cb: (payload: HostKeyConfirmPayload) => void,
+) =>
+  listen<HostKeyConfirmPayload>('ssh:host-key-confirm', (event) =>
+    cb(event.payload),
+  );
+export const sshConfirmHostKey = (key: string, trust: boolean) =>
+  invoke<void>('ssh_confirm_host_key', { key, trust });
 export const onMcpApprovalRequest = (
   cb: (payload: McpApprovalRequest) => void,
 ) => listen<McpApprovalRequest>('mcp:approval-request', (event) => cb(event.payload));
@@ -304,8 +321,8 @@ export const onAiError = (cb: (sessionId: number, message: string) => void) =>
     cb(event.payload.session_id, event.payload.message),
   );
 
-export const openSession = (host: Host, cols: number, rows: number) =>
-  invoke<number>('open_session', { host, cols, rows });
+export const openSession = (hostId: string, cols: number, rows: number) =>
+  invoke<number>('open_session', { hostId, cols, rows });
 export const closeSession = (id: number) => invoke<void>('close_session', { id });
 export const sessionInput = (
   id: number,
@@ -344,16 +361,4 @@ export const onSessionStatus = (
 ) =>
   listen<SessionStatusPayload>('session:status', (event) =>
     cb(event.payload.session_id, event.payload.status),
-  );
-
-export interface SessionNoticePayload {
-  session_id: number;
-  message: string;
-}
-
-export const onSessionNotice = (
-  cb: (sessionId: number, message: string) => void,
-) =>
-  listen<SessionNoticePayload>('session:notice', (event) =>
-    cb(event.payload.session_id, event.payload.message),
   );

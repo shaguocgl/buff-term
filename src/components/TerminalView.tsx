@@ -312,7 +312,7 @@ export default function TerminalView({
     const fit = fitRef.current;
     if (!term || !fit) return;
     const { cols, rows } = normalizeDims(fit.proposeDimensions());
-    const id = await openSession(host, cols, rows);
+    const id = await openSession(host.id, cols, rows);
     if (disposedRef.current) {
       closeSession(id).catch(() => {});
       return;
@@ -429,6 +429,17 @@ export default function TerminalView({
     // 普通可打印字符直接从原生 keydown 截获发送（避免 WKWebView 丢字），
     // onData 收到对应单字节 ASCII 时直接忽略，避免 xterm 补发导致双显。
     // Cmd/Ctrl + =/-/0 作为终端字号缩放，其余组合键交给系统/浏览器。
+    //
+    // 边界标记：
+    // - composingRef：IME 组合期间（compositionstart ~ compositionend）
+    // - suppressKeyRef：compositionend 后短暂抑制「最终字符 keydown」，
+    //   因为部分浏览器会在组合结束后补发一个 isComposing=false 的 keydown，
+    //   而组合文本已通过 onData 发出，若不抑制会双写
+    // - pasteRef：paste 事件期间，粘贴的单个 ASCII 字符必须走 onData
+    //   （不经过 keydown），不能被「忽略单字节」逻辑丢掉
+    let composing = false;
+    let suppressKey = false;
+    let pasting = false;
     const handleKeyDownCapture = (event: KeyboardEvent) => {
       if (event.ctrlKey || event.metaKey) {
         if (event.key === '=' || event.key === '+') {
@@ -452,6 +463,8 @@ export default function TerminalView({
         return;
       }
       if (
+        composing ||
+        suppressKey ||
         event.isComposing ||
         event.key === 'Process' ||
         event.altKey
@@ -466,11 +479,36 @@ export default function TerminalView({
     };
     container.addEventListener('keydown', handleKeyDownCapture, true);
 
+    const handleCompositionStart = () => {
+      composing = true;
+    };
+    const handleCompositionEnd = () => {
+      composing = false;
+      suppressKey = true;
+      window.setTimeout(() => {
+        suppressKey = false;
+      }, 50);
+    };
+    const handlePaste = () => {
+      pasting = true;
+    };
+    container.addEventListener('compositionstart', handleCompositionStart);
+    container.addEventListener('compositionend', handleCompositionEnd);
+    container.addEventListener('paste', handlePaste, true);
+
     term.onData((data) => {
       const bytes = Array.from(new TextEncoder().encode(data));
+      // 粘贴数据（含单个 ASCII 字符）必须发送：粘贴不经过 keydown 直发路径
+      const fromPaste = pasting;
+      pasting = false;
       // 可打印 ASCII 单字节由原生 keydown 直发，这里忽略 xterm 的补发；
       // 控制键、粘贴、输入法等多字节/特殊输入仍走 onData。
-      if (bytes.length === 1 && bytes[0] >= 0x20 && bytes[0] <= 0x7e) {
+      if (
+        !fromPaste &&
+        bytes.length === 1 &&
+        bytes[0] >= 0x20 &&
+        bytes[0] <= 0x7e
+      ) {
         return;
       }
       // 单次回车：读取当前控制台行（含 readline 补全/历史/编辑后的最终命令），
@@ -538,6 +576,9 @@ export default function TerminalView({
       reconnectScheduledRef.current = false;
       observer.disconnect();
       container.removeEventListener('keydown', handleKeyDownCapture, true);
+      container.removeEventListener('compositionstart', handleCompositionStart);
+      container.removeEventListener('compositionend', handleCompositionEnd);
+      container.removeEventListener('paste', handlePaste, true);
       unData?.();
       unStatus?.();
       const sid = sessionIdRef.current;

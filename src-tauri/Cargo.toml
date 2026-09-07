@@ -1,6 +1,6 @@
 [package]
 name = "buff-term"
-version = "1.0.4"
+version = "1.0.5"
 description = "桌面端 SSH 管理 + AI Agent 工具"
 authors = ["buffTerm"]
 edition = "2021"
@@ -43,3 +43,5 @@ hmac = "0.12"
 sha2 = "0.10"
 percent-encoding = "2"
 comrak = "0.54"
+# 与 russh 0.61 锁定的同一版本（已存在于依赖树），用于生成主机密钥指纹
+ssh-key = { version = "=0.7.0-rc.10", features = ["ed25519", "p256", "p384", "p521"] }

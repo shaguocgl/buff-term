@@ -5,7 +5,7 @@ use crate::credentials;
 use crate::db::Db;
 use crate::models::{AuditLog, Host, PermissionMode};
 use crate::russh::RusshManager;
-use crate::safety::is_dangerous;
+use crate::safety::{is_dangerous, is_write_operation, normalize_tool, sanitize};
 use crate::session::SessionManager;
 use crate::util::{extract_error, now, truncate, truncate_output};
 use futures_util::StreamExt;
@@ -21,7 +21,9 @@ use tools::{execute_tool, infer_tool_name, parse_args, system_prompt, tools_sche
 pub struct AgentManager {
     controls: Mutex<HashMap<u32, mpsc::Sender<Control>>>,
     histories: Mutex<HashMap<String, Vec<serde_json::Value>>>,
-    generations: Mutex<HashMap<String, u64>>,
+    /// 会话级代数：按 session_id 索引（此前按 host_id，同主机多会话互相干扰，
+    /// 一个会话 reset 会导致另一个会话的历史写回被丢弃）
+    generations: Mutex<HashMap<u32, u64>>,
 }
 
 pub enum Control {
@@ -61,13 +63,13 @@ impl AgentManager {
         self.histories.lock().unwrap().remove(host_id);
     }
 
-    /// 当前主机的历史代数：每次 reset 递增，用于让正在运行的循环在结束时放弃写回旧历史。
-    fn generation(&self, host_id: &str) -> u64 {
-        *self.generations.lock().unwrap().get(host_id).unwrap_or(&0)
+    /// 当前会话的历史代数：每次 reset 递增，用于让正在运行的循环在结束时放弃写回旧历史。
+    fn generation(&self, session_id: u32) -> u64 {
+        *self.generations.lock().unwrap().get(&session_id).unwrap_or(&0)
     }
 
-    fn bump_generation(&self, host_id: &str) {
-        *self.generations.lock().unwrap().entry(host_id.to_string()).or_insert(0) += 1;
+    fn bump_generation(&self, session_id: u32) {
+        *self.generations.lock().unwrap().entry(session_id).or_insert(0) += 1;
     }
 }
 
@@ -162,7 +164,7 @@ pub async fn agent_chat(
     let russh = app.state::<RusshManager>();
     let (tx, rx) = mpsc::channel::<Control>(8);
     agents.set_control(session_id, tx);
-    let generation = agents.generation(&host.id);
+    let generation = agents.generation(session_id);
 
     // 会话开始时静默采集一份主机快照写入历史指标，让趋势数据随对话自然累积。
     // 失败不影响对话流程。
@@ -177,7 +179,7 @@ pub async fn agent_chat(
     let url = format!("{}/chat/completions", provider.base_url.trim_end_matches('/'));
 
     let mut history = agents.history(&host.id);
-    let system = system_prompt(&host, &provider, &model);
+    let system = system_prompt(&host, &provider, &model, permission_mode);
     if history.is_empty() {
         history.push(serde_json::json!({
             "role": "system",
@@ -206,7 +208,7 @@ pub async fn agent_chat(
     };
     let result = run_agent_loop(&loop_ctx, rx, &mut history).await;
 
-    if agents.generation(&host.id) == generation {
+    if agents.generation(session_id) == generation {
         trim_history(&mut history, MAX_HISTORY_ROUNDS);
         agents.save_history(&host.id, history);
     }
@@ -249,11 +251,11 @@ pub fn agent_reset(
     session_id: u32,
     host_id: String,
 ) -> Result<(), String> {
-    // 停止正在运行的 agent 循环（若有），并递增代数使旧循环在结束时放弃写回历史
+    // 停止正在运行的 agent 循环（若有），并递增该会话的代数使旧循环在结束时放弃写回历史
     if let Some(tx) = agents.controls.lock().unwrap().get(&session_id).cloned() {
         let _ = tx.try_send(Control::Cancel);
     }
-    agents.bump_generation(&host_id);
+    agents.bump_generation(session_id);
     agents.clear_history(&host_id);
     Ok(())
 }
@@ -347,39 +349,46 @@ async fn run_agent_loop(
         }
 
         let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
+        // 字节缓冲而非 String：SSE 的 UTF-8 多字节字符可能被切分到两个 chunk，
+        // 逐 chunk 用 from_utf8_lossy 会破坏跨 chunk 的中文/emoji，改为先累积字节、
+        // 在 \n 边界处解码完整行
+        let mut buf: Vec<u8> = Vec::new();
         let mut content = String::new();
         let mut tool_calls: HashMap<usize, ToolCallAcc> = HashMap::new();
         let mut done = false;
 
-        while let Some(chunk) = stream.next().await {
-            if let Ok(Control::Cancel) = rx.try_recv() {
-                return Ok(());
-            }
-            let chunk = chunk.map_err(|e| format!("读取响应流失败: {e}"))?;
-            buf.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(pos) = buf.find('\n') {
-                let line = buf[..pos].trim().to_string();
-                buf = buf[pos + 1..].to_string();
-                if !line.starts_with("data:") {
-                    continue;
+        // select! 让「停止」能中断阻塞中的流式读取，而不是等当前 chunk 返回
+        loop {
+            tokio::select! {
+                chunk = stream.next() => {
+                    let Some(chunk) = chunk else { break };
+                    let chunk = chunk.map_err(|e| format!("读取响应流失败: {e}"))?;
+                    buf.extend_from_slice(&chunk);
+                    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                        let line = String::from_utf8_lossy(&buf[..pos]).trim().to_string();
+                        buf.drain(..pos + 1);
+                        if !line.starts_with("data:") {
+                            continue;
+                        }
+                        let data = line[5..].trim();
+                        if data == "[DONE]" {
+                            done = true;
+                            break;
+                        }
+                        let value: serde_json::Value = match serde_json::from_str(data) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        apply_delta(
+                            &value["choices"][0]["delta"],
+                            &mut content,
+                            &mut tool_calls,
+                            app,
+                            session_id,
+                        );
+                    }
                 }
-                let data = line[5..].trim();
-                if data == "[DONE]" {
-                    done = true;
-                    break;
-                }
-                let value: serde_json::Value = match serde_json::from_str(data) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                apply_delta(
-                    &value["choices"][0]["delta"],
-                    &mut content,
-                    &mut tool_calls,
-                    app,
-                    session_id,
-                );
+                _ = rx.recv() => return Ok(()), // 用户点击停止
             }
             if done {
                 break;
@@ -387,7 +396,7 @@ async fn run_agent_loop(
         }
         // 处理流结束时缓冲区中残留的未换行数据，避免丢失最后一段内容
         if !buf.is_empty() {
-            let data = buf.trim();
+            let data = String::from_utf8_lossy(&buf).trim().to_string();
             if let Some(payload) = data.strip_prefix("data:") {
                 let payload = payload.trim();
                 if payload != "[DONE]" {
@@ -460,6 +469,10 @@ async fn run_agent_loop(
             let started = Instant::now();
             let args = parse_args(&acc.args);
 
+            // 统一规范化工具名：审批判定与实际执行必须使用同一套规范名，
+            // 否则模型用别名（exec/shell/run）或空名调用 exec_command 时可绕过审批门。
+            let normalized_name = normalize_tool(infer_tool_name(&acc.name, &args));
+
             // 判定是否需要审批，并记录审批原因（随 request 事件下发，供审批卡片展示）
             let mut reason: Option<String> = None;
             let need_approval = match permission_mode {
@@ -469,7 +482,7 @@ async fn run_agent_loop(
                 }
                 PermissionMode::None => false,
                 PermissionMode::Smart => {
-                    if acc.name != "exec_command" {
+                    if normalized_name != "exec_command" {
                         false
                     } else {
                         let marked = args
@@ -487,16 +500,18 @@ async fn run_agent_loop(
                         } else if is_dangerous(command) {
                             reason = Some("命中内置危险命令规则".to_string());
                             true
+                        } else if let Some(p) = danger_rules.iter().find(|p| {
+                            !p.trim().is_empty() && c.contains(&p.to_ascii_lowercase())
+                        }) {
+                            reason = Some(format!("命中自定义规则：{p}"));
+                            true
+                        } else if is_write_operation(command) {
+                            // 写操作（修改/删除/安装/网络写入等）同样需要批准，
+                            // 与 MCP 只读模式的判定口径一致，避免静默放行文件修改
+                            reason = Some("命令包含写操作，需要批准".to_string());
+                            true
                         } else {
-                            match danger_rules.iter().find(|p| {
-                                !p.trim().is_empty() && c.contains(&p.to_ascii_lowercase())
-                            }) {
-                                Some(p) => {
-                                    reason = Some(format!("命中自定义规则：{p}"));
-                                    true
-                                }
-                                None => false,
-                            }
+                            false
                         }
                     }
                 }
@@ -548,7 +563,7 @@ async fn run_agent_loop(
                     let _ = insert_audit(db, AuditEntry {
                         session_id,
                         host,
-                        acc: &acc,
+                        tool_name: normalized_name,
                         args: &args,
                         permission_mode: permission_mode.as_str(),
                         approval: "denied",
@@ -569,13 +584,18 @@ async fn run_agent_loop(
             let approval_label = if need_approval { "approved" } else { "auto" };
             emit_tool_state(app, session_id, &acc, &args, "running", None, None, None);
 
-            let result = execute_tool(db, russh, host, &acc.name, &args).await;
+            // select! 让「停止」能中断正在执行的工具：drop future 会关闭本地 SSH 通道；
+            // 远端命令可能仍在运行（与超时语义一致），但本地立即停止等待
+            let result = tokio::select! {
+                r = execute_tool(db, russh, host, normalized_name, &args) => r,
+                _ = rx.recv() => return Ok(()),
+            };
             match result {
                 Ok(output) => {
                     let _ = insert_audit(db, AuditEntry {
                         session_id,
                         host,
-                        acc: &acc,
+                        tool_name: normalized_name,
                         args: &args,
                         permission_mode: permission_mode.as_str(),
                         approval: approval_label,
@@ -603,7 +623,7 @@ async fn run_agent_loop(
                     let _ = insert_audit(db, AuditEntry {
                         session_id,
                         host,
-                        acc: &acc,
+                        tool_name: normalized_name,
                         args: &args,
                         permission_mode: permission_mode.as_str(),
                         approval: approval_label,
@@ -637,7 +657,8 @@ async fn run_agent_loop(
 struct AuditEntry<'a> {
     session_id: u32,
     host: &'a Host,
-    acc: &'a ToolCallAcc,
+    /// 规范化后的工具名（审批与执行共用）
+    tool_name: &'a str,
     args: &'a serde_json::Value,
     permission_mode: &'a str,
     approval: &'a str,
@@ -653,15 +674,20 @@ fn insert_audit(db: &Db, entry: AuditEntry) -> Result<(), String> {
         .and_then(|c| c.as_str())
         .map(String::from)
         .unwrap_or_else(|| serde_json::to_string(entry.args).unwrap_or_default());
-    let result = entry.result.map(|r| truncate(&r, 300));
+    // 落库前统一脱敏：命令本身可能包含密码/Token（如 mysql -pSecret、curl -u user:pass），
+    // 与终端拦截审计的 sanitize 口径保持一致
+    let summary = truncate(&sanitize(&summary), 500);
+    let result = entry
+        .result
+        .map(|r| truncate(&sanitize(&r), 300));
     let log = AuditLog {
         id: uuid::Uuid::new_v4().to_string(),
         ts: now(),
         session_id: Some(entry.session_id),
         host_id: entry.host.id.clone(),
         host_label: format!("{} ({})", entry.host.name, entry.host.label_address()),
-        tool_name: entry.acc.name.clone(),
-        summary: truncate(&summary, 500),
+        tool_name: entry.tool_name.to_string(),
+        summary,
         permission_mode: entry.permission_mode.to_string(),
         approval: entry.approval.to_string(),
         status: entry.status.to_string(),

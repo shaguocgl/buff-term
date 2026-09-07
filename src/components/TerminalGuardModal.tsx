@@ -31,21 +31,24 @@ export default function TerminalGuardModal({ onClose }: Props) {
         setSettings(s);
         setTimeoutInput(String(s.timeout_secs));
       })
-      .catch((e) => setError(String(e)));
+      .catch((e) => setError(fmtError(e)));
     listTerminalRules()
       .then(setRules)
-      .catch((e) => setError(String(e)));
+      .catch((e) => setError(fmtError(e)));
   }, []);
 
   const updateSettings = async (patch: Partial<TerminalGuardSettings>) => {
     if (!settings) return;
+    const prev = settings;
     const next = { ...settings, ...patch };
     setSettings(next);
     try {
       const saved = await saveTerminalGuardSettings(next);
       setSettings(saved);
     } catch (e) {
-      setError(String(e));
+      // 保存失败回滚乐观更新，避免 UI 显示与后端实际状态不一致
+      setSettings(prev);
+      setError(fmtError(e));
     }
   };
 
@@ -68,7 +71,7 @@ export default function TerminalGuardModal({ onClose }: Props) {
       setRules((prev) => [rule, ...prev]);
       setRuleInput('');
     } catch (e) {
-      setError(String(e));
+      setError(fmtError(e));
     }
   };
 
@@ -78,7 +81,7 @@ export default function TerminalGuardModal({ onClose }: Props) {
       await deleteTerminalRule(id);
       setRules((prev) => prev.filter((r) => r.id !== id));
     } catch (e) {
-      setError(String(e));
+      setError(fmtError(e));
     }
   };
 

@@ -46,6 +46,8 @@ import Modal from './Modal';
 interface Props {
   host: Host;
   panelWidth?: number;
+  /** 面板隐藏时保持挂载（巡检/整改继续运行），仅隐藏显示 */
+  hidden?: boolean;
   onClose: () => void;
 }
 
@@ -56,7 +58,12 @@ const RISK_LABEL: Record<string, string> = {
   unknown: '未知',
 };
 
-export default function InspectionPanel({ host, panelWidth = 620, onClose }: Props) {
+export default function InspectionPanel({
+  host,
+  panelWidth = 620,
+  hidden = false,
+  onClose,
+}: Props) {
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [status, setStatus] = useState<InspectionStatus | null>(null);
   const [progress, setProgress] =
@@ -151,7 +158,7 @@ export default function InspectionPanel({ host, panelWidth = 620, onClose }: Pro
     setIntervention('');
     setEditSteps([]);
     try {
-      const id = await startInspection(host);
+      const id = await startInspection(host.id);
       currentIdRef.current = id;
       setCurrentId(id);
     } catch (e) {
@@ -441,7 +448,10 @@ export default function InspectionPanel({ host, panelWidth = 620, onClose }: Pro
   };
 
   return (
-    <aside className="inspection-panel" style={{ width: panelWidth }}>
+    <aside
+      className="inspection-panel"
+      style={{ width: panelWidth, display: hidden ? 'none' : undefined }}
+    >
       <div className="inspection-header">
         <div className="inspection-title">
           <InspectIcon size={16} />
@@ -603,7 +613,10 @@ export default function InspectionPanel({ host, panelWidth = 620, onClose }: Pro
                       {editSteps.map((step, index) => {
                         const dangerous = isDangerousCommand(step.command);
                         return (
-                          <div className="remediation-step-edit" key={index}>
+                          <div
+                            className="remediation-step-edit"
+                            key={`${step.command}-${index}`}
+                          >
                             <div className="remediation-step-head">
                               <span className="remediation-step-index">
                                 步骤 {index + 1}
@@ -808,7 +821,7 @@ export default function InspectionPanel({ host, panelWidth = 620, onClose }: Pro
               {pendingDangerSteps
                 .filter((s) => isDangerousCommand(s.command))
                 .map((step, index) => (
-                  <li key={index}>
+                  <li key={`${step.command}-${index}`}>
                     <code>{step.command}</code>
                   </li>
                 ))}

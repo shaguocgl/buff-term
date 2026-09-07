@@ -60,9 +60,10 @@ pub struct InspectionError {
 pub async fn start_inspection(
     app: AppHandle,
     state: State<'_, InspectionManager>,
-    host: Host,
+    db: State<'_, Arc<Db>>,
+    host_id: String,
 ) -> Result<String, String> {
-    let db = app.state::<Arc<Db>>();
+    let host = crate::hosts::load_host(&db, &host_id)?;
     let (provider, model) = crate::ai::resolve_active_ai(&db)?;
 
     let report = InspectionReport {
@@ -414,7 +415,7 @@ async fn run_ai_inspection(ctx: &AiInspectionCtx<'_>, baseline: &str) -> Result<
                 .state::<RusshManager>()
                 .exec(&host, command, Duration::from_secs(20))
                 .await
-                .map(|o| truncate_output(&o.text, 8000))
+                .map(|o| sanitize(&truncate_output(&o.text, 8000)))
                 .unwrap_or_else(|e| format!("执行失败: {e}"));
             messages.push(tool_message(&id, &out));
         }

@@ -63,6 +63,8 @@ interface Props {
   models: AiModel[];
   providerId: string | null;
   panelWidth?: number;
+  /** 面板隐藏时保持挂载（不中断运行中的 AI 会话），仅隐藏显示 */
+  hidden?: boolean;
   onOpenConfig: () => void;
   onModelSwitched: () => void;
   onClose: () => void;
@@ -244,6 +246,7 @@ export default function ChatPanel({
   models,
   providerId,
   panelWidth = 384,
+  hidden = false,
   onOpenConfig,
   onModelSwitched,
   onClose,
@@ -392,7 +395,8 @@ export default function ChatPanel({
       unTool?.();
       unDone?.();
       unError?.();
-      agentCancel(sessionId).catch(() => {});
+      // 注意：不在这里调用 agentCancel —— 面板隐藏/切换不应中断运行中的 AI 会话，
+      // 仅在用户点击「停止」按钮时取消（后端会话结束前事件照常收，重开面板可看历史）
     };
   }, [sessionId, updateLastAssistant]);
 
@@ -484,7 +488,10 @@ export default function ChatPanel({
   );
 
   return (
-    <aside className="chat-panel" style={{ width: panelWidth }}>
+    <aside
+      className="chat-panel"
+      style={{ width: panelWidth, display: hidden ? 'none' : undefined }}
+    >
       <div className="chat-header">
         <div className="chat-header-left">
           <span className="chat-ai-icon">
@@ -663,7 +670,7 @@ export default function ChatPanel({
           {permissionMode === 'all' &&
             '安全级别：全部审核 · 每个命令执行前都需要你批准'}
           {permissionMode === 'smart' &&
-            '安全级别：智能审核 · 危险命令需批准，只读命令自动执行'}
+            '安全级别：智能审核 · 写/危险命令需批准，只读命令自动执行'}
           {permissionMode === 'none' &&
             '安全级别：全部放行 · 命令直接执行，请谨慎使用'}
           {' · Enter 发送 / Shift+Enter 换行'}
