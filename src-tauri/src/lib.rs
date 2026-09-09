@@ -115,6 +115,7 @@ pub fn run() {
             agent::agent_reset,
             agent::get_history,
             agent::get_task_plan,
+            agent::get_context_usage,
             audit::list_audit_logs,
             sftp::sftp_list,
             sftp::sftp_download,

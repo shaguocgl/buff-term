@@ -283,6 +283,18 @@ export const getHistory = (hostId: string) =>
   invoke<HistoryEntry[]>('get_history', { hostId });
 export const getTaskPlan = (hostId: string) =>
   invoke<TaskPlan | null>('get_task_plan', { hostId });
+export const getContextUsage = (
+  hostId: string,
+  sessionId: number,
+  contextWindow: number,
+  model: string,
+) =>
+  invoke<ContextUsage>('get_context_usage', {
+    hostId,
+    sessionId,
+    contextWindow,
+    model,
+  });
 
 export interface AiStreamPayload {
   session_id: number;

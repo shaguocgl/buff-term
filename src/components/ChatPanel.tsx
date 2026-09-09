@@ -10,6 +10,7 @@ import {
   agentCancel,
   agentChat,
   agentReset,
+  getContextUsage,
   getHistory,
   getTaskPlan,
   onAiDone,
@@ -297,13 +298,20 @@ export default function ChatPanel({
 
   const currentModelId =
     models.find((m) => m.is_active)?.id ?? models[0]?.id ?? null;
-  const contextPct =
-    contextUsage && contextUsage.budget_tokens > 0
-      ? (contextUsage.used_tokens / contextUsage.budget_tokens) * 100
-      : 0;
+  const currentModel =
+    models.find((m) => m.id === currentModelId) ?? models[0] ?? null;
+  const currentWindow = currentModel?.context_window ?? 0;
+  const displayWindow = contextUsage?.window_tokens ?? currentWindow;
+  const displayUsed = contextUsage?.used_tokens ?? 0;
+  const displayBudget =
+    contextUsage?.budget_tokens ?? Math.round(currentWindow * 0.7);
+  const windowPct =
+    displayWindow > 0 ? (displayUsed / displayWindow) * 100 : 0;
 
   const handleModelChange = async (modelId: string) => {
     if (!providerId || !modelId) return;
+    // 切换模型后旧模型的用量/预算不再适用，先清空，等下一轮 ai:context 事件。
+    setContextUsage(null);
     try {
       await setActiveAiModel(providerId, modelId);
       onModelSwitched();
@@ -355,6 +363,43 @@ export default function ChatPanel({
       cancelled = true;
     };
   }, [hostId]);
+
+  // 切换模型/打开对话时，按当前完整历史 + 新模型窗口立即估算用量，
+  // 而不是等下一轮对话；下一轮真实 ai:context 事件会用实测值覆盖它。
+  useEffect(() => {
+    if (currentWindow <= 0) {
+      setContextUsage(null);
+      return;
+    }
+    let cancelled = false;
+    getContextUsage(
+      hostId,
+      sessionId,
+      currentWindow,
+      currentModel?.model ?? '',
+    )
+      .then((usage) => {
+        if (!cancelled) setContextUsage(usage);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setContextUsage({
+          session_id: sessionId,
+          used_tokens: 0,
+          history_tokens: 0,
+          budget_tokens: Math.round(currentWindow * 0.7),
+          window_tokens: currentWindow,
+          compressed_rounds: 0,
+          strategy: 'none',
+          estimated: true,
+          calibrated: false,
+          warning: fmtError(err),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hostId, sessionId, currentWindow, currentModel?.model]);
 
   useEffect(() => {
     let cancelled = false;
@@ -711,28 +756,52 @@ export default function ChatPanel({
             </button>
           </div>
         )}
-        {contextUsage && (
+        {(contextUsage || currentWindow > 0) && (
           <div
             className="context-usage"
-            title={`模型窗口 ${formatTokens(contextUsage.window_tokens)} tokens；${contextUsage.estimated ? '当前为估算值' : '平台已返回实测值'}`}
+            title={
+              contextUsage
+                ? `模型窗口 ${formatTokens(displayWindow)} tokens；本次发送约 ${formatTokens(contextUsage.used_tokens)} tokens；输入预算 ${formatTokens(displayBudget)} tokens（预留 30% 给输出与安全余量）；${
+                    contextUsage.estimated
+                      ? contextUsage.calibrated
+                        ? '用量为本地估算，已用平台实测值校准'
+                        : '用量为本地估算（平台未返回 usage）'
+                      : '用量为平台返回的实测值（usage）'
+                  }`
+                : `模型窗口 ${formatTokens(currentWindow)} tokens；输入预算 ${formatTokens(displayBudget)} tokens（预留 30% 给输出与安全余量）；正在按当前历史估算用量`
+            }
           >
             <div className="context-usage-bar">
               <span
                 className={`context-usage-fill${
-                  contextPct > 85 ? ' danger' : contextPct >= 60 ? ' warn' : ''
+                  windowPct > 70 ? ' danger' : windowPct >= 50 ? ' warn' : ''
                 }`}
-                style={{ width: `${Math.min(100, contextPct)}%` }}
+                style={{ width: `${Math.min(100, windowPct)}%` }}
               />
             </div>
             <div className="context-usage-text">
-              上下文 {formatTokens(contextUsage.used_tokens)} /{' '}
-              {formatTokens(contextUsage.budget_tokens)}
-              {contextUsage.estimated ? '（估算）' : ''}
-              {contextUsage.strategy !== 'none'
-                ? ` · 已压缩${contextUsage.compressed_rounds > 0 ? ` ${contextUsage.compressed_rounds} 轮` : ''}`
-                : ''}
+              {contextUsage ? (
+                <>
+                  上下文 {formatTokens(contextUsage.used_tokens)} /{' '}
+                  {formatTokens(contextUsage.window_tokens)} · 输入预算{' '}
+                  {formatTokens(contextUsage.budget_tokens)}
+                  {contextUsage.estimated
+                    ? contextUsage.calibrated
+                      ? '（估算·已校准）'
+                      : '（估算）'
+                    : '（实测）'}
+                  {contextUsage.compressed_rounds > 0
+                    ? ` · 已压缩 ${contextUsage.compressed_rounds} 轮`
+                    : ''}
+                </>
+              ) : (
+                <>
+                  模型窗口 {formatTokens(currentWindow)} · 输入预算{' '}
+                  {formatTokens(displayBudget)}（正在估算当前历史…）
+                </>
+              )}
             </div>
-            {contextUsage.warning && (
+            {contextUsage?.warning && (
               <div className="context-usage-warning">{contextUsage.warning}</div>
             )}
           </div>

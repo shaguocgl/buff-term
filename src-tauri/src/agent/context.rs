@@ -30,7 +30,7 @@ const MESSAGE_OVERHEAD_TOKENS: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum CompressionStrategy {
+pub enum CompressionStrategy {
     None,
     Extractive,
     ReactiveReduce,
@@ -38,14 +38,19 @@ pub(crate) enum CompressionStrategy {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct ContextUsage {
+pub struct ContextUsage {
     pub session_id: u32,
+    /// 本次真正发送给模型的视图估算（含压缩后）。
     pub used_tokens: usize,
+    /// 当前完整 canonical history 的估算（未压缩），用于解释“历史已经有多大”。
+    pub history_tokens: usize,
     pub budget_tokens: usize,
     pub window_tokens: u32,
     pub compressed_rounds: usize,
     pub strategy: CompressionStrategy,
     pub estimated: bool,
+    /// 估算值是否已用平台实测值校准过。
+    pub calibrated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }
@@ -372,6 +377,7 @@ pub(crate) fn build_context_view(
     let (system_msg, rounds) = split_system_and_rounds(history);
     let system = system_msg.as_ref().map(content).unwrap_or("").to_string();
     let tools_tokens = estimate_tools_tokens(tools);
+    let full_history_tokens = estimate_messages_tokens(history) + tools_tokens;
     let plan_tokens = plan_block.map(estimate_text_tokens).unwrap_or(0);
     let system_tokens = estimate_text_tokens(&system);
     let input_budget = ((window as f64) * INPUT_BUDGET_RATIO) as usize;
@@ -402,11 +408,13 @@ pub(crate) fn build_context_view(
             usage: ContextUsage {
                 session_id,
                 used_tokens,
+                history_tokens: full_history_tokens,
                 budget_tokens: input_budget,
                 window_tokens: window,
                 compressed_rounds: 0,
                 strategy: CompressionStrategy::None,
                 estimated: true,
+                calibrated: false,
                 warning: None,
             },
         });
@@ -430,11 +438,13 @@ pub(crate) fn build_context_view(
             usage: ContextUsage {
                 session_id,
                 used_tokens: natural_used,
+                history_tokens: full_history_tokens,
                 budget_tokens: input_budget,
                 window_tokens: window,
                 compressed_rounds: natural_compressed,
                 strategy: CompressionStrategy::None,
                 estimated: true,
+                calibrated: false,
                 warning: None,
             },
         });
@@ -459,11 +469,13 @@ pub(crate) fn build_context_view(
                 usage: ContextUsage {
                     session_id,
                     used_tokens: used,
+                    history_tokens: full_history_tokens,
                     budget_tokens: input_budget,
                     window_tokens: window,
                     compressed_rounds: compressed,
                     strategy: CompressionStrategy::Extractive,
                     estimated: true,
+                    calibrated: false,
                     warning: None,
                 },
             });
@@ -480,11 +492,13 @@ pub(crate) fn build_context_view(
             usage: ContextUsage {
                 session_id,
                 used_tokens: used,
+                history_tokens: full_history_tokens,
                 budget_tokens: input_budget,
                 window_tokens: window,
                 compressed_rounds: compressed,
                 strategy: CompressionStrategy::Extractive,
                 estimated: true,
+                calibrated: false,
                 warning: None,
             },
         });
@@ -500,11 +514,13 @@ pub(crate) fn build_context_view(
             usage: ContextUsage {
                 session_id,
                 used_tokens: used,
+                history_tokens: full_history_tokens,
                 budget_tokens: input_budget,
                 window_tokens: window,
                 compressed_rounds: compressed,
                 strategy: CompressionStrategy::HardReset,
                 estimated: true,
+                calibrated: false,
                 warning: Some(
                     "上下文已达上限，已重置早期历史，仅保留任务台账、任务锚点和最近一轮"
                         .to_string(),

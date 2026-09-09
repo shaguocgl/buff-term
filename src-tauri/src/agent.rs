@@ -12,7 +12,7 @@ use crate::util::{extract_error, now, truncate, truncate_output};
 use context::{build_context_view, CompressionStrategy, ContextUsage};
 use futures_util::StreamExt;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -25,6 +25,10 @@ pub struct AgentManager {
     histories: Mutex<HashMap<String, Vec<serde_json::Value>>>,
     /// 每台主机的结构化任务台账：跨压缩窗口保存目标/进度/失败尝试，永不裁剪。
     plans: Mutex<HashMap<String, TaskPlan>>,
+    /// 不支持 stream_options.include_usage 的平台（按模型缓存），避免每次请求都重试。
+    usage_unsupported: Mutex<HashSet<String>>,
+    /// 每模型的估算校准系数（实测 / 本地估算 的 EMA），平台不返回 usage 时用于修正显示。
+    calibration: Mutex<HashMap<String, f64>>,
     /// 会话级代数：按 session_id 索引（此前按 host_id，同主机多会话互相干扰，
     /// 一个会话 reset 会导致另一个会话的历史写回被丢弃）
     generations: Mutex<HashMap<u32, u64>>,
@@ -74,6 +78,33 @@ impl AgentManager {
 
     fn clear_plan(&self, host_id: &str) {
         self.plans.lock().unwrap().remove(host_id);
+    }
+
+    fn usage_unsupported(&self, key: &str) -> bool {
+        self.usage_unsupported.lock().unwrap().contains(key)
+    }
+
+    fn mark_usage_unsupported(&self, key: &str) {
+        self.usage_unsupported
+            .lock()
+            .unwrap()
+            .insert(key.to_string());
+    }
+
+    fn calibration_factor(&self, key: &str) -> f64 {
+        *self.calibration.lock().unwrap().get(key).unwrap_or(&1.0)
+    }
+
+    /// 用平台实测 prompt_tokens 校准本地估算：EMA 收敛，限制在 0.25–4.0 之间，
+    /// 避免个别异常值把系数拉飞。
+    fn update_calibration(&self, key: &str, actual: usize, estimated: usize) {
+        if estimated == 0 {
+            return;
+        }
+        let ratio = (actual as f64 / estimated as f64).clamp(0.25, 4.0);
+        let mut map = self.calibration.lock().unwrap();
+        let entry = map.entry(key.to_string()).or_insert(1.0);
+        *entry = (*entry * 0.7 + ratio * 0.3).clamp(0.25, 4.0);
     }
 
     /// 当前会话的历史代数：每次 reset 递增，用于让正在运行的循环在结束时放弃写回旧历史。
@@ -315,6 +346,39 @@ pub fn get_task_plan(
     Ok(agents.plan(&host_id))
 }
 
+/// 不发送模型请求，仅按当前完整历史 + 指定模型窗口估算发送视图用量。
+/// 用于切换模型/打开对话时立即刷新进度条，避免显示上一个模型的旧数据。
+#[tauri::command]
+pub fn get_context_usage(
+    agents: State<'_, AgentManager>,
+    host_id: String,
+    session_id: u32,
+    context_window: u32,
+    model: String,
+) -> Result<ContextUsage, String> {
+    let history = agents.history(&host_id);
+    let plan_block = agents
+        .plan(&host_id)
+        .map(|p| p.render_block())
+        .filter(|block| !block.trim().is_empty());
+    let tools = tools_schema();
+    let view = build_context_view(
+        &history,
+        plan_block.as_deref(),
+        &tools,
+        context_window,
+        session_id,
+    )?;
+    let mut usage = view.usage;
+    let factor = agents.calibration_factor(&model);
+    if factor != 1.0 {
+        usage.used_tokens = ((usage.used_tokens as f64) * factor).round() as usize;
+        usage.history_tokens = ((usage.history_tokens as f64) * factor).round() as usize;
+        usage.calibrated = true;
+    }
+    Ok(usage)
+}
+
 /// `run_agent_loop` 所需的只读上下文，聚合以避免函数参数过多（此前 13 个位置参数，
 /// 顺序稍有出错编译器也无法察觉）。`rx`/`history` 会被消费/可变借用，单独作为参数传入。
 /// 字段全部是引用或已实现 Copy 的类型，因此整体可以 Copy，方便按值解构。
@@ -384,9 +448,14 @@ async fn run_agent_loop(
             .plan(&host.id)
             .map(|p| p.render_block())
             .filter(|block| !block.trim().is_empty());
+        let calibration_key = model.to_string();
         let mut effective_window = context_window;
         let mut reactive_retried = false;
+        // 首次尝试携带 stream_options.include_usage；平台拒绝时去掉并记住，后续请求不再带。
+        let mut include_usage = !agents.usage_unsupported(&calibration_key);
+        let mut usage_param_retried = false;
         let mut last_usage: ContextUsage;
+        let mut last_raw_estimate = 0usize;
         // 发送前构建视图；平台报上下文超限时按 50% 窗口重试一次。
         let resp = loop {
             let view = match build_context_view(
@@ -416,14 +485,25 @@ async fn run_agent_loop(
                     effective_window
                 ));
             }
-            let _ = app.emit("ai:context", usage.clone());
+            // 平台不返回 usage 时，用该模型的历史校准系数修正本地估算。
+            let factor = agents.calibration_factor(&calibration_key);
+            last_raw_estimate = usage.used_tokens;
+            if factor != 1.0 {
+                usage.used_tokens = ((usage.used_tokens as f64) * factor).round() as usize;
+                usage.history_tokens =
+                    ((usage.history_tokens as f64) * factor).round() as usize;
+                usage.calibrated = true;
+            }
             last_usage = usage;
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "model": model,
                 "messages": view.messages,
                 "stream": true,
                 "tools": &tools,
             });
+            if include_usage {
+                body["stream_options"] = serde_json::json!({"include_usage": true});
+            }
             let resp = client
                 .post(url)
                 .bearer_auth(api_key)
@@ -451,6 +531,15 @@ async fn run_agent_loop(
             let status = resp.status();
             if !status.is_success() {
                 let text = resp.text().await.unwrap_or_default();
+                if include_usage
+                    && !usage_param_retried
+                    && is_unsupported_stream_options_error(&text)
+                {
+                    usage_param_retried = true;
+                    include_usage = false;
+                    agents.mark_usage_unsupported(&calibration_key);
+                    continue;
+                }
                 if !reactive_retried && is_context_length_error(&text) {
                     reactive_retried = true;
                     effective_window = (effective_window / 2).max(1);
@@ -543,12 +632,14 @@ async fn run_agent_loop(
             }
         }
 
-        if let Some(used) = reported_prompt_tokens {
-            let mut usage = last_usage;
-            usage.used_tokens = used;
+        let mut usage = last_usage;
+        if let Some(actual) = reported_prompt_tokens {
+            agents.update_calibration(&calibration_key, actual, last_raw_estimate);
+            usage.used_tokens = actual;
             usage.estimated = false;
-            let _ = app.emit("ai:context", usage);
+            usage.calibrated = false;
         }
+        let _ = app.emit("ai:context", usage);
 
         // 模型漏填工具名时，从参数推断（与 execute_tool 的兜底分支共用同一套推断逻辑，
         // 避免两处分别维护导致遗漏，例如此前 query_history 的 metric 参数未被覆盖）
@@ -921,6 +1012,22 @@ fn is_context_length_error(text: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+/// 判断平台是否因为不认识 `stream_options` 字段而拒绝请求。
+fn is_unsupported_stream_options_error(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    if lower.contains("stream_options") {
+        return true;
+    }
+    let mentions_param = lower.contains("parameter")
+        || lower.contains("argument")
+        || lower.contains("field");
+    let unsupported = lower.contains("unknown")
+        || lower.contains("unrecognized")
+        || lower.contains("unsupported")
+        || lower.contains("extra");
+    mentions_param && unsupported
+}
+
 fn apply_delta(
     delta: &serde_json::Value,
     content: &mut String,
@@ -1008,5 +1115,32 @@ mod tests {
         ));
         assert!(is_context_length_error("prompt is too long"));
         assert!(!is_context_length_error("invalid api key"));
+    }
+
+    #[test]
+    fn detects_unsupported_stream_options_errors() {
+        assert!(is_unsupported_stream_options_error(
+            "Unrecognized request argument supplied: stream_options"
+        ));
+        assert!(is_unsupported_stream_options_error(
+            "Unknown parameter: stream_options"
+        ));
+        assert!(is_unsupported_stream_options_error(
+            "Extra fields not permitted"
+        ));
+        assert!(!is_unsupported_stream_options_error("invalid api key"));
+    }
+
+    #[test]
+    fn calibration_ema_converges_and_clamps() {
+        let agents = AgentManager::default();
+        agents.update_calibration("m", 200, 100);
+        assert!(agents.calibration_factor("m") > 1.0);
+        for _ in 0..30 {
+            agents.update_calibration("m", 200, 100);
+        }
+        assert!((agents.calibration_factor("m") - 2.0).abs() < 0.05);
+        agents.update_calibration("m", 100_000, 1);
+        assert!(agents.calibration_factor("m") <= 4.0);
     }
 }

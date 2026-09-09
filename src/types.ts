@@ -106,12 +106,17 @@ export type CompressionStrategy =
 /** 每次模型调用前的上下文用量与压缩状态。 */
 export interface ContextUsage {
   session_id: number;
+  /** 本次真正发送给模型的视图估算（含压缩后） */
   used_tokens: number;
+  /** 当前完整历史（未压缩）的估算，用于说明“历史已经有多大” */
+  history_tokens: number;
   budget_tokens: number;
   window_tokens: number;
   compressed_rounds: number;
   strategy: CompressionStrategy;
   estimated: boolean;
+  /** 估算值是否已用平台实测值校准过 */
+  calibrated: boolean;
   warning?: string | null;
 }
 
