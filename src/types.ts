@@ -40,12 +40,16 @@ export interface AiModel {
   label: string;
   model: string;
   is_active: boolean;
+  /** 该模型支持的上下文窗口（token），由用户在 AI 配置中填写 */
+  context_window: number;
 }
 
 export interface AiModelInput {
   label: string;
   model: string;
   is_active?: boolean;
+  /** 该模型支持的上下文窗口（token），必填 */
+  context_window: number;
 }
 
 export interface AiProviderInput {
@@ -80,6 +84,35 @@ export interface AiRule {
   pattern: string;
   enabled: boolean;
   created_at: number;
+}
+
+/** AI Agent 的结构化任务台账，跨上下文压缩窗口保留。 */
+export interface TaskPlan {
+  goal: string;
+  constraints: string[];
+  completed: string[];
+  pending: string[];
+  failed: string[];
+  current_step: string;
+  updated_at: number;
+}
+
+export type CompressionStrategy =
+  | 'none'
+  | 'extractive'
+  | 'reactive_reduce'
+  | 'hard_reset';
+
+/** 每次模型调用前的上下文用量与压缩状态。 */
+export interface ContextUsage {
+  session_id: number;
+  used_tokens: number;
+  budget_tokens: number;
+  window_tokens: number;
+  compressed_rounds: number;
+  strategy: CompressionStrategy;
+  estimated: boolean;
+  warning?: string | null;
 }
 
 export interface AuditLog {

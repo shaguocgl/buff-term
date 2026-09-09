@@ -11,15 +11,18 @@ import {
   agentChat,
   agentReset,
   getHistory,
+  getTaskPlan,
   onAiDone,
   onAiError,
+  onAiContext,
+  onAiPlan,
   onAiStream,
   onAiTool,
   setActiveAiModel,
 } from '../api';
 import { copyToClipboard } from '../utils/clipboard';
 import { fmtError } from '../utils/errors';
-import type { AiModel, HistoryEntry } from '../types';
+import type { AiModel, ContextUsage, HistoryEntry, TaskPlan } from '../types';
 import Select, { type SelectOption } from './Select';
 import {
   RefreshIcon,
@@ -82,6 +85,12 @@ function safeParseArgs(raw: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1000)}k`;
+  return String(n);
 }
 
 // 非命令类工具把参数翻成人话，避免直接展示 JSON
@@ -264,6 +273,9 @@ export default function ChatPanel({
   const activeAssistantId = useRef<number | null>(null);
   const composingRef = useRef(false);
   const hasSentRef = useRef(false);
+  const [plan, setPlan] = useState<TaskPlan | null>(null);
+  const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
+  const [planExpanded, setPlanExpanded] = useState(true);
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -285,6 +297,10 @@ export default function ChatPanel({
 
   const currentModelId =
     models.find((m) => m.is_active)?.id ?? models[0]?.id ?? null;
+  const contextPct =
+    contextUsage && contextUsage.budget_tokens > 0
+      ? (contextUsage.used_tokens / contextUsage.budget_tokens) * 100
+      : 0;
 
   const handleModelChange = async (modelId: string) => {
     if (!providerId || !modelId) return;
@@ -330,10 +346,24 @@ export default function ChatPanel({
 
   useEffect(() => {
     let cancelled = false;
+    getTaskPlan(hostId)
+      .then((p) => {
+        if (!cancelled) setPlan(p);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [hostId]);
+
+  useEffect(() => {
+    let cancelled = false;
     let unStream: (() => void) | undefined;
     let unTool: (() => void) | undefined;
     let unDone: (() => void) | undefined;
     let unError: (() => void) | undefined;
+    let unPlan: (() => void) | undefined;
+    let unContext: (() => void) | undefined;
 
     onAiStream((sid, delta) => {
         if (sid !== sessionId) return;
@@ -389,12 +419,32 @@ export default function ChatPanel({
         else unError = fn;
       });
 
+    onAiPlan((payload) => {
+        if (payload.session_id !== sessionId) return;
+        setPlan(payload.plan);
+      })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unPlan = fn;
+      });
+
+    onAiContext((payload) => {
+        if (payload.session_id !== sessionId) return;
+        setContextUsage(payload);
+      })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unContext = fn;
+      });
+
     return () => {
       cancelled = true;
       unStream?.();
       unTool?.();
       unDone?.();
       unError?.();
+      unPlan?.();
+      unContext?.();
       // 注意：不在这里调用 agentCancel —— 面板隐藏/切换不应中断运行中的 AI 会话，
       // 仅在用户点击「停止」按钮时取消（后端会话结束前事件照常收，重开面板可看历史）
     };
@@ -515,6 +565,8 @@ export default function ChatPanel({
               activeAssistantId.current = null;
               hasSentRef.current = false;
               setBusy(false);
+              setPlan(null);
+              setContextUsage(null);
             }}
           >
             <RefreshIcon size={15} />
@@ -526,6 +578,71 @@ export default function ChatPanel({
       </div>
 
       <div className="chat-messages" ref={scrollRef} onScroll={handleScroll}>
+        {plan && (
+          <div className="task-plan-card">
+            <button
+              type="button"
+              className="task-plan-head"
+              onClick={() => setPlanExpanded((v) => !v)}
+              title={planExpanded ? '收起任务台账' : '展开任务台账'}
+            >
+              <span className="task-plan-title">任务台账</span>
+              <span className="task-plan-progress">
+                {plan.completed.length}/{plan.completed.length + plan.pending.length}
+              </span>
+              <span className="task-plan-toggle">{planExpanded ? '收起' : '展开'}</span>
+            </button>
+            {plan.goal && <div className="task-plan-goal">{plan.goal}</div>}
+            {plan.current_step && (
+              <div className="task-plan-step">当前：{plan.current_step}</div>
+            )}
+            {planExpanded && (
+              <div className="task-plan-details">
+                {plan.constraints.length > 0 && (
+                  <div>
+                    <strong>约束</strong>
+                    <ul>
+                      {plan.constraints.map((item, i) => (
+                        <li key={`c${i}`}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {plan.completed.length > 0 && (
+                  <div>
+                    <strong>已完成</strong>
+                    <ul>
+                      {plan.completed.map((item, i) => (
+                        <li key={`d${i}`}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {plan.pending.length > 0 && (
+                  <div>
+                    <strong>待办</strong>
+                    <ul>
+                      {plan.pending.map((item, i) => (
+                        <li key={`p${i}`}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {plan.failed.length > 0 && (
+                  <div className="task-plan-failed">
+                    <strong>失败尝试</strong>
+                    <ul>
+                      {plan.failed.map((item, i) => (
+                        <li key={`f${i}`}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {messages.length === 0 && (
           <div className="chat-empty">
             <SparklesIcon size={26} />
@@ -592,6 +709,32 @@ export default function ChatPanel({
             <button className="btn secondary small" onClick={onOpenConfig}>
               去配置
             </button>
+          </div>
+        )}
+        {contextUsage && (
+          <div
+            className="context-usage"
+            title={`模型窗口 ${formatTokens(contextUsage.window_tokens)} tokens；${contextUsage.estimated ? '当前为估算值' : '平台已返回实测值'}`}
+          >
+            <div className="context-usage-bar">
+              <span
+                className={`context-usage-fill${
+                  contextPct > 85 ? ' danger' : contextPct >= 60 ? ' warn' : ''
+                }`}
+                style={{ width: `${Math.min(100, contextPct)}%` }}
+              />
+            </div>
+            <div className="context-usage-text">
+              上下文 {formatTokens(contextUsage.used_tokens)} /{' '}
+              {formatTokens(contextUsage.budget_tokens)}
+              {contextUsage.estimated ? '（估算）' : ''}
+              {contextUsage.strategy !== 'none'
+                ? ` · 已压缩${contextUsage.compressed_rounds > 0 ? ` ${contextUsage.compressed_rounds} 轮` : ''}`
+                : ''}
+            </div>
+            {contextUsage.warning && (
+              <div className="context-usage-warning">{contextUsage.warning}</div>
+            )}
           </div>
         )}
         <div className="chat-controls">

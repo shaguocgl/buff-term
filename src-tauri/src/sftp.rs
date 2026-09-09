@@ -1,6 +1,6 @@
 use crate::db::Db;
 use crate::models::Host;
-use crate::russh::do_connect;
+use crate::russh::{connect, RusshManager};
 use chrono::{DateTime, Utc};
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{FileAttributes, FileType};
@@ -35,7 +35,15 @@ fn validate_local_path(local: &str) -> Result<(), String> {
         return Err("本地路径必须是绝对路径".to_string());
     }
     let lower = local.to_ascii_lowercase();
-    for bad in ["/.ssh/", "\\.ssh\\", "/.gnupg/", "\\.gnupg\\", "/.aws/", "\\.aws\\", "/.azure/"] {
+    for bad in [
+        "/.ssh/",
+        "\\.ssh\\",
+        "/.gnupg/",
+        "\\.gnupg\\",
+        "/.aws/",
+        "\\.aws\\",
+        "/.azure/",
+    ] {
         if lower.contains(bad) {
             return Err(format!("本地路径包含敏感目录（{bad}），已拒绝该操作"));
         }
@@ -86,11 +94,12 @@ pub fn sftp_cancel_transfer(
 #[tauri::command]
 pub async fn sftp_exists(
     db: State<'_, Arc<Db>>,
+    russh: State<'_, RusshManager>,
     host_id: String,
     path: String,
 ) -> Result<bool, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    with_sftp(&host, Duration::from_secs(20), |sftp| {
+    with_sftp(&russh, &host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
         Box::pin(async move { Ok(sftp.metadata(path.as_str()).await.is_ok()) })
     })
@@ -167,48 +176,92 @@ where
     Ok(transferred)
 }
 
-async fn with_sftp<F, T>(host: &Host, timeout: Duration, f: F) -> Result<T, String>
+/// 通过 RusshManager 连接池执行 SFTP 操作：复用已有 SSH 连接，避免每次操作都重新
+/// TCP 握手 + 认证。通道打开 / SFTP 初始化失败时清理旧连接并重连重试一次
+/// （与 exec 的重连策略一致）；SFTP 操作本身的错误（文件不存在等）不重试。
+async fn with_sftp<F, T>(
+    russh: &RusshManager,
+    host: &Host,
+    timeout: Duration,
+    f: F,
+) -> Result<T, String>
 where
     F: for<'a> Fn(&'a SftpSession) -> Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>,
 {
-    let handle = tokio::time::timeout(
-        // 需覆盖首次连接的主机指纹确认窗口（60s）
-        Duration::from_secs(60),
-        do_connect(host, None),
-    )
-    .await
-    .map_err(|_| "SSH 连接超时（60 秒）".to_string())??;
+    let slot = russh.slot(host);
+    let mut guard = slot.lock().await;
 
-    let op = async {
-        let channel = handle
-            .channel_open_session()
-            .await
-            .map_err(|e| format!("打开 SFTP 通道失败: {e}"))?;
-        channel
-            .request_subsystem(true, "sftp")
-            .await
-            .map_err(|e| format!("启动 SFTP 子系统失败: {e}"))?;
-        let sftp = SftpSession::new(channel.into_stream())
-            .await
-            .map_err(|e| format!("初始化 SFTP 失败: {e}"))?;
-        let result = f(&sftp).await;
-        let _ = sftp.close().await;
-        result
-    };
+    for attempt in 0..2 {
+        if guard.is_none() {
+            russh.evict_if_needed(&host.id);
+            *guard = Some(connect(host).await?);
+        }
+        let handle = guard.as_mut().unwrap();
 
-    tokio::time::timeout(timeout, op)
-        .await
-        .map_err(|_| "操作超时".to_string())?
+        // 阶段一：打开通道 + 启动 SFTP 子系统（连接级操作，失败可重连重试）
+        let sftp_setup = async {
+            let channel = handle
+                .channel_open_session()
+                .await
+                .map_err(|e| format!("打开 SFTP 通道失败: {e}"))?;
+            channel
+                .request_subsystem(true, "sftp")
+                .await
+                .map_err(|e| format!("启动 SFTP 子系统失败: {e}"))?;
+            SftpSession::new(channel.into_stream())
+                .await
+                .map_err(|e| format!("初始化 SFTP 失败: {e}"))
+        };
+
+        let sftp = match tokio::time::timeout(timeout, sftp_setup).await {
+            Ok(Ok(session)) => session,
+            Ok(Err(e)) => {
+                // 通道/子系统初始化失败：连接可能已失效，清理后重连重试
+                *guard = None;
+                if attempt == 0 {
+                    continue;
+                }
+                return Err(e);
+            }
+            Err(_) => {
+                *guard = None;
+                if attempt == 0 {
+                    continue;
+                }
+                return Err("操作超时".to_string());
+            }
+        };
+
+        // 阶段二：执行 SFTP 操作（业务级操作，失败不重试，避免重复副作用）
+        let op = async {
+            let result = f(&sftp).await;
+            let _ = sftp.close().await;
+            result
+        };
+
+        let result = tokio::time::timeout(timeout, op).await;
+        russh.touch(&host.id);
+        return match result {
+            Ok(r) => r,
+            Err(_) => {
+                // 操作超时：SFTP session 可能处于不一致状态，清理连接避免下次复用出问题
+                *guard = None;
+                Err("操作超时".to_string())
+            }
+        };
+    }
+    unreachable!()
 }
 
 #[tauri::command]
 pub async fn sftp_list(
     db: State<'_, Arc<Db>>,
+    russh: State<'_, RusshManager>,
     host_id: String,
     path: String,
 ) -> Result<SftpResult, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    let text = with_sftp(&host, Duration::from_secs(20), |sftp| {
+    let text = with_sftp(&russh, &host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
         Box::pin(async move {
             let dir = sftp
@@ -240,6 +293,7 @@ pub async fn sftp_download(
     app: AppHandle,
     registry: State<'_, SftpTransferRegistry>,
     db: State<'_, Arc<Db>>,
+    russh: State<'_, RusshManager>,
     host_id: String,
     remote: String,
     local: String,
@@ -248,7 +302,7 @@ pub async fn sftp_download(
     let host = crate::hosts::load_host(&db, &host_id)?;
     validate_local_path(&local)?;
     let cancelled = registry.register(&transfer_id);
-    let result = with_sftp(&host, TRANSFER_TIMEOUT, |sftp| {
+    let result = with_sftp(&russh, &host, TRANSFER_TIMEOUT, |sftp| {
         let remote = remote.clone();
         let local = local.clone();
         let transfer_id = transfer_id.clone();
@@ -301,6 +355,7 @@ pub async fn sftp_upload(
     app: AppHandle,
     registry: State<'_, SftpTransferRegistry>,
     db: State<'_, Arc<Db>>,
+    russh: State<'_, RusshManager>,
     host_id: String,
     local: String,
     remote: String,
@@ -309,7 +364,7 @@ pub async fn sftp_upload(
     let host = crate::hosts::load_host(&db, &host_id)?;
     validate_local_path(&local)?;
     let cancelled = registry.register(&transfer_id);
-    let result = with_sftp(&host, TRANSFER_TIMEOUT, |sftp| {
+    let result = with_sftp(&russh, &host, TRANSFER_TIMEOUT, |sftp| {
         let local = local.clone();
         let remote = remote.clone();
         let transfer_id = transfer_id.clone();
@@ -358,11 +413,12 @@ pub async fn sftp_upload(
 #[tauri::command]
 pub async fn sftp_delete(
     db: State<'_, Arc<Db>>,
+    russh: State<'_, RusshManager>,
     host_id: String,
     path: String,
 ) -> Result<SftpResult, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    with_sftp(&host, Duration::from_secs(20), |sftp| {
+    with_sftp(&russh, &host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
         Box::pin(async move {
             let meta = sftp
@@ -388,11 +444,12 @@ pub async fn sftp_delete(
 #[tauri::command]
 pub async fn sftp_mkdir(
     db: State<'_, Arc<Db>>,
+    russh: State<'_, RusshManager>,
     host_id: String,
     path: String,
 ) -> Result<SftpResult, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    with_sftp(&host, Duration::from_secs(20), |sftp| {
+    with_sftp(&russh, &host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
         Box::pin(async move {
             sftp.create_dir(path)
@@ -408,12 +465,13 @@ pub async fn sftp_mkdir(
 #[tauri::command]
 pub async fn sftp_rename(
     db: State<'_, Arc<Db>>,
+    russh: State<'_, RusshManager>,
     host_id: String,
     from: String,
     to: String,
 ) -> Result<SftpResult, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    with_sftp(&host, Duration::from_secs(20), |sftp| {
+    with_sftp(&russh, &host, Duration::from_secs(20), |sftp| {
         let from = from.clone();
         let to = to.clone();
         Box::pin(async move {

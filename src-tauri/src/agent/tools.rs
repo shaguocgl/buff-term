@@ -23,18 +23,20 @@ pub(crate) fn system_prompt(
         crate::models::PermissionMode::Smart => {
             "exec_command 中只读命令会自动执行；写操作（修改、删除、安装、下载等）、\
              命中危险规则或你标记 requires_approval 的命令会经过用户批准，获批后才执行，\
-             请先说明意图。".to_string()
+             请先说明意图。"
+                .to_string()
         }
         crate::models::PermissionMode::None => {
             "exec_command 会直接执行、不再逐条审批；但破坏性操作（删除、格式化、改权限、\
-             停服务等）仍应明确提示风险并给出命令原文。".to_string()
+             停服务等）仍应明确提示风险并给出命令原文。"
+                .to_string()
         }
     };
     format!(
         "你是 buffTerm，运行在用户本地的 SSH 管理工具中，帮助用户管理远程服务器。\n\
          当前由 {} 平台提供能力，当前配置的底层模型是 {}。\n\
          当前连接的服务器：{}（{}@{}:{}）\n\
-         可用工具：exec_command（执行命令）、read_file（读文件）、list_dir（列目录）、resource_usage（资源占用）、query_history（查询历史指标趋势）。\n\
+         可用工具：exec_command（执行命令）、read_file（读文件）、list_dir（列目录）、resource_usage（资源占用）、query_history（查询历史指标趋势）、update_task_plan（更新任务台账）。\n\
          规则：\n\
          1. {}\n\
          2. 命令输出可能被截断，只基于已有信息回答，不要编造。\n\
@@ -43,14 +45,18 @@ pub(crate) fn system_prompt(
          5. 身份说明：当用户询问“你是什么模型/你由谁开发”时，如实回答你由 {} 驱动、配置的模型为 {}，
             以及你是 buffTerm；不要声称自己是任何其他 AI 助手（如 ChatGPT、Claude、Gemini 等），
             也不要编造版本号或开发厂商信息。\n\
-         6. 工具调用约定：工具名称必须是以下之一——exec_command、read_file、list_dir、resource_usage、query_history；
+         6. 工具调用约定：工具名称必须是以下之一——exec_command、read_file、list_dir、resource_usage、query_history、update_task_plan；
             每次工具调用都必须包含完整的 name 字段且不能为空，不要发明新工具名；参数放入 arguments（JSON 对象）。\n\
          7. 当用户询问“最近怎么样”、“有没有异常”、“是不是变慢了”等涉及变化的问题时，优先调用 query_history 查看趋势，
             而不是只调用 resource_usage 看当下值。趋势比绝对值更有诊断价值——一个从 30% 涨到 78% 的磁盘比一个稳定在 78% 的磁盘更紧急。
             query_history 会返回历史序列、变化斜率和外推预测（如“按当前增速，X 天后达到 90%”），这是单次快照无法提供的信息。
             根据分析目的选择合适的 granularity 和 window_hours：看最近几小时的细节波动用 minute + 小窗口；
             看今天的走势用 hour + 24～48 小时窗口；看长周期趋势/容量规划用 day + 更大窗口（最长 90 天）。
-            不确定时可不填 granularity，会按 window_hours 自动选择合适粒度。",
+            不确定时可不填 granularity，会按 window_hours 自动选择合适粒度。\n\
+         8. 多步任务（安装、部署、迁移、排障、批量修改等）开始前必须先调用 update_task_plan 建立计划；
+            每完成或失败一步后必须更新台账，失败尝试要写入 failed 并说明原因。
+            不得在没有新依据时重复已失败的同一做法；台账会在每轮自动注入，不会因历史压缩而丢失。
+            update_task_plan 只更新任务台账，不访问服务器，不需要审批。",
         provider.name,
         model,
         host.name,
@@ -143,6 +149,41 @@ pub(crate) fn tools_schema() -> serde_json::Value {
                 }
             }
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "update_task_plan",
+                "description": "创建或更新当前任务的结构化计划。多步任务（安装、部署、迁移、排障）开始前必须先调用一次，并在每完成或失败一步后更新。该工具只更新本地任务台账，不访问服务器、不需要审批。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "goal": { "type": "string", "description": "一句话目标" },
+                        "constraints": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "必须遵守的约束，如端口、版本、不能重启的服务等"
+                        },
+                        "completed": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "已完成的步骤"
+                        },
+                        "pending": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "待办步骤"
+                        },
+                        "failed": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "失败尝试及原因，避免重复同一做法"
+                        },
+                        "current_step": { "type": "string", "description": "当前正在执行的步骤" }
+                    },
+                    "required": ["goal"]
+                }
+            }
+        },
     ])
 }
 
@@ -173,6 +214,12 @@ pub(crate) fn infer_tool_name<'a>(name: &'a str, args: &serde_json::Value) -> &'
         "read_file"
     } else if args.get("metric").is_some() || args.get("window_hours").is_some() {
         "query_history"
+    } else if args.get("goal").is_some()
+        || args.get("pending").is_some()
+        || args.get("completed").is_some()
+        || args.get("current_step").is_some()
+    {
+        "update_task_plan"
     } else if args.as_object().map(|m| m.is_empty()).unwrap_or(false) {
         "resource_usage"
     } else {
@@ -209,14 +256,22 @@ pub(crate) async fn execute_tool(
                 .and_then(|p| p.as_str())
                 .ok_or_else(|| "缺少 path 参数".to_string())?;
             let out = russh
-                .exec(host, &format!("cat -- {}", shq(path)), std::time::Duration::from_secs(15))
+                .exec(
+                    host,
+                    &format!("cat -- {}", shq(path)),
+                    std::time::Duration::from_secs(15),
+                )
                 .await?;
             Ok(sanitize(&format_exec_output(&out)))
         }
         "list_dir" => {
             let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
             let out = russh
-                .exec(host, &format!("ls -lah -- {}", shq(path)), std::time::Duration::from_secs(15))
+                .exec(
+                    host,
+                    &format!("ls -lah -- {}", shq(path)),
+                    std::time::Duration::from_secs(15),
+                )
                 .await?;
             Ok(sanitize(&format_exec_output(&out)))
         }
@@ -229,7 +284,10 @@ pub(crate) async fn execute_tool(
         }
         "query_history" => {
             let metric = args.get("metric").and_then(|v| v.as_str()).unwrap_or("cpu");
-            let window_h = args.get("window_hours").and_then(|v| v.as_f64()).unwrap_or(168.0);
+            let window_h = args
+                .get("window_hours")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(168.0);
             let window_h = window_h.clamp(1.0, 2160.0);
             let granularity = args
                 .get("granularity")
@@ -246,7 +304,8 @@ pub(crate) async fn execute_tool(
             // 查询上限按窗口大小动态计算，覆盖最小采样间隔（60s）下窗口内可能出现的
             // 全部行数；同时设硬上限（5 万行）保护内存/性能，超过时保留最新样本，
             // 日粒度/小时粒度的趋势聚合不受影响
-            let limit = (((window_h * 3600.0 / 60.0) as u64).saturating_add(500)).min(50_000) as u32;
+            let limit =
+                (((window_h * 3600.0 / 60.0) as u64).saturating_add(500)).min(50_000) as u32;
             let rows = db
                 .list_metrics(&host.id, since, limit)
                 .map_err(|e| format!("查询历史指标失败: {e}"))?;
@@ -314,5 +373,11 @@ mod tests {
     fn infer_tool_name_defaults_empty_object_to_resource_usage() {
         let args = serde_json::json!({});
         assert_eq!(infer_tool_name("", &args), "resource_usage");
+    }
+
+    #[test]
+    fn infer_tool_name_infers_update_task_plan_from_goal() {
+        let args = serde_json::json!({"goal": "部署 nginx", "pending": ["启动服务"]});
+        assert_eq!(infer_tool_name("", &args), "update_task_plan");
     }
 }

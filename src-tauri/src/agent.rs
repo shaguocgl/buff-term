@@ -1,13 +1,15 @@
+mod context;
 mod tools;
 mod trend;
 
 use crate::credentials;
 use crate::db::Db;
-use crate::models::{AuditLog, Host, PermissionMode};
+use crate::models::{AuditLog, Host, PermissionMode, TaskPlan};
 use crate::russh::RusshManager;
 use crate::safety::{is_dangerous, is_write_operation, normalize_tool, sanitize};
 use crate::session::SessionManager;
 use crate::util::{extract_error, now, truncate, truncate_output};
+use context::{build_context_view, CompressionStrategy, ContextUsage};
 use futures_util::StreamExt;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -21,16 +23,15 @@ use tools::{execute_tool, infer_tool_name, parse_args, system_prompt, tools_sche
 pub struct AgentManager {
     controls: Mutex<HashMap<u32, mpsc::Sender<Control>>>,
     histories: Mutex<HashMap<String, Vec<serde_json::Value>>>,
+    /// 每台主机的结构化任务台账：跨压缩窗口保存目标/进度/失败尝试，永不裁剪。
+    plans: Mutex<HashMap<String, TaskPlan>>,
     /// 会话级代数：按 session_id 索引（此前按 host_id，同主机多会话互相干扰，
     /// 一个会话 reset 会导致另一个会话的历史写回被丢弃）
     generations: Mutex<HashMap<u32, u64>>,
 }
 
 pub enum Control {
-    Approve {
-        tool_call_id: String,
-        allow: bool,
-    },
+    Approve { tool_call_id: String, allow: bool },
     Cancel,
 }
 
@@ -63,13 +64,35 @@ impl AgentManager {
         self.histories.lock().unwrap().remove(host_id);
     }
 
+    fn plan(&self, host_id: &str) -> Option<TaskPlan> {
+        self.plans.lock().unwrap().get(host_id).cloned()
+    }
+
+    fn set_plan(&self, host_id: &str, plan: TaskPlan) {
+        self.plans.lock().unwrap().insert(host_id.to_string(), plan);
+    }
+
+    fn clear_plan(&self, host_id: &str) {
+        self.plans.lock().unwrap().remove(host_id);
+    }
+
     /// 当前会话的历史代数：每次 reset 递增，用于让正在运行的循环在结束时放弃写回旧历史。
     fn generation(&self, session_id: u32) -> u64 {
-        *self.generations.lock().unwrap().get(&session_id).unwrap_or(&0)
+        *self
+            .generations
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .unwrap_or(&0)
     }
 
     fn bump_generation(&self, session_id: u32) {
-        *self.generations.lock().unwrap().entry(session_id).or_insert(0) += 1;
+        *self
+            .generations
+            .lock()
+            .unwrap()
+            .entry(session_id)
+            .or_insert(0) += 1;
     }
 }
 
@@ -102,6 +125,12 @@ pub struct AiDone {
 pub struct AiError {
     pub session_id: u32,
     pub message: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct AiPlan {
+    pub session_id: u32,
+    pub plan: TaskPlan,
 }
 
 #[derive(Default)]
@@ -151,8 +180,13 @@ pub async fn agent_chat(
     let host = sessions
         .host(session_id)
         .ok_or_else(|| "会话不存在或已断开".to_string())?;
-    let (provider, model) = crate::ai::resolve_active_ai(&db)?;
-    eprintln!("[agent] 使用模型: {}（{}）", model, provider.name);
+    let (provider, model_info) = crate::ai::resolve_active_ai_model(&db)?;
+    let model = model_info.model.clone();
+    let context_window = model_info.context_window;
+    eprintln!(
+        "[agent] 使用模型: {}（{}，窗口 {} tokens）",
+        model, provider.name, context_window
+    );
     let api_key = credentials::get_api_key(&provider.id)
         .ok_or_else(|| "API Key 未找到，请在 AI 配置中检查".to_string())?;
     let danger_rules: Vec<String> = db
@@ -176,7 +210,10 @@ pub async fn agent_chat(
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
-    let url = format!("{}/chat/completions", provider.base_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/chat/completions",
+        provider.base_url.trim_end_matches('/')
+    );
 
     let mut history = agents.history(&host.id);
     let system = system_prompt(&host, &provider, &model, permission_mode);
@@ -199,17 +236,18 @@ pub async fn agent_chat(
         url: &url,
         api_key: &api_key,
         model: &model,
+        context_window,
         host: &host,
         session_id,
         permission_mode,
         danger_rules: &danger_rules,
         db: &db,
         russh: &russh,
+        agents: agents.inner(),
     };
     let result = run_agent_loop(&loop_ctx, rx, &mut history).await;
 
     if agents.generation(session_id) == generation {
-        trim_history(&mut history, MAX_HISTORY_ROUNDS);
         agents.save_history(&host.id, history);
     }
     agents.clear_control(session_id);
@@ -257,6 +295,7 @@ pub fn agent_reset(
     }
     agents.bump_generation(session_id);
     agents.clear_history(&host_id);
+    agents.clear_plan(&host_id);
     Ok(())
 }
 
@@ -266,6 +305,14 @@ pub fn get_history(
     host_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
     Ok(agents.history(&host_id))
+}
+
+#[tauri::command]
+pub fn get_task_plan(
+    agents: State<'_, AgentManager>,
+    host_id: String,
+) -> Result<Option<TaskPlan>, String> {
+    Ok(agents.plan(&host_id))
 }
 
 /// `run_agent_loop` 所需的只读上下文，聚合以避免函数参数过多（此前 13 个位置参数，
@@ -278,12 +325,14 @@ struct AgentLoopCtx<'a> {
     url: &'a str,
     api_key: &'a str,
     model: &'a str,
+    context_window: u32,
     host: &'a Host,
     session_id: u32,
     permission_mode: PermissionMode,
     danger_rules: &'a [String],
     db: &'a Db,
     russh: &'a RusshManager,
+    agents: &'a AgentManager,
 }
 
 async fn run_agent_loop(
@@ -297,56 +346,128 @@ async fn run_agent_loop(
         url,
         api_key,
         model,
+        context_window,
         host,
         session_id,
         permission_mode,
         danger_rules,
         db,
         russh,
+        agents,
     } = *ctx;
     let mut iterations = 0;
+    // 迭代次数上限按权限模式动态调整：none 模式无需逐条审批，复杂多步运维任务
+    // 可能需要更多工具调用；smart/all 模式下每条危险命令都需审批，上限保持保守。
+    let max_iterations = match permission_mode {
+        PermissionMode::None => 30,
+        PermissionMode::Smart | PermissionMode::All => 12,
+    };
     loop {
         iterations += 1;
-        if iterations > 12 {
-            let msg = "工具调用次数过多，已停止".to_string();
-            let _ = app.emit("ai:error", AiError { session_id, message: msg.clone() });
+        if iterations > max_iterations {
+            let msg = format!("工具调用次数过多（上限 {max_iterations}），已停止");
+            let _ = app.emit(
+                "ai:error",
+                AiError {
+                    session_id,
+                    message: msg.clone(),
+                },
+            );
             return Err(msg);
         }
         if let Ok(Control::Cancel) = rx.try_recv() {
             return Ok(());
         }
 
-        let body = serde_json::json!({
-            "model": model,
-            "messages": history,
-            "stream": true,
-            "tools": tools_schema(),
-        });
-        let resp = client
-            .post(url)
-            .bearer_auth(api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                let detail = e.to_string();
-                let msg = if e.is_timeout() {
-                    format!("请求 AI 平台超时（120s），模型可能响应过慢或网络不畅: {detail}")
-                } else if e.is_connect() {
-                    format!("无法连接 AI 平台，请检查网络或 Base URL: {detail}")
-                } else {
-                    format!("请求 AI 平台失败: {detail}")
-                };
-                let _ = app.emit("ai:error", AiError { session_id, message: msg.clone() });
-                msg
-            })?;
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            let msg = extract_error(&text, status);
-            let _ = app.emit("ai:error", AiError { session_id, message: msg.clone() });
-            return Err(msg);
-        }
+        let tools = tools_schema();
+        let plan_block = agents
+            .plan(&host.id)
+            .map(|p| p.render_block())
+            .filter(|block| !block.trim().is_empty());
+        let mut effective_window = context_window;
+        let mut reactive_retried = false;
+        let mut last_usage: ContextUsage;
+        // 发送前构建视图；平台报上下文超限时按 50% 窗口重试一次。
+        let resp = loop {
+            let view = match build_context_view(
+                history,
+                plan_block.as_deref(),
+                &tools,
+                effective_window,
+                session_id,
+            ) {
+                Ok(view) => view,
+                Err(msg) => {
+                    let _ = app.emit(
+                        "ai:error",
+                        AiError {
+                            session_id,
+                            message: msg.clone(),
+                        },
+                    );
+                    return Err(msg);
+                }
+            };
+            let mut usage = view.usage;
+            if reactive_retried {
+                usage.strategy = CompressionStrategy::ReactiveReduce;
+                usage.warning = Some(format!(
+                    "平台报告上下文超限，已按配置窗口的 50%（{} tokens）重试；若仍失败请调大该模型的 context_window",
+                    effective_window
+                ));
+            }
+            let _ = app.emit("ai:context", usage.clone());
+            last_usage = usage;
+            let body = serde_json::json!({
+                "model": model,
+                "messages": view.messages,
+                "stream": true,
+                "tools": &tools,
+            });
+            let resp = client
+                .post(url)
+                .bearer_auth(api_key)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| {
+                    let detail = e.to_string();
+                    let msg = if e.is_timeout() {
+                        format!("请求 AI 平台超时（120s），模型可能响应过慢或网络不畅: {detail}")
+                    } else if e.is_connect() {
+                        format!("无法连接 AI 平台，请检查网络或 Base URL: {detail}")
+                    } else {
+                        format!("请求 AI 平台失败: {detail}")
+                    };
+                    let _ = app.emit(
+                        "ai:error",
+                        AiError {
+                            session_id,
+                            message: msg.clone(),
+                        },
+                    );
+                    msg
+                })?;
+            let status = resp.status();
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                if !reactive_retried && is_context_length_error(&text) {
+                    reactive_retried = true;
+                    effective_window = (effective_window / 2).max(1);
+                    continue;
+                }
+                let msg = extract_error(&text, status);
+                let _ = app.emit(
+                    "ai:error",
+                    AiError {
+                        session_id,
+                        message: msg.clone(),
+                    },
+                );
+                return Err(msg);
+            }
+            break resp;
+        };
 
         let mut stream = resp.bytes_stream();
         // 字节缓冲而非 String：SSE 的 UTF-8 多字节字符可能被切分到两个 chunk，
@@ -356,6 +477,7 @@ async fn run_agent_loop(
         let mut content = String::new();
         let mut tool_calls: HashMap<usize, ToolCallAcc> = HashMap::new();
         let mut done = false;
+        let mut reported_prompt_tokens: Option<usize> = None;
 
         // select! 让「停止」能中断阻塞中的流式读取，而不是等当前 chunk 返回
         loop {
@@ -379,6 +501,14 @@ async fn run_agent_loop(
                             Ok(v) => v,
                             Err(_) => continue,
                         };
+                        // 部分平台会在流末尾附带 usage；有就采信，用于把用量条从“估算”变成实测。
+                        if let Some(u) = value.get("usage") {
+                            reported_prompt_tokens = u["prompt_tokens"]
+                                .as_u64()
+                                .or_else(|| u["total_tokens"].as_u64())
+                                .map(|v| v as usize)
+                                .or(reported_prompt_tokens);
+                        }
                         apply_delta(
                             &value["choices"][0]["delta"],
                             &mut content,
@@ -411,6 +541,13 @@ async fn run_agent_loop(
                     }
                 }
             }
+        }
+
+        if let Some(used) = reported_prompt_tokens {
+            let mut usage = last_usage;
+            usage.used_tokens = used;
+            usage.estimated = false;
+            let _ = app.emit("ai:context", usage);
         }
 
         // 模型漏填工具名时，从参数推断（与 execute_tool 的兜底分支共用同一套推断逻辑，
@@ -473,6 +610,30 @@ async fn run_agent_loop(
             // 否则模型用别名（exec/shell/run）或空名调用 exec_command 时可绕过审批门。
             let normalized_name = normalize_tool(infer_tool_name(&acc.name, &args));
 
+            // 任务台账工具：只更新本地状态，不访问远程主机、不参与审批。
+            if normalized_name == "update_task_plan" {
+                let existing = agents.plan(&host.id).unwrap_or_default();
+                let plan = parse_task_plan_patch(&args, existing);
+                agents.set_plan(&host.id, plan.clone());
+                let _ = app.emit("ai:plan", AiPlan { session_id, plan });
+                emit_tool_state(
+                    app,
+                    session_id,
+                    &acc,
+                    &args,
+                    "result",
+                    Some("计划已更新".to_string()),
+                    None,
+                    None,
+                );
+                history.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": acc.id,
+                    "content": "计划已更新",
+                }));
+                continue;
+            }
+
             // 判定是否需要审批，并记录审批原因（随 request 事件下发，供审批卡片展示）
             let mut reason: Option<String> = None;
             let need_approval = match permission_mode {
@@ -489,10 +650,7 @@ async fn run_agent_loop(
                             .get("requires_approval")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
-                        let command = args
-                            .get("command")
-                            .and_then(|c| c.as_str())
-                            .unwrap_or("");
+                        let command = args.get("command").and_then(|c| c.as_str()).unwrap_or("");
                         let c = command.to_ascii_lowercase();
                         if marked {
                             reason = Some("模型标记该命令需要审批".to_string());
@@ -500,9 +658,10 @@ async fn run_agent_loop(
                         } else if is_dangerous(command) {
                             reason = Some("命中内置危险命令规则".to_string());
                             true
-                        } else if let Some(p) = danger_rules.iter().find(|p| {
-                            !p.trim().is_empty() && c.contains(&p.to_ascii_lowercase())
-                        }) {
+                        } else if let Some(p) = danger_rules
+                            .iter()
+                            .find(|p| !p.trim().is_empty() && c.contains(&p.to_ascii_lowercase()))
+                        {
                             reason = Some(format!("命中自定义规则：{p}"));
                             true
                         } else if is_write_operation(command) {
@@ -531,8 +690,11 @@ async fn run_agent_loop(
 
                 let mut timed_out = false;
                 let decision = loop {
-                    match tokio::time::timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), rx.recv())
-                        .await
+                    match tokio::time::timeout(
+                        Duration::from_secs(APPROVAL_TIMEOUT_SECS),
+                        rx.recv(),
+                    )
+                    .await
                     {
                         Err(_) => {
                             // 审批超时：按拒绝处理，不终止整个会话
@@ -541,13 +703,20 @@ async fn run_agent_loop(
                         }
                         Ok(None) => {
                             let msg = "会话已结束".to_string();
-                            let _ = app.emit("ai:error", AiError { session_id, message: msg.clone() });
+                            let _ = app.emit(
+                                "ai:error",
+                                AiError {
+                                    session_id,
+                                    message: msg.clone(),
+                                },
+                            );
                             return Err(msg);
                         }
                         Ok(Some(Control::Cancel)) => return Ok(()),
-                        Ok(Some(Control::Approve { tool_call_id, allow }))
-                            if tool_call_id == acc.id =>
-                        {
+                        Ok(Some(Control::Approve {
+                            tool_call_id,
+                            allow,
+                        })) if tool_call_id == acc.id => {
                             break allow;
                         }
                         Ok(Some(Control::Approve { .. })) => continue,
@@ -560,17 +729,20 @@ async fn run_agent_loop(
                     } else {
                         reason.clone()
                     };
-                    let _ = insert_audit(db, AuditEntry {
-                        session_id,
-                        host,
-                        tool_name: normalized_name,
-                        args: &args,
-                        permission_mode: permission_mode.as_str(),
-                        approval: "denied",
-                        status: "denied",
-                        result: note.clone(),
-                        duration_ms: started.elapsed().as_millis() as u64,
-                    });
+                    let _ = insert_audit(
+                        db,
+                        AuditEntry {
+                            session_id,
+                            host,
+                            tool_name: normalized_name,
+                            args: &args,
+                            permission_mode: permission_mode.as_str(),
+                            approval: "denied",
+                            status: "denied",
+                            result: note.clone(),
+                            duration_ms: started.elapsed().as_millis() as u64,
+                        },
+                    );
                     emit_tool_state(app, session_id, &acc, &args, "denied", None, note, None);
                     history.push(serde_json::json!({
                         "role": "tool",
@@ -592,17 +764,20 @@ async fn run_agent_loop(
             };
             match result {
                 Ok(output) => {
-                    let _ = insert_audit(db, AuditEntry {
-                        session_id,
-                        host,
-                        tool_name: normalized_name,
-                        args: &args,
-                        permission_mode: permission_mode.as_str(),
-                        approval: approval_label,
-                        status: "executed",
-                        result: Some(output.clone()),
-                        duration_ms: started.elapsed().as_millis() as u64,
-                    });
+                    let _ = insert_audit(
+                        db,
+                        AuditEntry {
+                            session_id,
+                            host,
+                            tool_name: normalized_name,
+                            args: &args,
+                            permission_mode: permission_mode.as_str(),
+                            approval: approval_label,
+                            status: "executed",
+                            result: Some(output.clone()),
+                            duration_ms: started.elapsed().as_millis() as u64,
+                        },
+                    );
                     emit_tool_state(
                         app,
                         session_id,
@@ -620,17 +795,20 @@ async fn run_agent_loop(
                     }));
                 }
                 Err(err) => {
-                    let _ = insert_audit(db, AuditEntry {
-                        session_id,
-                        host,
-                        tool_name: normalized_name,
-                        args: &args,
-                        permission_mode: permission_mode.as_str(),
-                        approval: approval_label,
-                        status: "error",
-                        result: Some(err.clone()),
-                        duration_ms: started.elapsed().as_millis() as u64,
-                    });
+                    let _ = insert_audit(
+                        db,
+                        AuditEntry {
+                            session_id,
+                            host,
+                            tool_name: normalized_name,
+                            args: &args,
+                            permission_mode: permission_mode.as_str(),
+                            approval: approval_label,
+                            status: "error",
+                            result: Some(err.clone()),
+                            duration_ms: started.elapsed().as_millis() as u64,
+                        },
+                    );
                     emit_tool_state(
                         app,
                         session_id,
@@ -677,9 +855,7 @@ fn insert_audit(db: &Db, entry: AuditEntry) -> Result<(), String> {
     // 落库前统一脱敏：命令本身可能包含密码/Token（如 mysql -pSecret、curl -u user:pass），
     // 与终端拦截审计的 sanitize 口径保持一致
     let summary = truncate(&sanitize(&summary), 500);
-    let result = entry
-        .result
-        .map(|r| truncate(&sanitize(&r), 300));
+    let result = entry.result.map(|r| truncate(&sanitize(&r), 300));
     let log = AuditLog {
         id: uuid::Uuid::new_v4().to_string(),
         ts: now(),
@@ -696,6 +872,53 @@ fn insert_audit(db: &Db, entry: AuditEntry) -> Result<(), String> {
     };
     db.insert_audit_log(&log)
         .map_err(|e| format!("写入操作日志失败: {e}"))
+}
+
+/// 解析 `update_task_plan` 的参数。采用“patch”语义：请求里出现的字段覆盖旧值，
+/// 未出现的字段保留旧值，避免模型漏传某个列表时把已完成/待办整段清空。
+fn parse_task_plan_patch(args: &serde_json::Value, existing: TaskPlan) -> TaskPlan {
+    fn list(args: &serde_json::Value, key: &str, fallback: &[String]) -> Vec<String> {
+        match args.get(key).and_then(|v| v.as_array()) {
+            Some(items) => items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            None => fallback.to_vec(),
+        }
+    }
+    fn text(args: &serde_json::Value, key: &str, fallback: &str) -> String {
+        match args.get(key).and_then(|v| v.as_str()) {
+            Some(s) => s.trim().to_string(),
+            None => fallback.to_string(),
+        }
+    }
+    TaskPlan {
+        goal: text(args, "goal", &existing.goal),
+        constraints: list(args, "constraints", &existing.constraints),
+        completed: list(args, "completed", &existing.completed),
+        pending: list(args, "pending", &existing.pending),
+        failed: list(args, "failed", &existing.failed),
+        current_step: text(args, "current_step", &existing.current_step),
+        updated_at: now(),
+    }
+}
+
+/// 判断平台错误是否为“上下文超限”，用于触发一次降窗重试。
+fn is_context_length_error(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    [
+        "context length",
+        "maximum context",
+        "too many tokens",
+        "prompt is too long",
+        "context_length_exceeded",
+        "exceeds the maximum number of tokens",
+        "reduce the length",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 fn apply_delta(
@@ -741,65 +964,49 @@ fn apply_delta(
     }
 }
 
-/// 每台主机最多保留的对话轮数（一轮 = 一次用户提问）。
-const MAX_HISTORY_ROUNDS: usize = 20;
 /// 单个工具审批的等待上限（秒），超时按拒绝处理，不终止会话
 const APPROVAL_TIMEOUT_SECS: u64 = 600;
-
-/// 裁剪对话历史，最多保留最近 `max_rounds` 轮（一轮 = 一次 user 消息及其后续 assistant/tool 消息），
-/// 始终保留首条 system 提示词。
-fn trim_history(history: &mut Vec<serde_json::Value>, max_rounds: usize) {
-    if history.is_empty() {
-        return;
-    }
-    let start = if history[0]["role"].as_str() == Some("system") {
-        1
-    } else {
-        0
-    };
-    let user_indices: Vec<usize> = (start..history.len())
-        .filter(|&i| history[i]["role"].as_str() == Some("user"))
-        .collect();
-    if user_indices.len() <= max_rounds {
-        return;
-    }
-    let keep_from = user_indices[user_indices.len() - max_rounds];
-    let mut kept = history.split_off(keep_from);
-    history.truncate(start);
-    history.append(&mut kept);
-}
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn trim_history_keeps_system_prompt_and_recent_rounds() {
-        let mut history = vec![serde_json::json!({"role": "system", "content": "sys"})];
-        for i in 0..5 {
-            history.push(serde_json::json!({"role": "user", "content": format!("q{i}")}));
-            history.push(serde_json::json!({"role": "assistant", "content": format!("a{i}")}));
-        }
-        trim_history(&mut history, 2);
-        // 保留 system + 最近 2 轮（每轮 user+assistant）
-        assert_eq!(history[0]["role"], "system");
-        let user_msgs: Vec<&str> = history
-            .iter()
-            .filter(|m| m["role"] == "user")
-            .map(|m| m["content"].as_str().unwrap())
-            .collect();
-        assert_eq!(user_msgs, vec!["q3", "q4"]);
+    fn task_plan_patch_keeps_omitted_fields() {
+        let existing = TaskPlan {
+            goal: "部署 nginx".to_string(),
+            completed: vec!["安装依赖".to_string()],
+            pending: vec!["启动服务".to_string()],
+            ..Default::default()
+        };
+        let args = serde_json::json!({
+            "completed": ["安装依赖", "写配置"],
+            "current_step": "启动服务"
+        });
+        let plan = parse_task_plan_patch(&args, existing);
+        assert_eq!(plan.goal, "部署 nginx");
+        assert_eq!(plan.completed, vec!["安装依赖", "写配置"]);
+        assert_eq!(plan.pending, vec!["启动服务"]);
+        assert_eq!(plan.current_step, "启动服务");
     }
 
     #[test]
-    fn trim_history_noop_when_under_limit() {
-        let mut history = vec![
-            serde_json::json!({"role": "system", "content": "sys"}),
-            serde_json::json!({"role": "user", "content": "q0"}),
-        ];
-        let before = history.clone();
-        trim_history(&mut history, 20);
-        assert_eq!(history, before);
+    fn task_plan_patch_can_clear_a_list_explicitly() {
+        let existing = TaskPlan {
+            pending: vec!["旧待办".to_string()],
+            ..Default::default()
+        };
+        let args = serde_json::json!({"pending": []});
+        let plan = parse_task_plan_patch(&args, existing);
+        assert!(plan.pending.is_empty());
+    }
+
+    #[test]
+    fn detects_context_length_errors() {
+        assert!(is_context_length_error(
+            "This model's maximum context length is 8192 tokens"
+        ));
+        assert!(is_context_length_error("prompt is too long"));
+        assert!(!is_context_length_error("invalid api key"));
     }
 }

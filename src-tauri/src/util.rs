@@ -22,13 +22,18 @@ pub fn truncate(s: &str, max: usize) -> String {
 }
 
 /// 命令 / 基线输出截断，带换行提示，用于回填给模型或展示的长文本。
+/// 头尾各保留一半：命令回显、报错、汇总结论通常在尾部，只留头部会丢关键信息。
 pub fn truncate_output(s: &str, max: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() <= max {
         s.to_string()
     } else {
-        let head: String = chars[..max].iter().collect();
-        format!("{head}\n...[输出过长，已截断]")
+        let head_len = max / 2;
+        let tail_len = max.saturating_sub(head_len);
+        let head: String = chars[..head_len].iter().collect();
+        let tail: String = chars[chars.len() - tail_len..].iter().collect();
+        let omitted = chars.len().saturating_sub(max);
+        format!("{head}\n...[输出过长，已省略 {omitted} 字符]...\n{tail}")
     }
 }
 
@@ -73,4 +78,25 @@ pub fn generate_token() -> String {
         uuid::Uuid::new_v4().simple(),
         uuid::Uuid::new_v4().simple()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_output_keeps_head_and_tail() {
+        let head = "HEAD".repeat(10);
+        let tail = "TAIL".repeat(10);
+        let input = format!("{head}{}{tail}", "x".repeat(200));
+        let out = truncate_output(&input, 80);
+        assert!(out.starts_with("HEAD"), "应保留头部: {out}");
+        assert!(out.ends_with("TAIL"), "应保留尾部: {out}");
+        assert!(out.contains("已省略"), "应提示省略字符数: {out}");
+    }
+
+    #[test]
+    fn truncate_output_noop_when_short() {
+        assert_eq!(truncate_output("short", 80), "short");
+    }
 }

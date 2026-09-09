@@ -4,6 +4,7 @@ use russh::keys::{self, key::PrivateKeyWithHashAlg};
 use russh::{Channel, ChannelMsg};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -245,22 +246,98 @@ fn append_known_host(path: &PathBuf, host: &str, port: u16, key: &keys::PublicKe
 
 type ConnSlot = Arc<tokio::sync::Mutex<Option<Handle<ClientHandler>>>>;
 
+/// 连接池最大同时打开的连接数，超出时按 LRU 淘汰最久未使用的连接。
+const MAX_CONNS: usize = 16;
+/// 连接空闲超时（秒）：超过该时长未使用的连接会被关闭，释放远端与会话资源。
+const IDLE_TIMEOUT_SECS: u64 = 30 * 60;
+
+/// 每个主机的连接槽位 + 最近使用时间（Unix 秒），供 LRU 淘汰与空闲清理使用。
+struct ConnEntry {
+    slot: ConnSlot,
+    last_used: AtomicU64,
+}
+
 /// 按主机复用的 russh 连接池
-#[derive(Default)]
 pub struct RusshManager {
-    conns: Mutex<HashMap<String, ConnSlot>>,
+    conns: Mutex<HashMap<String, ConnEntry>>,
+}
+
+impl Default for RusshManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RusshManager {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            conns: Mutex::new(HashMap::new()),
+        }
     }
 
-    fn slot(&self, host: &Host) -> ConnSlot {
+    /// 获取（或创建）指定主机的连接槽位，并更新最近使用时间。
+    /// 同时执行空闲清理与容量淘汰（try_lock 不阻塞正在使用的连接）。
+    pub(crate) fn slot(&self, host: &Host) -> ConnSlot {
         let mut map = self.conns.lock().unwrap();
-        map.entry(host.id.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
-            .clone()
+        let now = crate::util::now();
+        // 空闲清理：关闭超过 IDLE_TIMEOUT_SECS 未使用的连接
+        for entry in map.values() {
+            let last = entry.last_used.load(Ordering::Relaxed);
+            if now.saturating_sub(last) > IDLE_TIMEOUT_SECS {
+                if let Ok(mut guard) = entry.slot.try_lock() {
+                    if guard.is_some() {
+                        *guard = None;
+                    }
+                }
+            }
+        }
+        // 更新当前主机的 last_used
+        let entry = map.entry(host.id.clone()).or_insert_with(|| ConnEntry {
+            slot: Arc::new(tokio::sync::Mutex::new(None)),
+            last_used: AtomicU64::new(now),
+        });
+        entry.last_used.store(now, Ordering::Relaxed);
+        entry.slot.clone()
+    }
+
+    /// 在创建新连接前调用：若已达 MAX_CONNS，淘汰最久未使用且当前空闲的连接。
+    /// `exclude_id` 为即将创建连接的主机 ID，不会被淘汰。
+    pub(crate) fn evict_if_needed(&self, exclude_id: &str) {
+        let map = self.conns.lock().unwrap();
+        // 统计当前打开的连接数，并找出 LRU 候选
+        let mut open: Vec<(&String, u64)> = Vec::new();
+        for (id, entry) in map.iter() {
+            if id == exclude_id {
+                continue;
+            }
+            // try_lock：正在使用的连接（锁被持有）跳过，不淘汰
+            let is_open = match entry.slot.try_lock() {
+                Ok(guard) => guard.is_some(),
+                Err(_) => continue, // 锁被持有 = 正在使用，跳过
+            };
+            if is_open {
+                open.push((id, entry.last_used.load(Ordering::Relaxed)));
+            }
+        }
+        if open.len() < MAX_CONNS {
+            return;
+        }
+        // 淘汰最久未使用（last_used 最小）的空闲连接
+        if let Some((lru_id, _)) = open.into_iter().min_by_key(|(_, t)| *t) {
+            if let Some(entry) = map.get(lru_id) {
+                if let Ok(mut guard) = entry.slot.try_lock() {
+                    *guard = None;
+                }
+            }
+        }
+    }
+
+    /// 更新指定主机的最近使用时间（连接成功后调用）。
+    pub(crate) fn touch(&self, host_id: &str) {
+        let map = self.conns.lock().unwrap();
+        if let Some(entry) = map.get(host_id) {
+            entry.last_used.store(crate::util::now(), Ordering::Relaxed);
+        }
     }
 
     pub async fn exec(
@@ -274,7 +351,10 @@ impl RusshManager {
 
         if let Some(handle) = guard.as_mut() {
             match exec_on(handle, command, timeout).await {
-                Ok(r) => return Ok(r),
+                Ok(r) => {
+                    self.touch(&host.id);
+                    return Ok(r);
+                }
                 Err(_) => {
                     *guard = None;
                     // 写命令失败可能是「请求已提交后连接中断」：远端可能已执行，
@@ -289,11 +369,14 @@ impl RusshManager {
             }
         }
 
+        // 即将创建新连接，先淘汰超额的空闲连接
+        self.evict_if_needed(&host.id);
         let mut handle = connect(host).await?;
         let result = exec_on(&mut handle, command, timeout).await;
         match result {
             Ok(_) => {
                 *guard = Some(handle);
+                self.touch(&host.id);
             }
             Err(_) => {
                 *guard = None;
@@ -322,7 +405,7 @@ impl RusshManager {
     }
 }
 
-async fn connect(host: &Host) -> Result<Handle<ClientHandler>, String> {
+pub(crate) async fn connect(host: &Host) -> Result<Handle<ClientHandler>, String> {
     // 需覆盖首次连接的主机指纹确认窗口（60s）
     tokio::time::timeout(Duration::from_secs(60), do_connect(host, None))
         .await

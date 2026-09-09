@@ -1,10 +1,11 @@
 use crate::models::{
-    AiModel, AiProvider, AiRule, AlertSettings, AuditLog, AuthType, Host, HostMetric, InspectionReport,
-    McpPermissionMode, McpRule, McpService, MetricDisk, MetricTop, NewMetric, Remediation, TerminalGuardSettings, TerminalRule,
+    AiModel, AiProvider, AiRule, AlertSettings, AuditLog, AuthType, Host, HostMetric,
+    InspectionReport, McpPermissionMode, McpRule, McpService, MetricDisk, MetricTop, NewMetric,
+    Remediation, TerminalGuardSettings, TerminalRule,
 };
 use crate::util::now;
-use rusqlite::{params, Connection, Row};
 use rusqlite::OptionalExtension;
+use rusqlite::{params, Connection, Row};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -161,6 +162,27 @@ impl Db {
              CREATE INDEX IF NOT EXISTS idx_metrics_host_ts ON host_metrics(host_id, ts DESC);",
         )?;
 
+        // 迁移：ai_models.context_window。旧库没有该列时补上，默认 128k；
+        // 用户随后可在 AI 配置中按模型实际窗口调整。幂等，重复启动不会报错。
+        let has_context_window = {
+            let mut stmt = conn.prepare("PRAGMA table_info(ai_models)")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            let mut found = false;
+            for name in rows {
+                if name? == "context_window" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_context_window {
+            conn.execute(
+                "ALTER TABLE ai_models ADD COLUMN context_window INTEGER NOT NULL DEFAULT 128000",
+                [],
+            )?;
+        }
+
         // 首次建库时写入终端防护预置规则（含删除后重启不重复恢复的标记）
         let seeded: Option<String> = conn
             .query_row(
@@ -265,13 +287,9 @@ impl Db {
         Ok(providers)
     }
 
-    fn models_of(
-        &self,
-        conn: &Connection,
-        provider_id: &str,
-    ) -> rusqlite::Result<Vec<AiModel>> {
+    fn models_of(&self, conn: &Connection, provider_id: &str) -> rusqlite::Result<Vec<AiModel>> {
         let mut stmt = conn.prepare(
-            "SELECT id, label, model, is_active FROM ai_models
+            "SELECT id, label, model, is_active, context_window FROM ai_models
              WHERE provider_id=?1 ORDER BY sort, rowid",
         )?;
         let rows = stmt.query_map(params![provider_id], row_to_ai_model)?;
@@ -294,11 +312,7 @@ impl Db {
         Ok(provider)
     }
 
-    pub fn set_active_ai_model(
-        &self,
-        provider_id: &str,
-        model_id: &str,
-    ) -> rusqlite::Result<()> {
+    pub fn set_active_ai_model(&self, provider_id: &str, model_id: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE ai_models SET is_active=0 WHERE provider_id=?1",
@@ -353,14 +367,15 @@ impl Db {
         )?;
         for (idx, m) in models.iter().enumerate() {
             tx.execute(
-                "INSERT INTO ai_models (id, provider_id, label, model, is_active, sort)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO ai_models (id, provider_id, label, model, is_active, context_window, sort)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     m.id,
                     provider.id,
                     m.label,
                     m.model,
                     m.is_active as i64,
+                    m.context_window as i64,
                     idx as i64,
                 ],
             )?;
@@ -395,7 +410,12 @@ impl Db {
         conn.execute(
             "INSERT INTO ai_rules (id, pattern, enabled, created_at)
              VALUES (?1, ?2, ?3, ?4)",
-            params![rule.id, rule.pattern, rule.enabled as i64, rule.created_at as i64],
+            params![
+                rule.id,
+                rule.pattern,
+                rule.enabled as i64,
+                rule.created_at as i64
+            ],
         )?;
         Ok(())
     }
@@ -451,9 +471,8 @@ impl Db {
             )
             .optional()?;
         match value {
-            Some(v) => serde_json::from_str(&v).map_err(|e| {
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e))
-            }),
+            Some(v) => serde_json::from_str(&v)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
             None => Ok(AlertSettings::default()),
         }
     }
@@ -472,6 +491,27 @@ impl Db {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    /// AI 配置页的全局默认上下文窗口：仅用于批量导入预填和旧数据迁移，
+    /// 不覆盖每个模型已保存的 context_window。
+    pub fn get_ai_default_context_window(&self) -> rusqlite::Result<u32> {
+        let conn = self.conn.lock().unwrap();
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='ai_default_context_window'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or_else(crate::models::default_context_window))
+    }
+
+    pub fn set_ai_default_context_window(&self, value: u32) -> rusqlite::Result<()> {
+        self.set_setting("ai_default_context_window", &value.to_string())
     }
 
     pub fn get_mcp_service(&self) -> rusqlite::Result<McpService> {
@@ -541,7 +581,12 @@ impl Db {
         conn.execute(
             "INSERT INTO mcp_rules (id, pattern, enabled, created_at)
              VALUES (?1, ?2, ?3, ?4)",
-            params![rule.id, rule.pattern, rule.enabled as i64, rule.created_at as i64],
+            params![
+                rule.id,
+                rule.pattern,
+                rule.enabled as i64,
+                rule.created_at as i64
+            ],
         )?;
         Ok(())
     }
@@ -612,9 +657,8 @@ impl Db {
             )
             .optional()?;
         match value {
-            Some(v) => serde_json::from_str(&v).map_err(|e| {
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e))
-            }),
+            Some(v) => serde_json::from_str(&v)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
             None => Ok(TerminalGuardSettings::default()),
         }
     }
@@ -629,7 +673,12 @@ impl Db {
     }
 
     /// 保存加密后的凭据（主机密码 / AI API Key 等）。
-    pub fn set_credential(&self, owner_id: &str, kind: &str, secret_enc: &str) -> rusqlite::Result<()> {
+    pub fn set_credential(
+        &self,
+        owner_id: &str,
+        kind: &str,
+        secret_enc: &str,
+    ) -> rusqlite::Result<()> {
         self.conn.lock().unwrap().execute(
             "INSERT INTO credentials (owner_id, kind, secret_enc, updated_at)
              VALUES (?1, ?2, ?3, ?4)
@@ -926,7 +975,10 @@ impl Db {
              ORDER BY ts DESC
              LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![host_id, since_ts as i64, limit as i64], metric_from_row)?;
+        let rows = stmt.query_map(
+            params![host_id, since_ts as i64, limit as i64],
+            metric_from_row,
+        )?;
         let mut rows: Vec<HostMetric> = rows.collect::<rusqlite::Result<_>>()?;
         rows.reverse();
         Ok(rows)
@@ -959,13 +1011,19 @@ impl Db {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM hosts WHERE id=?1", params![host_id])?;
-        tx.execute("DELETE FROM host_metrics WHERE host_id=?1", params![host_id])?;
+        tx.execute(
+            "DELETE FROM host_metrics WHERE host_id=?1",
+            params![host_id],
+        )?;
         tx.execute("DELETE FROM audit_logs WHERE host_id=?1", params![host_id])?;
         tx.execute(
             "DELETE FROM inspection_reports WHERE host_id=?1",
             params![host_id],
         )?;
-        tx.execute("DELETE FROM remediations WHERE host_id=?1", params![host_id])?;
+        tx.execute(
+            "DELETE FROM remediations WHERE host_id=?1",
+            params![host_id],
+        )?;
         tx.commit()
     }
 
@@ -1027,6 +1085,7 @@ fn row_to_ai_model(row: &Row<'_>) -> rusqlite::Result<AiModel> {
         label: row.get(1)?,
         model: row.get(2)?,
         is_active: row.get::<_, i64>(3)? != 0,
+        context_window: row.get::<_, i64>(4)?.max(1) as u32,
     })
 }
 
@@ -1122,8 +1181,7 @@ fn row_to_remediation(row: &Row<'_>) -> rusqlite::Result<Remediation> {
 fn metric_from_row(row: &Row<'_>) -> rusqlite::Result<HostMetric> {
     let disks_json: String = row.get(8)?;
     let top_json: String = row.get(9)?;
-    let disks: Vec<MetricDisk> =
-        serde_json::from_str(&disks_json).unwrap_or_default();
+    let disks: Vec<MetricDisk> = serde_json::from_str(&disks_json).unwrap_or_default();
     let top: Vec<MetricTop> = serde_json::from_str(&top_json).unwrap_or_default();
     Ok(HostMetric {
         id: row.get(0)?,
@@ -1138,4 +1196,47 @@ fn metric_from_row(row: &Row<'_>) -> rusqlite::Result<HostMetric> {
         top,
         source: row.get(10)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_window_migration_and_roundtrip() {
+        let path =
+            std::env::temp_dir().join(format!("buffterm-db-test-{}.sqlite", uuid::Uuid::new_v4()));
+        {
+            let db = Db::open(&path).unwrap();
+            assert_eq!(db.get_ai_default_context_window().unwrap(), 128_000);
+            db.set_ai_default_context_window(200_000).unwrap();
+
+            let provider = AiProvider {
+                id: "provider-1".to_string(),
+                name: "测试平台".to_string(),
+                base_url: "http://localhost:11434/v1".to_string(),
+                protocol: "openai-compatible".to_string(),
+                enabled: true,
+                created_at: 1,
+                models: Vec::new(),
+            };
+            let models = vec![AiModel {
+                id: "model-1".to_string(),
+                label: "测试模型".to_string(),
+                model: "test-model".to_string(),
+                is_active: true,
+                context_window: 200_000,
+            }];
+            db.save_ai_provider_tx(&provider, &models, false).unwrap();
+        }
+
+        // 再次打开：迁移幂等，且 context_window / 全局默认值都能读回。
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.get_ai_default_context_window().unwrap(), 200_000);
+        let providers = db.list_ai_providers().unwrap();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].models[0].context_window, 200_000);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
 }

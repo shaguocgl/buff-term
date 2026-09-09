@@ -6,6 +6,7 @@ import type {
   AiRule,
   AlertSettings,
   AuditLog,
+  ContextUsage,
   HistoryEntry,
   Host,
   HostInput,
@@ -20,6 +21,7 @@ import type {
   TerminalGuardApproval,
   TerminalGuardSettings,
   TerminalRule,
+  TaskPlan,
   TestResult,
   UpdateInfo,
   InspectionReport,
@@ -52,6 +54,10 @@ export const setActiveAiModel = (providerId: string, modelId: string) =>
   invoke<void>('set_active_ai_model', { providerId, modelId });
 export const setActiveAiProvider = (providerId: string) =>
   invoke<void>('set_active_ai_provider', { providerId });
+export const getAiDefaultContextWindow = () =>
+  invoke<number>('get_ai_default_context_window');
+export const saveAiDefaultContextWindow = (value: number) =>
+  invoke<number>('save_ai_default_context_window', { value });
 export const listAiRules = () => invoke<AiRule[]>('list_ai_rules');
 export const addAiRule = (pattern: string) =>
   invoke<AiRule>('add_ai_rule', { pattern });
@@ -275,6 +281,8 @@ export const agentReset = (sessionId: number, hostId: string) =>
   invoke<void>('agent_reset', { sessionId, hostId });
 export const getHistory = (hostId: string) =>
   invoke<HistoryEntry[]>('get_history', { hostId });
+export const getTaskPlan = (hostId: string) =>
+  invoke<TaskPlan | null>('get_task_plan', { hostId });
 
 export interface AiStreamPayload {
   session_id: number;
@@ -303,6 +311,11 @@ export interface AiErrorPayload {
   message: string;
 }
 
+export interface AiPlanPayload {
+  session_id: number;
+  plan: TaskPlan;
+}
+
 export const onAiStream = (
   cb: (sessionId: number, delta: string) => void,
 ) =>
@@ -320,6 +333,12 @@ export const onAiError = (cb: (sessionId: number, message: string) => void) =>
   listen<AiErrorPayload>('ai:error', (event) =>
     cb(event.payload.session_id, event.payload.message),
   );
+
+export const onAiPlan = (cb: (payload: AiPlanPayload) => void) =>
+  listen<AiPlanPayload>('ai:plan', (event) => cb(event.payload));
+
+export const onAiContext = (cb: (payload: ContextUsage) => void) =>
+  listen<ContextUsage>('ai:context', (event) => cb(event.payload));
 
 export const openSession = (hostId: string, cols: number, rows: number) =>
   invoke<number>('open_session', { hostId, cols, rows });

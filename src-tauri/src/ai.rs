@@ -1,9 +1,9 @@
-use std::sync::Arc;
 use crate::credentials;
 use crate::db::Db;
 use crate::models::{AiModel, AiProvider, AiRule};
 use crate::util::now;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tauri::State;
 
 #[derive(Debug, Deserialize)]
@@ -12,6 +12,9 @@ pub struct AiModelInput {
     pub model: String,
     #[serde(default)]
     pub is_active: bool,
+    /// 该模型支持的上下文窗口（token）。用户必填；旧前端未传时按 128k 兜底。
+    #[serde(default = "crate::models::default_context_window")]
+    pub context_window: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,6 +36,12 @@ fn default_protocol() -> String {
 }
 
 pub(crate) fn resolve_active_ai(db: &Db) -> Result<(AiProvider, String), String> {
+    let (provider, model) = resolve_active_ai_model(db)?;
+    Ok((provider, model.model))
+}
+
+/// 与 `resolve_active_ai` 相同，但返回完整的 `AiModel`，供 Agent 读取 context_window。
+pub(crate) fn resolve_active_ai_model(db: &Db) -> Result<(AiProvider, AiModel), String> {
     let providers = db
         .list_ai_providers()
         .map_err(|e| format!("读取 AI 配置失败: {e}"))?;
@@ -45,7 +54,7 @@ pub(crate) fn resolve_active_ai(db: &Db) -> Result<(AiProvider, String), String>
         .iter()
         .find(|m| m.is_active)
         .or_else(|| provider.models.first())
-        .map(|m| m.model.clone())
+        .cloned()
         .ok_or_else(|| "该平台未配置模型，请到 AI 配置中添加".to_string())?;
     Ok((provider, model))
 }
@@ -86,15 +95,19 @@ pub fn save_ai_provider(
         .iter()
         .enumerate()
         .map(|(idx, m)| {
+            if m.context_window == 0 {
+                return Err("模型上下文窗口必须大于 0".to_string());
+            }
             let is_active = m.is_active || (idx == 0 && input.models.iter().all(|x| !x.is_active));
-            AiModel {
+            Ok(AiModel {
                 id: uuid::Uuid::new_v4().to_string(),
                 label: m.label.clone(),
                 model: m.model.clone(),
                 is_active,
-            }
+                context_window: m.context_window,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
     // 禁用其他提供方 + upsert 提供方 + 全量替换模型，放在同一事务里原子完成
     db.save_ai_provider_tx(&provider, &models, input.enabled)
         .map_err(|e| format!("保存 AI 配置失败: {e}"))?;
@@ -112,6 +125,22 @@ pub fn delete_ai_provider(db: State<'_, Arc<Db>>, id: String) -> Result<(), Stri
         .map_err(|e| format!("删除 AI 配置失败: {e}"))?;
     credentials::delete_api_key(&id);
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_ai_default_context_window(db: State<'_, Arc<Db>>) -> Result<u32, String> {
+    db.get_ai_default_context_window()
+        .map_err(|e| format!("读取默认上下文窗口失败: {e}"))
+}
+
+#[tauri::command]
+pub fn save_ai_default_context_window(db: State<'_, Arc<Db>>, value: u32) -> Result<u32, String> {
+    if value == 0 {
+        return Err("默认上下文窗口必须大于 0".to_string());
+    }
+    db.set_ai_default_context_window(value)
+        .map_err(|e| format!("保存默认上下文窗口失败: {e}"))?;
+    Ok(value)
 }
 
 #[tauri::command]
@@ -191,9 +220,7 @@ fn resolve_api_key(
                     return Ok(key);
                 }
             } else {
-                return Err(
-                    "Base URL 与已保存配置不一致，请显式输入 API Key 后再测试".to_string()
-                );
+                return Err("Base URL 与已保存配置不一致，请显式输入 API Key 后再测试".to_string());
             }
         }
     }
@@ -225,10 +252,7 @@ pub async fn list_remote_ai_models(
     if !key.is_empty() {
         req = req.bearer_auth(&key);
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {e}"))?;
+    let resp = req.send().await.map_err(|e| format!("请求失败: {e}"))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
 
@@ -251,18 +275,23 @@ pub async fn list_remote_ai_models(
     }
 
     // 兼容 { data: [{id, owned_by}, ...] } 与 { models: [...] } 两种形态
-    let parsed: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("解析响应失败: {e}"))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("解析响应失败: {e}"))?;
     let arr = parsed
         .get("data")
         .or_else(|| parsed.get("models"))
         .and_then(|v| v.as_array())
-        .ok_or_else(|| "响应中未找到 data/models 数组，该平台可能不兼容 OpenAI /models 协议".to_string())?;
+        .ok_or_else(|| {
+            "响应中未找到 data/models 数组，该平台可能不兼容 OpenAI /models 协议".to_string()
+        })?;
 
     let mut seen = std::collections::HashSet::new();
     let mut list: Vec<RemoteAiModel> = Vec::new();
     for item in arr {
-        let mid = item.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let mid = item
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let mid = match mid {
             Some(s) if !s.trim().is_empty() => s.trim().to_string(),
             _ => continue,

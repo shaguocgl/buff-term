@@ -3645,6 +3645,168 @@ input::placeholder {
   background: rgba(52, 211, 153, 0.1);
 }
 
+/* ===== 上下文管理：任务台账 / 用量条 / 模型窗口 ===== */
+.task-plan-card {
+  margin: 8px 10px 4px;
+  border: 1px solid rgba(167, 139, 250, 0.28);
+  background: rgba(167, 139, 250, 0.06);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.task-plan-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: none;
+  color: inherit;
+  padding: 0;
+  cursor: pointer;
+}
+
+.task-plan-title {
+  font-weight: 600;
+  color: var(--accent-ai-strong);
+}
+
+.task-plan-progress {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.task-plan-toggle {
+  margin-left: auto;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.task-plan-goal {
+  margin-top: 6px;
+  color: var(--text);
+}
+
+.task-plan-step {
+  margin-top: 3px;
+  color: var(--muted);
+}
+
+.task-plan-details {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.task-plan-details ul {
+  margin: 2px 0 0;
+  padding-left: 16px;
+}
+
+.task-plan-failed {
+  color: var(--danger);
+}
+
+.context-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.context-usage-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--panel-3);
+  overflow: hidden;
+}
+
+.context-usage-fill {
+  display: block;
+  height: 100%;
+  background: var(--success);
+  transition: width 0.2s ease;
+}
+
+.context-usage-fill.warn {
+  background: var(--warn);
+}
+
+.context-usage-fill.danger {
+  background: var(--danger);
+}
+
+.context-usage-text {
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+.context-usage-warning {
+  font-size: 10.5px;
+  color: var(--warn);
+}
+
+.model-default-window {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.model-default-window input {
+  width: 110px;
+}
+
+.model-default-window-label {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.model-default-window-hint {
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+.model-window {
+  flex: 1.2;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.model-window-input {
+  width: 100%;
+}
+
+.model-window-quick {
+  display: flex;
+  gap: 4px;
+}
+
+.model-window-quick button {
+  flex: 1;
+  padding: 2px 0;
+  font-size: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel-3);
+  color: var(--muted);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.model-window-quick button:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
 .add-model {
   align-self: flex-start;
   margin-top: 2px;

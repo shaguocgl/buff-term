@@ -97,12 +97,21 @@ fn default_protocol() -> String {
     "openai-compatible".to_string()
 }
 
+/// 模型上下文窗口的兜底默认值（token）。用户新增/编辑模型时必须显式填写，
+/// 该值只用于旧数据迁移和批量导入预填，不做任何模型名推断。
+pub fn default_context_window() -> u32 {
+    128_000
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiModel {
     pub id: String,
     pub label: String,
     pub model: String,
     pub is_active: bool,
+    /// 该模型支持的上下文窗口（token）。由用户在 AI 配置中显式填写。
+    #[serde(default = "default_context_window")]
+    pub context_window: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +135,77 @@ pub struct AiRule {
     pub pattern: String,
     pub enabled: bool,
     pub created_at: u64,
+}
+
+/// AI Agent 的结构化任务台账：跨压缩窗口保存“目标/约束/进度/失败尝试”，
+/// 每轮注入系统提示，永不参与裁剪。仅保存在内存中，随会话重置清空。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TaskPlan {
+    #[serde(default)]
+    pub goal: String,
+    #[serde(default)]
+    pub constraints: Vec<String>,
+    #[serde(default)]
+    pub completed: Vec<String>,
+    #[serde(default)]
+    pub pending: Vec<String>,
+    #[serde(default)]
+    pub failed: Vec<String>,
+    #[serde(default)]
+    pub current_step: String,
+    #[serde(default)]
+    pub updated_at: u64,
+}
+
+impl TaskPlan {
+    /// 是否为空台账（没有目标且没有进度）。空台账不注入系统提示。
+    pub fn is_empty(&self) -> bool {
+        self.goal.trim().is_empty()
+            && self.current_step.trim().is_empty()
+            && self.constraints.is_empty()
+            && self.completed.is_empty()
+            && self.pending.is_empty()
+            && self.failed.is_empty()
+    }
+
+    /// 渲染成注入系统提示的固定文本块。内容保持确定性，便于 prompt 缓存。
+    pub fn render_block(&self) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from("[任务台账｜必须遵守，禁止忽略]\n");
+        if !self.goal.trim().is_empty() {
+            out.push_str(&format!("目标：{}\n", self.goal.trim()));
+        }
+        if !self.constraints.is_empty() {
+            out.push_str("约束：\n");
+            for item in &self.constraints {
+                out.push_str(&format!("- {}\n", item.trim()));
+            }
+        }
+        if !self.completed.is_empty() {
+            out.push_str("已完成：\n");
+            for item in &self.completed {
+                out.push_str(&format!("- {}\n", item.trim()));
+            }
+        }
+        if !self.pending.is_empty() {
+            out.push_str("待办：\n");
+            for item in &self.pending {
+                out.push_str(&format!("- {}\n", item.trim()));
+            }
+        }
+        if !self.failed.is_empty() {
+            out.push_str("失败尝试（不要在没有新依据时重复）：\n");
+            for item in &self.failed {
+                out.push_str(&format!("- {}\n", item.trim()));
+            }
+        }
+        if !self.current_step.trim().is_empty() {
+            out.push_str(&format!("当前步骤：{}\n", self.current_step.trim()));
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

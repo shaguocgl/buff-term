@@ -4,9 +4,11 @@ import {
   addAiRule,
   deleteAiRule,
   deleteAiProvider,
+  getAiDefaultContextWindow,
   listAiProviders,
   listAiRules,
   listRemoteAiModels,
+  saveAiDefaultContextWindow,
   saveAiProvider,
   testAiProvider,
 } from '../api';
@@ -49,6 +51,7 @@ interface FormModel {
   label: string;
   model: string;
   is_active: boolean;
+  context_window: number;
 }
 
 interface FormState {
@@ -75,6 +78,8 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
   const [providers, setProviders] = useState<AiProvider[]>([]);
   const [rules, setRules] = useState<AiRule[]>([]);
   const [ruleInput, setRuleInput] = useState('');
+  const [defaultContextWindow, setDefaultContextWindow] = useState(128000);
+  const [defaultSaving, setDefaultSaving] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<AiProvider | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AiProvider | null>(null);
@@ -91,7 +96,12 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
   const [pickerSelected, setPickerSelected] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
-    setProviders(await listAiProviders());
+    const [list, defaultWindow] = await Promise.all([
+      listAiProviders(),
+      getAiDefaultContextWindow(),
+    ]);
+    setProviders(list);
+    setDefaultContextWindow(defaultWindow);
   }, []);
 
   useEffect(() => {
@@ -122,6 +132,23 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
     }
   };
 
+  const saveDefaultWindow = async () => {
+    const value = Number(defaultContextWindow) || 0;
+    if (value <= 0) {
+      setError('默认上下文窗口必须大于 0');
+      return;
+    }
+    setDefaultSaving(true);
+    try {
+      await saveAiDefaultContextWindow(value);
+      setError(null);
+    } catch (err) {
+      setError(fmtError(err));
+    } finally {
+      setDefaultSaving(false);
+    }
+  };
+
   const openCreate = () => {
     setEditing(null);
     setForm(formFromPreset(PRESETS[0]));
@@ -146,6 +173,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
         label: m.label,
         model: m.model,
         is_active: m.is_active,
+        context_window: m.context_window,
       })),
       apiKey: '',
     });
@@ -202,6 +230,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
           label: '',
           model: '',
           is_active: prev.models.length === 0,
+          context_window: defaultContextWindow,
         },
       ],
     }));
@@ -232,6 +261,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
           m.is_active ||
           (form.models.filter((x) => x.label.trim() && x.model.trim()).length === 1) ||
           (idx === 0 && !form.models.some((x) => x.is_active)),
+        context_window: Number(m.context_window) || 0,
       }));
     if (!form.name.trim() || !form.base_url.trim()) {
       setError('名称、Base URL 不能为空');
@@ -239,6 +269,11 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
     }
     if (models.length === 0) {
       setError('至少需要配置一个模型');
+      return;
+    }
+    const invalid = models.findIndex((m) => m.context_window <= 0);
+    if (invalid >= 0) {
+      setError(`第 ${invalid + 1} 个模型未填写有效的上下文窗口（token）`);
       return;
     }
     setSaving(true);
@@ -348,6 +383,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
         label: m.id,
         model: m.id,
         is_active: wasEmpty && idx === 0,
+        context_window: defaultContextWindow,
       }));
       return { ...prev, models: [...prev.models, ...newModels] };
     });
@@ -381,6 +417,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
             label: m.label,
             model: m.model,
             is_active: m.is_active,
+            context_window: m.context_window,
           })),
         },
         p.id,
@@ -582,6 +619,29 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
                 </div>
               </div>
 
+              <div className="model-default-window">
+                <span className="model-default-window-label">批量导入默认窗口</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={defaultContextWindow}
+                  onChange={(e) =>
+                    setDefaultContextWindow(Number(e.target.value) || 0)
+                  }
+                />
+                <button
+                  type="button"
+                  className="btn ghost small"
+                  onClick={saveDefaultWindow}
+                  disabled={defaultSaving}
+                >
+                  {defaultSaving ? '保存中…' : '保存'}
+                </button>
+                <span className="model-default-window-hint">
+                  仅用于拉取模型时预填，不覆盖已保存的模型值
+                </span>
+              </div>
+
               {showPicker && (
                 <div className="model-picker">
                   <div className="model-picker-bar">
@@ -679,6 +739,32 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
                     className="model-id-input"
                     onChange={(e) => updateModel(idx, { model: e.target.value })}
                   />
+                  <div className="model-window">
+                    <input
+                      type="number"
+                      min={1}
+                      className="model-window-input"
+                      value={m.context_window || ''}
+                      placeholder="上下文窗口，如 128000"
+                      onChange={(e) =>
+                        updateModel(idx, {
+                          context_window: Number(e.target.value) || 0,
+                        })
+                      }
+                    />
+                    <div className="model-window-quick">
+                      {[64_000, 128_000, 200_000, 1_000_000].map((v) => (
+                        <button
+                          key={v}
+                          type="button"
+                          onClick={() => updateModel(idx, { context_window: v })}
+                          title={`填入 ${v.toLocaleString()} tokens`}
+                        >
+                          {v >= 1_000_000 ? '1M' : `${v / 1000}k`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                   <button
                     type="button"
                     className={`model-default${m.is_active ? ' on' : ''}`}
