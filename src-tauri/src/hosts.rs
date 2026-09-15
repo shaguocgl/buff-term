@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use crate::credentials;
 use crate::ai::TestResult;
@@ -90,19 +91,15 @@ pub fn import_config(db: &Db, path: Option<String>) -> Result<ImportResult, Stri
     let content =
         fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败: {e}", path))?;
     let inputs = sshconfig::parse(&content);
-    let existing: Vec<String> = db
+    let mut existing: HashSet<String> = db
         .list()
         .map_err(|e| format!("读取主机列表失败: {e}"))?
         .into_iter()
         .map(|h| h.name)
         .collect();
+    let (accepted, skipped) = filter_new_hosts(inputs, &mut existing);
     let mut imported = 0;
-    let mut skipped = 0;
-    for input in inputs {
-        if existing.contains(&input.name) {
-            skipped += 1;
-            continue;
-        }
+    for input in accepted {
         let host = host_from_input(input);
         db.insert(&host).map_err(|e| format!("导入主机失败: {e}"))?;
         imported += 1;
@@ -110,10 +107,30 @@ pub fn import_config(db: &Db, path: Option<String>) -> Result<ImportResult, Stri
     Ok(ImportResult { imported, skipped })
 }
 
+fn filter_new_hosts(
+    inputs: Vec<HostInput>,
+    existing: &mut HashSet<String>,
+) -> (Vec<HostInput>, usize) {
+    let mut skipped = 0;
+    let mut accepted = Vec::new();
+    for input in inputs {
+        if !existing.insert(input.name.clone()) {
+            skipped += 1;
+            continue;
+        }
+        accepted.push(input);
+    }
+    (accepted, skipped)
+}
+
 fn default_ssh_config_path() -> String {
-    match std::env::var("HOME") {
-        Ok(home) => format!("{home}/.ssh/config"),
-        Err(_) => "/Users/current/.ssh/config".to_string(),
+    match crate::util::user_home_dir() {
+        Some(home) => home
+            .join(".ssh")
+            .join("config")
+            .to_string_lossy()
+            .to_string(),
+        None => ".ssh/config".to_string(),
     }
 }
 
@@ -201,5 +218,39 @@ pub async fn test_host_connection(
             ok: false,
             message,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(name: &str) -> HostInput {
+        HostInput {
+            name: name.to_string(),
+            address: format!("{name}.example.com"),
+            port: 22,
+            username: "root".to_string(),
+            auth_type: AuthType::Key,
+            key_path: None,
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn import_dedups_existing_and_intra_batch_names() {
+        let mut existing: HashSet<String> = ["web".to_string()].into_iter().collect();
+        let (accepted, skipped) = filter_new_hosts(
+            vec![input("web"), input("db"), input("db"), input("cache")],
+            &mut existing,
+        );
+        assert_eq!(skipped, 2);
+        let names: Vec<&str> = accepted.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, ["db", "cache"]);
+        let (accepted2, skipped2) =
+            filter_new_hosts(vec![input("db"), input("new")], &mut existing);
+        assert_eq!(skipped2, 1);
+        assert_eq!(accepted2.len(), 1);
+        assert_eq!(accepted2[0].name, "new");
     }
 }

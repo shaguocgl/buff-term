@@ -3,21 +3,28 @@ import type { McpApprovalRequest } from '../types';
 
 interface Props {
   request: McpApprovalRequest;
+  deadline: number;
   onResolve: (allow: boolean) => void;
 }
 
 const DEFAULT_TIMEOUT = 600;
 
 // 外部 AI（MCP）命令审批弹窗：带倒计时，超时后端按拒绝处理
-export default function McpApprovalModal({ request, onResolve }: Props) {
+export default function McpApprovalModal({
+  request,
+  deadline,
+  onResolve,
+}: Props) {
   const timeoutSecs = request.timeout_secs ?? DEFAULT_TIMEOUT;
-  const [remaining, setRemaining] = useState(timeoutSecs);
+  const [remaining, setRemaining] = useState(() =>
+    Math.max(0, Math.ceil((deadline - Date.now()) / 1000)),
+  );
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setRemaining((r) => Math.max(0, r - 1));
-    }, 1000);
+      setRemaining(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+    }, 300);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [deadline]);
   const timedOut = remaining <= 0;
   const pct = timeoutSecs > 0 ? Math.max(0, (remaining / timeoutSecs) * 100) : 0;
 

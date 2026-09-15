@@ -13,15 +13,22 @@ use context::{build_context_view, CompressionStrategy, ContextUsage};
 use futures_util::StreamExt;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 use tools::{execute_tool, infer_tool_name, parse_args, system_prompt, tools_schema};
 
+struct ControlSlot {
+    token: u64,
+    tx: mpsc::Sender<Control>,
+}
+
 #[derive(Default)]
 pub struct AgentManager {
-    controls: Mutex<HashMap<u32, mpsc::Sender<Control>>>,
+    controls: Mutex<HashMap<u32, ControlSlot>>,
+    next_control_token: AtomicU64,
     histories: Mutex<HashMap<String, Vec<serde_json::Value>>>,
     /// 每台主机的结构化任务台账：跨压缩窗口保存目标/进度/失败尝试，永不裁剪。
     plans: Mutex<HashMap<String, TaskPlan>>,
@@ -40,12 +47,28 @@ pub enum Control {
 }
 
 impl AgentManager {
-    fn set_control(&self, id: u32, tx: mpsc::Sender<Control>) {
-        self.controls.lock().unwrap().insert(id, tx);
+    fn set_control(&self, id: u32, tx: mpsc::Sender<Control>) -> u64 {
+        let token = self.next_control_token.fetch_add(1, Ordering::Relaxed);
+        self.controls
+            .lock()
+            .unwrap()
+            .insert(id, ControlSlot { token, tx });
+        token
     }
 
-    fn clear_control(&self, id: u32) {
-        self.controls.lock().unwrap().remove(&id);
+    fn clear_control(&self, id: u32, token: u64) {
+        let mut controls = self.controls.lock().unwrap();
+        if controls.get(&id).is_some_and(|slot| slot.token == token) {
+            controls.remove(&id);
+        }
+    }
+
+    fn control_sender(&self, id: u32) -> Option<mpsc::Sender<Control>> {
+        self.controls
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|slot| slot.tx.clone())
     }
 
     fn history(&self, host_id: &str) -> Vec<serde_json::Value> {
@@ -228,7 +251,7 @@ pub async fn agent_chat(
         .collect();
     let russh = app.state::<RusshManager>();
     let (tx, rx) = mpsc::channel::<Control>(8);
-    agents.set_control(session_id, tx);
+    let control_token = agents.set_control(session_id, tx);
     let generation = agents.generation(session_id);
 
     // 会话开始时静默采集一份主机快照写入历史指标，让趋势数据随对话自然累积。
@@ -281,7 +304,7 @@ pub async fn agent_chat(
     if agents.generation(session_id) == generation {
         agents.save_history(&host.id, history);
     }
-    agents.clear_control(session_id);
+    agents.clear_control(session_id, control_token);
     result
 }
 
@@ -293,11 +316,7 @@ pub fn agent_approve(
     allow: bool,
 ) -> Result<(), String> {
     let tx = agents
-        .controls
-        .lock()
-        .unwrap()
-        .get(&session_id)
-        .cloned()
+        .control_sender(session_id)
         .ok_or_else(|| "当前没有等待审批的工具调用".to_string())?;
     tx.try_send(Control::Approve {
         tool_call_id,
@@ -308,7 +327,7 @@ pub fn agent_approve(
 
 #[tauri::command]
 pub fn agent_cancel(agents: State<'_, AgentManager>, session_id: u32) -> Result<(), String> {
-    if let Some(tx) = agents.controls.lock().unwrap().get(&session_id).cloned() {
+    if let Some(tx) = agents.control_sender(session_id) {
         let _ = tx.try_send(Control::Cancel);
     }
     Ok(())
@@ -321,7 +340,7 @@ pub fn agent_reset(
     host_id: String,
 ) -> Result<(), String> {
     // 停止正在运行的 agent 循环（若有），并递增该会话的代数使旧循环在结束时放弃写回历史
-    if let Some(tx) = agents.controls.lock().unwrap().get(&session_id).cloned() {
+    if let Some(tx) = agents.control_sender(session_id) {
         let _ = tx.try_send(Control::Cancel);
     }
     agents.bump_generation(session_id);
@@ -847,11 +866,16 @@ async fn run_agent_loop(
             let approval_label = if need_approval { "approved" } else { "auto" };
             emit_tool_state(app, session_id, &acc, &args, "running", None, None, None);
 
-            // select! 让「停止」能中断正在执行的工具：drop future 会关闭本地 SSH 通道；
-            // 远端命令可能仍在运行（与超时语义一致），但本地立即停止等待
-            let result = tokio::select! {
-                r = execute_tool(db, russh, host, normalized_name, &args) => r,
-                _ = rx.recv() => return Ok(()),
+            let tool = execute_tool(db, russh, host, normalized_name, &args);
+            tokio::pin!(tool);
+            let result = loop {
+                tokio::select! {
+                    r = &mut tool => break r,
+                    msg = rx.recv() => match msg {
+                        Some(Control::Cancel) | None => return Ok(()),
+                        Some(Control::Approve { .. }) => {}
+                    },
+                }
             };
             match result {
                 Ok(output) => {
@@ -1129,6 +1153,20 @@ mod tests {
             "Extra fields not permitted"
         ));
         assert!(!is_unsupported_stream_options_error("invalid api key"));
+    }
+
+    #[test]
+    fn control_slot_token_prevents_stale_clear() {
+        let agents = AgentManager::default();
+        let (old_tx, _old_rx) = mpsc::channel::<Control>(1);
+        let (new_tx, _new_rx) = mpsc::channel::<Control>(1);
+        let old_token = agents.set_control(7, old_tx);
+        let new_token = agents.set_control(7, new_tx);
+        assert_ne!(old_token, new_token);
+        agents.clear_control(7, old_token);
+        assert!(agents.control_sender(7).is_some());
+        agents.clear_control(7, new_token);
+        assert!(agents.control_sender(7).is_none());
     }
 
     #[test]

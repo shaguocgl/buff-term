@@ -81,6 +81,21 @@ interface Tab {
 /** 右侧面板类型（chat / sftp / monitor / inspection），none 表示全部收起 */
 type PanelKind = 'chat' | 'sftp' | 'monitor' | 'inspection' | 'none';
 
+type ApprovalQueueItem =
+  | { kind: 'mcp'; id: string; deadline: number; request: McpApprovalRequest }
+  | {
+      kind: 'guard';
+      id: string;
+      deadline: number;
+      request: TerminalGuardApproval;
+    }
+  | {
+      kind: 'host-key';
+      id: string;
+      deadline: number;
+      request: HostKeyConfirmRequest;
+    };
+
 const PANEL_STORAGE_KEY = 'buffterm-panel';
 const PANEL_WIDTH_STORAGE_KEY = 'buffterm-panel-width';
 
@@ -110,11 +125,7 @@ function App() {
   const [showAlerts, setShowAlerts] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
   const [showTerminalGuard, setShowTerminalGuard] = useState(false);
-  const [mcpApproval, setMcpApproval] = useState<McpApprovalRequest | null>(null);
-  const [guardApproval, setGuardApproval] =
-    useState<TerminalGuardApproval | null>(null);
-  const [hostKeyApproval, setHostKeyApproval] =
-    useState<HostKeyConfirmRequest | null>(null);
+  const [approvalQueue, setApprovalQueue] = useState<ApprovalQueueItem[]>([]);
   const [chatOpen, setChatOpen] = useState(true);
   const [sftpOpen, setSftpOpen] = useState(false);
   const [monitorOpen, setMonitorOpen] = useState(false);
@@ -230,100 +241,108 @@ function App() {
     getAppVersion().then(setAppVersion).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    let un: (() => void) | undefined;
-    let cancelled = false;
-    onMcpApprovalRequest((req) => setMcpApproval(req)).then((fn) => {
-      if (cancelled) fn();
-      else un = fn;
-    });
-    return () => {
-      cancelled = true;
-      un?.();
-    };
+  const enqueueApproval = useCallback((item: ApprovalQueueItem) => {
+    const now = Date.now();
+    setApprovalQueue((prev) => [
+      ...prev.filter(
+        (p) => p.deadline > now && !(p.kind === item.kind && p.id === item.id),
+      ),
+      item,
+    ]);
   }, []);
 
   useEffect(() => {
-    let unGuard: (() => void) | undefined;
-    let unKey: (() => void) | undefined;
+    let unsubs: (() => void)[] = [];
     let cancelled = false;
-    onTerminalGuardApproval((req) => setGuardApproval(req)).then((fn) => {
-      if (cancelled) fn();
-      else unGuard = fn;
-    });
-    onHostKeyConfirm((req) => setHostKeyApproval(req)).then((fn) => {
-      if (cancelled) fn();
-      else unKey = fn;
+    Promise.all([
+      onMcpApprovalRequest((req) =>
+        enqueueApproval({
+          kind: 'mcp',
+          id: req.request_id,
+          deadline: Date.now() + (req.timeout_secs ?? 600) * 1000,
+          request: req,
+        }),
+      ),
+      onTerminalGuardApproval((req) =>
+        enqueueApproval({
+          kind: 'guard',
+          id: req.request_id,
+          deadline: Date.now() + Math.max(10, req.timeout_secs) * 1000,
+          request: req,
+        }),
+      ),
+      onHostKeyConfirm((req) =>
+        enqueueApproval({
+          kind: 'host-key',
+          id: req.key,
+          deadline: Date.now() + 60_000,
+          request: req,
+        }),
+      ),
+    ]).then((fns) => {
+      if (cancelled) fns.forEach((fn) => fn());
+      else unsubs = fns;
     });
     return () => {
       cancelled = true;
-      unGuard?.();
-      unKey?.();
+      unsubs.forEach((fn) => fn());
     };
-  }, []);
+  }, [enqueueApproval]);
 
-  // guard 审批弹窗超时自动关闭（后端同时按拒绝处理并写审计，无需前端补发 deny）
+  const activeApproval = approvalQueue[0];
+
   useEffect(() => {
-    if (!guardApproval) return;
-    const timer = window.setTimeout(
-      () => setGuardApproval(null),
-      Math.max(10, guardApproval.timeout_secs) * 1000,
+    if (approvalQueue.length === 0) return;
+    const nextDeadline = Math.min(
+      ...approvalQueue.map((item) => item.deadline),
     );
+    const dropExpired = () => {
+      const now = Date.now();
+      setApprovalQueue((prev) =>
+        prev.filter((item) => item.deadline > now),
+      );
+    };
+    const delay = nextDeadline - Date.now();
+    if (delay <= 0) {
+      dropExpired();
+      return;
+    }
+    const timer = window.setTimeout(dropExpired, delay);
     return () => window.clearTimeout(timer);
-  }, [guardApproval]);
+  }, [approvalQueue]);
 
-  // MCP 审批弹窗超时自动关闭（后端超时按拒绝处理）
-  useEffect(() => {
-    if (!mcpApproval) return;
-    const secs = mcpApproval.timeout_secs ?? 600;
-    const timer = window.setTimeout(() => setMcpApproval(null), secs * 1000);
-    return () => window.clearTimeout(timer);
-  }, [mcpApproval]);
-
-  // 主机指纹确认弹窗超时自动关闭（后端 60s 超时按拒绝处理，与倒计时一致）
-  useEffect(() => {
-    if (!hostKeyApproval) return;
-    const timer = window.setTimeout(() => setHostKeyApproval(null), 60_000);
-    return () => window.clearTimeout(timer);
-  }, [hostKeyApproval]);
-
-  const resolveMcpApproval = async (allow: boolean) => {
-    const req = mcpApproval;
-    if (!req) return;
+  const resolveApproval = async (
+    item: ApprovalQueueItem,
+    allow: boolean,
+  ) => {
     try {
-      await mcpApprove(req.request_id, allow);
+      switch (item.kind) {
+        case 'mcp':
+          await mcpApprove(item.request.request_id, allow);
+          break;
+        case 'guard':
+          await sessionGuardApprove(
+            item.request.session_id,
+            item.request.request_id,
+            allow,
+          );
+          break;
+        case 'host-key':
+          await sshConfirmHostKey(item.request.key, allow);
+          break;
+      }
     } catch (e) {
       showToast('error', fmtError(e));
     } finally {
-      // 只关闭自己对应的弹窗，避免并发审批时误关新请求的弹窗
-      setMcpApproval((cur) => (cur?.request_id === req.request_id ? null : cur));
-    }
-  };
-
-  const resolveGuardApproval = async (allow: boolean) => {
-    const req = guardApproval;
-    if (!req) return;
-    try {
-      await sessionGuardApprove(req.session_id, req.request_id, allow);
-    } catch (e) {
-      showToast('error', fmtError(e));
-    } finally {
-      setGuardApproval((cur) => (cur?.request_id === req.request_id ? null : cur));
-      // 审批/取消后把键盘焦点还给终端，避免需要手动点击才能继续输入
-      window.setTimeout(() => {
-        window.dispatchEvent(new CustomEvent('buffterm:refocus-terminal'));
-      }, 0);
-    }
-  };
-
-  const resolveHostKeyApproval = async (trust: boolean) => {
-    const req = hostKeyApproval;
-    if (!req) return;
-    setHostKeyApproval(null);
-    try {
-      await sshConfirmHostKey(req.key, trust);
-    } catch (e) {
-      showToast('error', fmtError(e));
+      setApprovalQueue((prev) =>
+        prev.filter((p) => !(p.kind === item.kind && p.id === item.id)),
+      );
+      if (item.kind === 'guard') {
+        // 审批/取消后把键盘焦点还给终端，避免需要手动点击才能继续输入
+        window.setTimeout(() => {
+          window.dispatchEvent(new CustomEvent('buffterm:refocus-terminal'));
+        }, 0);
+      }
     }
   };
 
@@ -1182,24 +1201,30 @@ function App() {
         <TerminalGuardModal onClose={() => setShowTerminalGuard(false)} />
       )}
 
-      {mcpApproval && (
+      {activeApproval?.kind === 'mcp' && (
         <McpApprovalModal
-          request={mcpApproval}
-          onResolve={resolveMcpApproval}
+          key={`mcp-${activeApproval.id}`}
+          request={activeApproval.request}
+          deadline={activeApproval.deadline}
+          onResolve={(allow) => resolveApproval(activeApproval, allow)}
         />
       )}
 
-      {guardApproval && (
+      {activeApproval?.kind === 'guard' && (
         <GuardApprovalModal
-          request={guardApproval}
-          onResolve={resolveGuardApproval}
+          key={`guard-${activeApproval.id}`}
+          request={activeApproval.request}
+          deadline={activeApproval.deadline}
+          onResolve={(allow) => resolveApproval(activeApproval, allow)}
         />
       )}
 
-      {hostKeyApproval && (
+      {activeApproval?.kind === 'host-key' && (
         <HostKeyModal
-          request={hostKeyApproval}
-          onResolve={resolveHostKeyApproval}
+          key={`host-key-${activeApproval.id}`}
+          request={activeApproval.request}
+          deadline={activeApproval.deadline}
+          onResolve={(trust) => resolveApproval(activeApproval, trust)}
         />
       )}
 

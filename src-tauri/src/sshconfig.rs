@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::hosts::HostInput;
 use crate::models::AuthType;
 
@@ -76,12 +78,15 @@ fn is_importable(h: &HostInput) -> bool {
 }
 
 fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
+    expand_tilde_with_home(path, crate::util::user_home_dir().as_deref())
+}
+
+fn expand_tilde_with_home(path: &str, home: Option<&Path>) -> String {
+    let rest = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\"));
+    match (rest, home) {
+        (Some(rest), Some(home)) => home.join(rest).to_string_lossy().to_string(),
+        _ => path.to_string(),
     }
-    path.to_string()
 }
 
 #[cfg(test)]
@@ -117,6 +122,27 @@ Host another
         let b = &hosts[1];
         assert_eq!(b.name, "another");
         assert_eq!(b.address, "another.example.com");
+    }
+
+    #[test]
+    fn expand_tilde_supports_unix_and_windows_separators() {
+        let home = Path::new("/home/u");
+        assert_eq!(
+            expand_tilde_with_home("~/.ssh/id_ed25519", Some(home)),
+            home.join(".ssh/id_ed25519").to_string_lossy()
+        );
+        assert_eq!(
+            expand_tilde_with_home("~\\.ssh\\id_ed25519", Some(home)),
+            home.join(".ssh\\id_ed25519").to_string_lossy()
+        );
+        assert_eq!(
+            expand_tilde_with_home("~/.ssh/id_ed25519", None),
+            "~/.ssh/id_ed25519"
+        );
+        assert_eq!(
+            expand_tilde_with_home("/etc/ssh/key", Some(home)),
+            "/etc/ssh/key"
+        );
     }
 
     #[test]

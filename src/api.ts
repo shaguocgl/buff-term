@@ -352,8 +352,12 @@ export const onAiPlan = (cb: (payload: AiPlanPayload) => void) =>
 export const onAiContext = (cb: (payload: ContextUsage) => void) =>
   listen<ContextUsage>('ai:context', (event) => cb(event.payload));
 
-export const openSession = (hostId: string, cols: number, rows: number) =>
-  invoke<number>('open_session', { hostId, cols, rows });
+export const openSession = (
+  hostId: string,
+  cols: number,
+  rows: number,
+  requestId: string,
+) => invoke<number>('open_session', { hostId, cols, rows, requestId });
 export const closeSession = (id: number) => invoke<void>('close_session', { id });
 export const sessionInput = (
   id: number,
@@ -372,24 +376,30 @@ export const resizeSession = (id: number, cols: number, rows: number) =>
 
 export interface TerminalDataPayload {
   session_id: number;
+  request_id: string;
   data: number[];
 }
 
 export interface SessionStatusPayload {
   session_id: number;
+  request_id: string;
   status: string;
 }
 
 export const onTerminalData = (
-  cb: (sessionId: number, data: Uint8Array) => void,
+  cb: (sessionId: number, requestId: string, data: Uint8Array) => void,
 ) =>
   listen<TerminalDataPayload>('terminal:data', (event) =>
-    cb(event.payload.session_id, new Uint8Array(event.payload.data)),
+    cb(
+      event.payload.session_id,
+      event.payload.request_id,
+      new Uint8Array(event.payload.data),
+    ),
   );
 
 export const onSessionStatus = (
-  cb: (sessionId: number, status: string) => void,
+  cb: (sessionId: number, requestId: string, status: string) => void,
 ) =>
   listen<SessionStatusPayload>('session:status', (event) =>
-    cb(event.payload.session_id, event.payload.status),
+    cb(event.payload.session_id, event.payload.request_id, event.payload.status),
   );

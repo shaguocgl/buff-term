@@ -4,6 +4,7 @@ import { ShieldIcon } from './Icons';
 
 interface Props {
   request: HostKeyConfirmRequest;
+  deadline: number;
   onResolve: (trust: boolean) => void;
 }
 
@@ -11,14 +12,16 @@ interface Props {
 // 倒计时与后端确认等待/连接超时保持一致（60s），超时按拒绝处理。
 const CONFIRM_TIMEOUT_SECS = 60;
 
-export default function HostKeyModal({ request, onResolve }: Props) {
-  const [remaining, setRemaining] = useState(CONFIRM_TIMEOUT_SECS);
+export default function HostKeyModal({ request, deadline, onResolve }: Props) {
+  const [remaining, setRemaining] = useState(() =>
+    Math.max(0, Math.ceil((deadline - Date.now()) / 1000)),
+  );
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setRemaining((r) => Math.max(0, r - 1));
-    }, 1000);
+      setRemaining(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+    }, 300);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [deadline]);
   const timedOut = remaining <= 0;
   const pct = Math.max(0, (remaining / CONFIRM_TIMEOUT_SECS) * 100);
 

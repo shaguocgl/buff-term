@@ -234,24 +234,31 @@ export default function MonitorPanel({
   // 首次加载默认 true，避免面板打开瞬间出现空白
   const [loading, setLoading] = useState(true);
   const firstLoad = useRef(true);
+  const inFlightRef = useRef<Promise<void> | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(() => {
+    if (inFlightRef.current) return inFlightRef.current;
     setError(null);
-    try {
-      const s = await monitorSnapshot(host.id);
-      setSnap(s);
-      setHistory((prev) => {
-        const next = [...prev, { ts: Date.now() / 1000, cpu: s.cpu_percent, mem: s.mem.percent }];
-        // 只保留最近 30 分钟
-        const cutoff = Date.now() / 1000 - 1800;
-        return next.filter((p) => p.ts >= cutoff);
-      });
-    } catch (e) {
-      setError(fmtError(e));
-    } finally {
-      firstLoad.current = false;
-      setLoading(false);
-    }
+    const pending = (async () => {
+      try {
+        const s = await monitorSnapshot(host.id);
+        setSnap(s);
+        setHistory((prev) => {
+          const next = [...prev, { ts: Date.now() / 1000, cpu: s.cpu_percent, mem: s.mem.percent }];
+          // 只保留最近 30 分钟
+          const cutoff = Date.now() / 1000 - 1800;
+          return next.filter((p) => p.ts >= cutoff);
+        });
+      } catch (e) {
+        setError(fmtError(e));
+      } finally {
+        firstLoad.current = false;
+        setLoading(false);
+        inFlightRef.current = null;
+      }
+    })();
+    inFlightRef.current = pending;
+    return pending;
   }, [host]);
 
   // 面板打开时用后端历史指标回填趋势图（firstLoad 仅此一次），随后进入 5s 轮询。
@@ -270,12 +277,21 @@ export default function MonitorPanel({
       .catch(() => {});
   }, [host.id]);
 
-  // 面板隐藏时暂停轮询（不再后台采集），重新可见时立即刷新一次
   useEffect(() => {
     if (hidden) return;
-    load();
-    const timer = window.setInterval(load, 5000);
-    return () => window.clearInterval(timer);
+    let stopped = false;
+    let timer: number | undefined;
+    const tick = async () => {
+      await load();
+      if (!stopped) {
+        timer = window.setTimeout(() => void tick(), 5000);
+      }
+    };
+    void tick();
+    return () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [load, hidden]);
 
   return (
@@ -293,7 +309,7 @@ export default function MonitorPanel({
             title="立即刷新"
             onClick={() => {
               setLoading(true);
-              load().finally(() => setLoading(false));
+              void load();
             }}
           >
             <RefreshIcon size={14} />

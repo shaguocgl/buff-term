@@ -188,6 +188,7 @@ export default function TerminalView({
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sessionIdRef = useRef<number | null>(null);
+  const activeConnectionRequestRef = useRef<string | null>(null);
   const pendingInputRef = useRef<number[]>([]);
   const inputChainRef = useRef<Promise<void>>(Promise.resolve());
   const termRef = useRef<Terminal | null>(null);
@@ -307,15 +308,18 @@ export default function TerminalView({
     [],
   );
 
-  const connect = useCallback(async () => {
+  const connect = useCallback(async (): Promise<boolean> => {
     const term = termRef.current;
     const fit = fitRef.current;
-    if (!term || !fit) return;
+    if (!term || !fit) return false;
     const { cols, rows } = normalizeDims(fit.proposeDimensions());
-    const id = await openSession(host.id, cols, rows);
-    if (disposedRef.current) {
+    const requestId = `${tabKey}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    activeConnectionRequestRef.current = requestId;
+    sessionIdRef.current = null;
+    const id = await openSession(host.id, cols, rows, requestId);
+    if (disposedRef.current || activeConnectionRequestRef.current !== requestId) {
       closeSession(id).catch(() => {});
-      return;
+      return false;
     }
     sessionIdRef.current = id;
     // 会话退出时 disableStdin 被置 true，重连成功后必须恢复，
@@ -329,6 +333,7 @@ export default function TerminalView({
       sendInput(pending);
     }
     applyDims();
+    return true;
   }, [host, tabKey, applyDims, sendInput]);
 
   const connectRef = useRef(connect);
@@ -366,7 +371,8 @@ export default function TerminalView({
       reconnectAttemptsRef.current += 1;
       setConnecting(true);
       connectRef.current()
-        .then(() => {
+        .then((ok) => {
+          if (!ok) return;
           reconnectAttemptsRef.current = 0;
           termRef.current?.writeln('\r\n\x1b[32m[已自动重新连接]\x1b[0m');
         })
@@ -528,16 +534,18 @@ export default function TerminalView({
     observer.observe(container);
 
     (async () => {
-      // 先注册事件监听，再发起连接，避免丢失服务器初始输出
-      unData = await onTerminalData((id, data) => {
-        if (id === sessionIdRef.current) term.write(data);
+      unData = await onTerminalData((_id, reqId, data) => {
+        if (reqId === activeConnectionRequestRef.current) term.write(data);
       });
       if (disposed) {
         unData();
         return;
       }
-      unStatus = await onSessionStatus((id, status) => {
-        if (id !== sessionIdRef.current) return;
+      unStatus = await onSessionStatus((_id, reqId, status) => {
+        if (reqId !== activeConnectionRequestRef.current) return;
+        activeConnectionRequestRef.current = null;
+        sessionIdRef.current = null;
+        setConnecting(false);
         if (status === 'exited') {
           term.writeln(`\r\n\x1b[33m[会话已结束: exited]\x1b[0m`);
           term.options.disableStdin = true;
@@ -581,6 +589,7 @@ export default function TerminalView({
       container.removeEventListener('paste', handlePaste, true);
       unData?.();
       unStatus?.();
+      activeConnectionRequestRef.current = null;
       const sid = sessionIdRef.current;
       if (sid !== null) {
         closeSession(sid).catch(() => {});

@@ -34,6 +34,7 @@ enum GuardMsg {
 
 pub struct Session {
     pub host: Host,
+    pub request_id: String,
     _handle: Handle<ClientHandler>,
     write_half: Arc<ChannelWriteHalf<russh::client::Msg>>,
     resize_tx: mpsc::UnboundedSender<(u16, u16)>,
@@ -55,12 +56,14 @@ pub struct SessionManager {
 #[derive(Clone, Serialize)]
 pub struct TerminalData {
     pub session_id: u32,
+    pub request_id: String,
     pub data: Vec<u8>,
 }
 
 #[derive(Clone, Serialize)]
 pub struct SessionStatus {
     pub session_id: u32,
+    pub request_id: String,
     pub status: String,
 }
 
@@ -71,6 +74,7 @@ impl SessionManager {
         host: Host,
         cols: u16,
         rows: u16,
+        request_id: String,
     ) -> Result<u32, String> {
         let cols = cols.clamp(2, 400);
         let rows = rows.clamp(10, 200);
@@ -98,8 +102,23 @@ impl SessionManager {
         let (mut read_half, write_half) = channel.split();
         let write_half = Arc::new(write_half);
         let (resize_tx, mut resize_rx) = mpsc::unbounded_channel::<(u16, u16)>();
+        let (guard_tx, mut guard_rx) = mpsc::unbounded_channel::<GuardMsg>();
+        let (echo_tx, mut echo_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+
+        self.sessions.lock().unwrap().insert(
+            id,
+            Session {
+                host: host.clone(),
+                request_id: request_id.clone(),
+                _handle: handle,
+                write_half: write_half.clone(),
+                resize_tx,
+                guard_tx,
+                echo_tx,
+            },
+        );
 
         let write_resize = write_half.clone();
         tokio::spawn(async move {
@@ -111,6 +130,7 @@ impl SessionManager {
         });
 
         let app_for_io = app.clone();
+        let request_id_io = request_id.clone();
         tokio::spawn(async move {
             loop {
                 match read_half.wait().await {
@@ -120,7 +140,11 @@ impl SessionManager {
                         }
                         let _ = app_for_io.emit(
                             "terminal:data",
-                            TerminalData { session_id: id, data: data.to_vec() },
+                            TerminalData {
+                                session_id: id,
+                                request_id: request_id_io.clone(),
+                                data: data.to_vec(),
+                            },
                         );
                     }
                     Some(ChannelMsg::ExtendedData { data, ext }) if ext == 1 => {
@@ -129,7 +153,11 @@ impl SessionManager {
                         }
                         let _ = app_for_io.emit(
                             "terminal:data",
-                            TerminalData { session_id: id, data: data.to_vec() },
+                            TerminalData {
+                                session_id: id,
+                                request_id: request_id_io.clone(),
+                                data: data.to_vec(),
+                            },
                         );
                     }
                     Some(ChannelMsg::Close) | None => break,
@@ -140,6 +168,7 @@ impl SessionManager {
                 "session:status",
                 SessionStatus {
                     session_id: id,
+                    request_id: request_id_io.clone(),
                     status: "exited".to_string(),
                 },
             );
@@ -151,8 +180,6 @@ impl SessionManager {
         // 延迟是独立 spawn，后续按键可能先于 Enter 到达远端，导致输入顺序错乱）。
         // 回显走独立通道：Suspended 下 Enter 的 200ms 同步窗口内，消费者持续吸收
         // readline 重绘字节，保证补全/历史回放的判定不依赖 console_line 也能重建。
-        let (guard_tx, mut guard_rx) = mpsc::unbounded_channel::<GuardMsg>();
-        let (echo_tx, mut echo_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let write_for_guard = write_half.clone();
         let app_for_guard = app.clone();
         let host_id = host.id.clone();
@@ -280,17 +307,6 @@ impl SessionManager {
             }
         });
 
-        self.sessions.lock().unwrap().insert(
-            id,
-            Session {
-                host,
-                _handle: handle,
-                write_half,
-                resize_tx,
-                guard_tx,
-                echo_tx,
-            },
-        );
         Ok(id)
     }
 
@@ -323,6 +339,7 @@ impl SessionManager {
             "session:status",
             SessionStatus {
                 session_id: id,
+                request_id: session.request_id.clone(),
                 status: "closed".to_string(),
             },
         );
@@ -396,9 +413,10 @@ pub async fn open_session(
     host_id: String,
     cols: u16,
     rows: u16,
+    request_id: String,
 ) -> Result<u32, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    state.open(app, host, cols, rows).await
+    state.open(app, host, cols, rows, request_id).await
 }
 
 #[tauri::command]

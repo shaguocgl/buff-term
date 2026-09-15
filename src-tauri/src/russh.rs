@@ -557,35 +557,23 @@ async fn exec_on(
     })
 }
 
-/// 跨平台用户主目录：优先 HOME（macOS/Linux），Windows 回退 USERPROFILE / HOMEDRIVE+HOMEPATH。
-fn home_dir() -> String {
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            return home;
-        }
-    }
-    if let Ok(profile) = std::env::var("USERPROFILE") {
-        if !profile.is_empty() {
-            return profile;
-        }
-    }
-    match (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
-        (Ok(drive), Ok(path)) => format!("{drive}{path}"),
-        _ => String::new(),
-    }
-}
-
 fn default_key_path() -> String {
-    let home = home_dir();
+    let home = crate::util::user_home_dir().unwrap_or_default();
     for name in ["id_ed25519", "id_ecdsa", "id_rsa"] {
-        let p = format!("{home}/.ssh/{name}");
-        if std::path::Path::new(&p).exists() {
-            return p;
+        let p = home.join(".ssh").join(name);
+        if p.exists() {
+            return p.to_string_lossy().to_string();
         }
     }
-    format!("{home}/.ssh/id_ed25519")
+    home.join(".ssh")
+        .join("id_ed25519")
+        .to_string_lossy()
+        .to_string()
 }
 
 fn default_known_hosts_path() -> PathBuf {
-    PathBuf::from(home_dir()).join(".ssh/known_hosts")
+    crate::util::user_home_dir()
+        .unwrap_or_default()
+        .join(".ssh")
+        .join("known_hosts")
 }

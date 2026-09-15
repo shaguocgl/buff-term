@@ -4,23 +4,29 @@ import { ShieldIcon } from './Icons';
 
 interface Props {
   request: TerminalGuardApproval;
+  deadline: number;
   onResolve: (allow: boolean) => void;
 }
 
 // 高危命令审批弹窗：展示倒计时（超时后端按拒绝处理），父组件在超时后负责关闭弹窗
-export default function GuardApprovalModal({ request, onResolve }: Props) {
-  const [remaining, setRemaining] = useState(request.timeout_secs);
+export default function GuardApprovalModal({
+  request,
+  deadline,
+  onResolve,
+}: Props) {
+  const timeoutSecs = Math.max(10, request.timeout_secs);
+  const [remaining, setRemaining] = useState(() =>
+    Math.max(0, Math.ceil((deadline - Date.now()) / 1000)),
+  );
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setRemaining((r) => Math.max(0, r - 1));
-    }, 1000);
+      setRemaining(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+    }, 300);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [deadline]);
   const timedOut = remaining <= 0;
   const pct =
-    request.timeout_secs > 0
-      ? Math.max(0, (remaining / request.timeout_secs) * 100)
-      : 0;
+    timeoutSecs > 0 ? Math.max(0, (remaining / timeoutSecs) * 100) : 0;
 
   return (
     <div className="modal-overlay">

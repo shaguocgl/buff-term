@@ -90,11 +90,10 @@ echo "LOAD $(cat /proc/loadavg 2>/dev/null | cut -d' ' -f1-3)"
 p1=$(grep '^cpu ' /proc/stat)
 sleep 0.3
 p2=$(grep '^cpu ' /proc/stat)
-CPU=$(awk -v a="$p1" -v b="$p2" 'BEGIN { split(a,A); split(b,B); u1=A[2]+A[3]+A[4]; u2=B[2]+B[3]+B[4]; d1=u1+A[5]; d2=u2+B[5]; d=d2-d1; if(d<=0){print 0; exit} printf "%.1f\n", (u2-u1)/d*100 }')
-echo "CPU $CPU"
+echo "CPU_RAW $p1|$p2"
 echo "MEM $(free -m 2>/dev/null | awk '/Mem:/{print $2, $3, $7}')"
 echo "DISK"
-df -hP 2>/dev/null | awk 'NR>1 {print $6 "|" $1 "|" $2 "|" $3}'
+df -hP 2>/dev/null | awk 'NR>1 {print $6 "|" $1 "|" $2 "|" $3 "|" $5}'
 echo "TOP"
 ps -eo user,%cpu,%mem,args --sort=-%cpu 2>/dev/null | head -8
 echo "END"
@@ -125,16 +124,7 @@ fn parse(text: &str, host: &Host) -> Result<MonitorSnapshot, String> {
         }
         match section.as_str() {
             "disk" => {
-                let parts: Vec<&str> = line.split('|').collect();
-                if parts.len() == 4 {
-                    let mut d = DiskInfo {
-                        mount: parts[0].to_string(),
-                        fs: parts[1].to_string(),
-                        total: parts[2].to_string(),
-                        used: parts[3].to_string(),
-                        percent: 0.0,
-                    };
-                    d.percent = percent_from_df(&d.total, &d.used);
+                if let Some(d) = parse_disk_line(line) {
                     snap.disks.push(d);
                 }
             }
@@ -152,8 +142,12 @@ fn parse(text: &str, host: &Host) -> Result<MonitorSnapshot, String> {
             _ => {
                 if let Some(v) = line.strip_prefix("LOAD ") {
                     snap.load = v.trim().to_string();
-                } else if let Some(v) = line.strip_prefix("CPU ") {
-                    snap.cpu_percent = v.trim().parse().unwrap_or(0.0);
+                } else if let Some(v) = line.strip_prefix("CPU_RAW ") {
+                    if let Some((before, after)) = v.split_once('|') {
+                        if let Some(p) = cpu_percent_from_stat(before.trim(), after.trim()) {
+                            snap.cpu_percent = p;
+                        }
+                    }
                 } else if let Some(v) = line.strip_prefix("MEM ") {
                     let nums: Vec<&str> = v.split_whitespace().collect();
                     // free -m 输出：total used ... available；used 采用 total - available（htop 口径）
@@ -183,24 +177,49 @@ fn parse(text: &str, host: &Host) -> Result<MonitorSnapshot, String> {
     Ok(snap)
 }
 
-/// 从 df -hP 的带单位大小计算百分比
-fn percent_from_df(total: &str, used: &str) -> f64 {
-    let to_gb = |s: &str| -> Option<f64> {
-        let s = s.trim();
-        let (num, unit) = s.split_at(s.len().saturating_sub(1));
-        let n: f64 = num.trim().parse().ok()?;
-        match unit {
-            "G" => Some(n),
-            "T" => Some(n * 1024.0),
-            "M" => Some(n / 1024.0),
-            "K" => Some(n / 1024.0 / 1024.0),
-            _ => Some(n),
-        }
-    };
-    match (to_gb(total), to_gb(used)) {
-        (Some(t), Some(u)) if t > 0.0 => (u / t) * 100.0,
-        _ => 0.0,
+fn parse_disk_line(line: &str) -> Option<DiskInfo> {
+    let parts: Vec<&str> = line.split('|').collect();
+    if parts.len() != 5 {
+        return None;
     }
+    Some(DiskInfo {
+        mount: parts[0].to_string(),
+        fs: parts[1].to_string(),
+        total: parts[2].to_string(),
+        used: parts[3].to_string(),
+        percent: parts[4].trim().trim_end_matches('%').parse().unwrap_or(0.0),
+    })
+}
+
+fn parse_cpu_times(line: &str) -> Option<Vec<u64>> {
+    let mut parts = line.split_whitespace();
+    if parts.next()? != "cpu" {
+        return None;
+    }
+    let values = parts
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if values.len() >= 4 {
+        Some(values)
+    } else {
+        None
+    }
+}
+
+fn cpu_percent_from_stat(before: &str, after: &str) -> Option<f64> {
+    let a = parse_cpu_times(before)?;
+    let b = parse_cpu_times(after)?;
+    let field = |v: &[u64], i: usize| v.get(i).copied().unwrap_or(0);
+    let total = |v: &[u64]| -> u64 { (0..8).map(|i| field(v, i)).sum() };
+    let idle_all = |v: &[u64]| -> u64 { field(v, 3) + field(v, 4) };
+    let delta_total = total(&b).saturating_sub(total(&a));
+    let delta_idle = idle_all(&b).saturating_sub(idle_all(&a));
+    if delta_total == 0 {
+        return Some(0.0);
+    }
+    let used = delta_total.saturating_sub(delta_idle);
+    Some(((used as f64 / delta_total as f64) * 100.0).clamp(0.0, 100.0))
 }
 
 /// 将 MonitorSnapshot 转换为 host_metrics 行并写入数据库。
@@ -248,4 +267,69 @@ pub fn save_metric(
         top_json: &top_json,
         source,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_percent_basic_delta() {
+        let p = cpu_percent_from_stat(
+            "cpu 100 0 100 200 0 0 0 0 0 0",
+            "cpu 150 0 150 250 0 0 0 0 0 0",
+        )
+        .unwrap();
+        assert!((p - 66.666).abs() < 0.01, "实际 {p}");
+    }
+
+    #[test]
+    fn cpu_percent_iowait_counts_as_idle() {
+        assert_eq!(
+            cpu_percent_from_stat("cpu 0 0 0 0 0 0 0 0", "cpu 0 0 0 0 100 0 0 0"),
+            Some(0.0)
+        );
+        assert_eq!(
+            cpu_percent_from_stat("cpu 0 0 0 0 0 0 0 0", "cpu 50 0 0 0 50 0 0 0"),
+            Some(50.0)
+        );
+    }
+
+    #[test]
+    fn cpu_percent_counts_irq_and_steal_as_busy() {
+        assert_eq!(
+            cpu_percent_from_stat("cpu 0 0 0 0 0 0 0 0", "cpu 0 0 0 0 0 25 25 50"),
+            Some(100.0)
+        );
+    }
+
+    #[test]
+    fn cpu_percent_guest_not_double_counted() {
+        assert_eq!(
+            cpu_percent_from_stat("cpu 10 0 0 0 0 0 0 0 0 0", "cpu 10 0 0 0 0 0 0 0 50 50"),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn cpu_percent_handles_missing_and_garbage() {
+        assert_eq!(cpu_percent_from_stat("cpu 1 2", "cpu 1 2 3 4"), None);
+        assert_eq!(cpu_percent_from_stat("notcpu 1 2 3 4", "cpu 1 2 3 4"), None);
+        assert_eq!(
+            cpu_percent_from_stat("cpu 1 bad 3 4", "cpu 1 2 3 4 5 6 7 8"),
+            None
+        );
+    }
+
+    #[test]
+    fn disk_line_parses_use_percent_directly() {
+        let d = parse_disk_line("/|/dev/sda1|50G|40G|80%").unwrap();
+        assert_eq!(d.mount, "/");
+        assert_eq!(d.fs, "/dev/sda1");
+        assert_eq!(d.total, "50G");
+        assert_eq!(d.used, "40G");
+        assert_eq!(d.percent, 80.0);
+        assert!(parse_disk_line("/|/dev/sda1|50G|40G").is_none());
+        assert_eq!(parse_disk_line("/boot|x|1G|1G|7").unwrap().percent, 7.0);
+    }
 }

@@ -1,6 +1,7 @@
 //! 通用工具函数：时间戳、字符串截断、shell 转义、错误提取、命令输出格式化、随机 token。
 
 use crate::russh::ExecResult;
+use std::path::PathBuf;
 
 /// 当前 Unix 时间戳（秒）。
 pub fn now() -> u64 {
@@ -80,6 +81,35 @@ pub fn generate_token() -> String {
     )
 }
 
+fn home_dir_from(
+    home: Option<&str>,
+    userprofile: Option<&str>,
+    homedrive: Option<&str>,
+    homepath: Option<&str>,
+) -> Option<PathBuf> {
+    if let Some(home) = home.filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
+    if let Some(profile) = userprofile.filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(profile));
+    }
+    match (homedrive, homepath) {
+        (Some(drive), Some(path)) if !drive.is_empty() && !path.is_empty() => {
+            Some(PathBuf::from(format!("{drive}{path}")))
+        }
+        _ => None,
+    }
+}
+
+pub fn user_home_dir() -> Option<PathBuf> {
+    home_dir_from(
+        std::env::var("HOME").ok().as_deref(),
+        std::env::var("USERPROFILE").ok().as_deref(),
+        std::env::var("HOMEDRIVE").ok().as_deref(),
+        std::env::var("HOMEPATH").ok().as_deref(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,5 +128,23 @@ mod tests {
     #[test]
     fn truncate_output_noop_when_short() {
         assert_eq!(truncate_output("short", 80), "short");
+    }
+
+    #[test]
+    fn home_dir_prefers_home_then_windows_fallbacks() {
+        assert_eq!(
+            home_dir_from(Some("/home/u"), Some("C:\\U"), Some("C:"), Some("\\U")),
+            Some(PathBuf::from("/home/u"))
+        );
+        assert_eq!(
+            home_dir_from(None, Some("C:\\U"), Some("C:"), Some("\\D")),
+            Some(PathBuf::from("C:\\U"))
+        );
+        assert_eq!(
+            home_dir_from(Some(""), None, Some("C:"), Some("\\U")),
+            Some(PathBuf::from("C:\\U"))
+        );
+        assert_eq!(home_dir_from(None, None, None, None), None);
+        assert_eq!(home_dir_from(None, None, Some("C:"), None), None);
     }
 }

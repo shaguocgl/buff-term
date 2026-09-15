@@ -10,15 +10,15 @@
 
 use crate::db::Db;
 use crate::models::{Host, McpPermissionMode, McpRule, McpService};
-use crate::russh::RusshManager;
+use crate::russh::{ExecResult, RusshManager};
 use crate::safety::{is_write_operation, sanitize};
-use crate::util::{format_exec_output, generate_token, now, shq};
+use crate::util::{format_exec_output, generate_token, now, shq, truncate};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
@@ -95,6 +95,15 @@ impl ApprovalRegistry {
             Some(tx) => tx.send(allow).map_err(|_| "审批接收方已关闭".to_string()),
             None => Err("审批请求不存在或已超时".to_string()),
         }
+    }
+
+    fn remove(&self, id: &str) {
+        self.pending.lock().unwrap().remove(id);
+    }
+
+    #[cfg(test)]
+    fn pending_len(&self) -> usize {
+        self.pending.lock().unwrap().len()
     }
 }
 
@@ -742,11 +751,19 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
             if config.permission_mode == McpPermissionMode::Readonly {
                 // 只读模式：允许只读命令，拒绝任何写操作
                 if is_write_operation(&command) {
-                    let _ = write_audit(app, host, "mcp:exec_command", &command, "denied");
-                    return Err(
-                        "只读模式不允许写操作，已拒绝执行。如需写操作请切换到管控模式或全部放行"
-                            .to_string(),
+                    let message =
+                        "只读模式不允许写操作，已拒绝执行。如需写操作请切换到管控模式或全部放行";
+                    let _ = write_audit(
+                        app,
+                        host,
+                        "mcp:exec_command",
+                        &command,
+                        "denied",
+                        "denied",
+                        Some(message),
+                        None,
                     );
+                    return Err(message.to_string());
                 }
             } else if config.permission_mode == McpPermissionMode::Confirm {
                 // 管控模式：命中自定义管控规则 **或** 内置写/危险判定时弹窗审批。
@@ -756,7 +773,16 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
                 if rule_hit || builtin_hit {
                     approval = Some(request_approval(app, host, &command).await?);
                     if approval == Some(false) {
-                        let _ = write_audit(app, host, "mcp:exec_command", &command, "denied");
+                        let _ = write_audit(
+                            app,
+                            host,
+                            "mcp:exec_command",
+                            &command,
+                            "denied",
+                            "denied",
+                            Some("用户拒绝执行该命令"),
+                            None,
+                        );
                         return Err("用户拒绝执行该命令".to_string());
                     }
                 }
@@ -764,6 +790,14 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
             run_and_log(app, host, name, &command, timeout, approval).await
         }
         _ => Err(format!("未知工具: {name}")),
+    }
+}
+
+fn exec_status(out: &ExecResult) -> &'static str {
+    if out.timed_out || out.exit_code.is_some_and(|code| code != 0) {
+        "error"
+    } else {
+        "executed"
     }
 }
 
@@ -775,22 +809,50 @@ async fn run_and_log(
     timeout_secs: u64,
     approval: Option<bool>,
 ) -> Result<String, String> {
-    let _ = write_audit(
-        app,
-        host,
-        tool_name,
-        command,
-        match approval {
-            Some(true) => "approved",
-            Some(false) => "denied",
-            None => "auto",
-        },
-    );
-    let russh = app.try_state::<RusshManager>().ok_or_else(|| "SSH 管理器不可用".to_string())?;
-    let out = russh
+    let approval_label = match approval {
+        Some(true) => "approved",
+        Some(false) => "denied",
+        None => "auto",
+    };
+    let russh = app
+        .try_state::<RusshManager>()
+        .ok_or_else(|| "SSH 管理器不可用".to_string())?;
+    let started = Instant::now();
+    match russh
         .exec(host, command, Duration::from_secs(timeout_secs))
-        .await?;
-    Ok(sanitize(&format_exec_output(&out)))
+        .await
+    {
+        Ok(out) => {
+            let duration_ms = started.elapsed().as_millis() as u64;
+            let output = sanitize(&format_exec_output(&out));
+            let _ = write_audit(
+                app,
+                host,
+                tool_name,
+                command,
+                approval_label,
+                exec_status(&out),
+                Some(&output),
+                Some(duration_ms),
+            );
+            Ok(output)
+        }
+        Err(err) => {
+            let error: String = err;
+            let duration_ms = started.elapsed().as_millis() as u64;
+            let _ = write_audit(
+                app,
+                host,
+                tool_name,
+                command,
+                approval_label,
+                "error",
+                Some(error.as_str()),
+                Some(duration_ms),
+            );
+            Err(error)
+        }
+    }
 }
 
 fn check_mcp_rule_match(app: &AppHandle, command: &str) -> bool {
@@ -825,19 +887,25 @@ async fn request_approval(
             "timeout_secs": 600
         }),
     );
-    match tokio::time::timeout(Duration::from_secs(600), rx).await {
+    let result = match tokio::time::timeout(Duration::from_secs(600), rx).await {
         Ok(Ok(allow)) => Ok(allow),
         Ok(Err(_)) => Err("审批通道已关闭".to_string()),
         Err(_) => Err("等待用户审批超时（10 分钟）".to_string()),
-    }
+    };
+    registry.remove(&request_id);
+    result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_audit(
     app: &AppHandle,
     host: &Host,
     tool_name: &str,
     summary: &str,
     approval: &str,
+    status: &str,
+    result: Option<&str>,
+    duration_ms: Option<u64>,
 ) -> Result<(), String> {
     let db = app.try_state::<Arc<Db>>().ok_or_else(|| "数据库不可用".to_string())?;
     let log = crate::models::AuditLog {
@@ -851,9 +919,9 @@ fn write_audit(
         summary: sanitize(summary).chars().take(500).collect(),
         permission_mode: "mcp".to_string(),
         approval: approval.to_string(),
-        status: "ok".to_string(),
-        result: None,
-        duration_ms: None,
+        status: status.to_string(),
+        result: result.map(|r| truncate(&sanitize(r), 300)),
+        duration_ms,
     };
     db.insert_audit_log(&log)
         .map_err(|e| format!("写入操作日志失败: {e}"))
@@ -865,4 +933,57 @@ fn resolve_host<'a>(hosts: &'a [Host], key: Option<&str>) -> Result<&'a Host, St
         .iter()
         .find(|h| h.id == key || h.name == key || h.address == key)
         .ok_or_else(|| format!("未找到主机 {key}，请先调用 list_hosts 查看可用主机"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exec_result(text: &str, exit_code: Option<u32>, timed_out: bool) -> ExecResult {
+        ExecResult {
+            text: text.to_string(),
+            exit_code,
+            timed_out,
+        }
+    }
+
+    #[test]
+    fn exec_status_marks_clean_runs_executed() {
+        assert_eq!(exec_status(&exec_result("ok", Some(0), false)), "executed");
+        assert_eq!(exec_status(&exec_result("ok", None, false)), "executed");
+    }
+
+    #[test]
+    fn exec_status_marks_nonzero_and_timeout_error() {
+        assert_eq!(exec_status(&exec_result("x", Some(1), false)), "error");
+        assert_eq!(exec_status(&exec_result("x", Some(0), true)), "error");
+        assert_eq!(exec_status(&exec_result("x", None, true)), "error");
+    }
+
+    #[test]
+    fn approval_registry_remove_is_idempotent() {
+        let registry = ApprovalRegistry::default();
+        let _rx = registry.register("r1".to_string());
+        assert_eq!(registry.pending_len(), 1);
+        registry.remove("r1");
+        assert_eq!(registry.pending_len(), 0);
+        registry.remove("r1");
+        assert_eq!(registry.pending_len(), 0);
+    }
+
+    #[test]
+    fn approval_registry_cleans_pending_after_timeout() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let registry = ApprovalRegistry::default();
+            let rx = registry.register("r2".to_string());
+            let result = tokio::time::timeout(Duration::from_millis(10), rx).await;
+            assert!(result.is_err());
+            registry.remove("r2");
+            assert_eq!(registry.pending_len(), 0);
+        });
+    }
 }

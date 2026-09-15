@@ -199,10 +199,10 @@ pub async fn retry_remediation(
         .get_remediation(&remediation_id)
         .map_err(|e| format!("读取整改记录失败: {e}"))?
         .ok_or_else(|| "整改记录不存在".to_string())?;
-    if !matches!(
-        remediation.status.as_str(),
-        "failed" | "cancelled" | "success"
-    ) {
+    if remediation.status == "success" {
+        return Err("整改已成功，无需重试".to_string());
+    }
+    if !matches!(remediation.status.as_str(), "failed" | "cancelled") {
         return Err("当前整改记录不可重新执行".to_string());
     }
     let host = db
@@ -210,10 +210,7 @@ pub async fn retry_remediation(
         .map_err(|e| format!("读取主机失败: {e}"))?
         .ok_or_else(|| "整改记录对应的主机不存在".to_string())?;
 
-    for step in &mut remediation.steps {
-        step.status = "pending".to_string();
-        step.output = None;
-    }
+    prepare_steps_for_retry(&mut remediation.steps);
     remediation.status = "executing".to_string();
     remediation.error = None;
     remediation.started_at = Some(now());
@@ -468,7 +465,7 @@ async fn run_execution(
     let russh = app.state::<RusshManager>();
     let total = remediation.steps.len();
 
-    for index in 0..remediation.steps.len() {
+    for index in pending_step_indexes(&remediation.steps) {
         if cancelled(&flag) {
             remediation.status = "cancelled".to_string();
             remediation.error = Some("用户取消".to_string());
@@ -778,6 +775,24 @@ fn cancelled(flag: &Arc<AtomicBool>) -> bool {
     flag.load(Ordering::SeqCst)
 }
 
+fn prepare_steps_for_retry(steps: &mut [RemediationStep]) {
+    for step in steps {
+        if step.status != "success" {
+            step.status = "pending".to_string();
+            step.output = None;
+        }
+    }
+}
+
+fn pending_step_indexes(steps: &[RemediationStep]) -> Vec<usize> {
+    steps
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.status != "success")
+        .map(|(i, _)| i)
+        .collect()
+}
+
 fn remediation_system_prompt(host: &Host) -> String {
     format!(
         "你是 buffTerm 的服务器整改执行专家。\n\
@@ -892,5 +907,44 @@ mod tests {
         assert!(steps[0].dangerous);
         assert_eq!(steps[1].timeout_secs, 5);
         assert!(!steps[1].dangerous);
+    }
+
+    fn step_with(status: &str, output: Option<&str>) -> RemediationStep {
+        RemediationStep {
+            id: uuid::Uuid::new_v4().to_string(),
+            description: "步骤".to_string(),
+            command: "true".to_string(),
+            timeout_secs: 60,
+            dangerous: false,
+            status: status.to_string(),
+            output: output.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn retry_prepare_keeps_success_and_resets_others() {
+        let mut steps = vec![
+            step_with("success", Some("已完成输出")),
+            step_with("error", Some("失败输出")),
+            step_with("running", Some("半截输出")),
+            step_with("pending", None),
+        ];
+        prepare_steps_for_retry(&mut steps);
+        assert_eq!(steps[0].status, "success");
+        assert_eq!(steps[0].output.as_deref(), Some("已完成输出"));
+        for step in &steps[1..] {
+            assert_eq!(step.status, "pending");
+            assert_eq!(step.output, None);
+        }
+    }
+
+    #[test]
+    fn pending_indexes_skip_success_steps() {
+        let steps = vec![
+            step_with("success", Some("done")),
+            step_with("pending", None),
+            step_with("error", Some("boom")),
+        ];
+        assert_eq!(pending_step_indexes(&steps), vec![1, 2]);
     }
 }
