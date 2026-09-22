@@ -64,7 +64,6 @@ import {
   PanelLeftOpenIcon,
   ShieldIcon,
   SunIcon,
-  TerminalIcon,
   TrashIcon,
   MoonIcon,
   WrenchIcon,
@@ -1112,8 +1111,8 @@ function App() {
           </div>
         ) : (
           <div className="welcome" onMouseDown={startWindowDrag}>
-            <div className="welcome-ring">
-              <TerminalIcon size={40} />
+            <div className="welcome-logo brand-mark">
+              <img className="brand-logo" src={logoUrl} alt="buffTerm" />
             </div>
             <h2>选择左侧主机开始连接</h2>
             <p>

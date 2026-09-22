@@ -745,19 +745,15 @@ button {
   color: var(--muted);
 }
 
-.welcome-ring {
+.welcome-logo {
   width: 84px;
   height: 84px;
   border-radius: 26px;
-  display: grid;
-  place-items: center;
-  color: var(--accent-2);
-  background: rgba(56, 200, 232, 0.06);
-  border: 1px solid rgba(56, 200, 232, 0.2);
-  box-shadow:
-    0 0 0 12px rgba(56, 200, 232, 0.025),
-    0 24px 60px rgba(0, 0, 0, 0.4);
   margin-bottom: 10px;
+}
+
+.welcome-logo .brand-logo {
+  border-radius: 20px;
 }
 
 .welcome h2 {
