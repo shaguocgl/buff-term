@@ -348,6 +348,17 @@ export interface RemediationDonePayload {
   status: RemediationStatus;
 }
 
+export interface SftpEntry {
+  name: string;
+  is_dir: boolean;
+  is_symlink: boolean;
+  size: number;
+  mtime: number;
+  perms: string;
+  user: string;
+  group: string;
+}
+
 export interface RemediationErrorPayload {
   remediation_id: string;
   message: string;

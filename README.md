@@ -30,6 +30,14 @@ buffTerm 是一款有 AI Agent Buff 加持的 SSH 管理工具，——内置**�
 
 ## ✨ 功能特性
 
+### SSH 与 SFTP
+
+- **协议级 SSH**：交互终端、AI、MCP、监控、巡检与 SFTP 全部基于 `russh` / `russh-sftp`，不调用系统 `ssh` / `sftp` 命令
+- **多种认证方式**：支持密码、keyboard-interactive 回退、普通/加密私钥、Unix ssh-agent；RSA 自动协商 SHA-2 签名
+- **严格主机指纹校验**：首次连接展示 SHA-256 指纹并等待确认，已记录指纹变化时直接拒绝并显示新旧指纹
+- **并发连接复用**：AI、MCP、监控、巡检和 SFTP 按主机复用 SSH 连接，通道级并发，空闲连接自动回收
+- **结构化 SFTP**：目录浏览、上传、下载、重命名、删除、建目录、覆盖确认、进度与取消；支持符号链接和含空格文件名
+
 ### 终端防护
 
 - **回车前拦截高危命令**：基于终端实际命令行判定（覆盖 Tab 补全 / 方向键历史 / 编辑键），命中规则弹窗确认后才执行
@@ -39,9 +47,10 @@ buffTerm 是一款有 AI Agent Buff 加持的 SSH 管理工具，——内置**�
 ### AI Agent
 
 - **自研 Agent 编排层**：SSE 流式解析、工具调用循环、审批与审计均为手写实现，无框架依赖
-- **russh 协议级执行**：AI 工具调用走独立 SSH 连接（连接复用、known_hosts 校验）
+- **russh 协议级执行**：AI 工具调用走统一 SSH 连接池（连接复用、通道并发、known_hosts 校验）
 - 多平台配置：DeepSeek / OpenAI / 通义千问 / Kimi / Ollama，单厂商可配多模型
-- 工具调用：`exec_command`、`read_file`、`list_dir`、`resource_usage`、`query_history`（历史指标趋势，支持分钟 / 小时 / 天三档聚合粒度，AI 按分析目的自选）
+- 工具调用：`exec_command`、`read_file`、`list_dir`、`resource_usage`、`query_history`（历史指标趋势，支持分钟 / 小时 / 天三档聚合粒度，AI 按分析目的自选）、`update_task_plan`（本地任务台账，免审批）
+- 发送上下文按模型窗口做预算：旧轮次自动压缩摘要，任务台账始终保留
 - 每台主机独立会话历史，可随时中断 / 清空
 
 ### MCP 服务
@@ -53,6 +62,7 @@ buffTerm 是一款有 AI Agent Buff 加持的 SSH 管理工具，——内置**�
 ### 安全体系
 
 - 三级安全级别：全部审核 / 智能审核（只读自动执行，危险命令需批准）/ 全部放行
+- 凭据加密：SSH 密码 / 私钥口令、AI API Key、MCP token、SMTP 密码统一 AES-256-GCM 加密存本机，主密钥存系统钥匙串；私钥口令仅用于本地解密私钥
 - 审计日志：记录每次 AI 工具调用的时间、主机、命令、审批方式、结果摘要
 - 输出脱敏：命令输出进入模型前过滤 AK/SK、密钥、口令等敏感信息；私钥与 API Key 永不进入模型上下文
 
@@ -78,14 +88,16 @@ buffTerm 是一款有 AI Agent Buff 加持的 SSH 管理工具，——内置**�
 
 ```mermaid
 flowchart LR
-  UI["React + xterm.js<br/>终端 + 聊天面板"] -->|Commands / Events| BE["Rust 后端 (Tauri)"]
+  UI["React + xterm.js<br/>终端 + 聊天面板"] -->|Commands / Channel / Events| BE["Rust 后端 (Tauri)"]
   BE --> SM["Session Manager"]
   BE --> AG["AI Agent Runtime"]
   BE --> MCP["对外 MCP 服务<br/>Streamable HTTP + token"]
   MCP --> MCPTOOL["工具层<br/>list_hosts / exec / 读文件 / 列目录 / 资源查询"]
-  SM --> SSH["交互会话<br/>russh shell channel"]
+  SM --> SSH["交互会话<br/>russh shell channel + 二进制 Channel 输出"]
   AG --> TOOL["工具层<br/>exec / 读文件 / 列目录 / 资源查询 / 历史趋势"]
-  TOOL --> RSH["russh 连接池<br/>协议级执行 / 连接复用"]
+  TOOL --> RSH["russh 连接池<br/>协议级执行 / 连接复用 / 通道并发"]
+  BE --> SFTP["SFTP<br/>结构化目录 + 分块传输"]
+  SFTP --> RSH
   BE --> INSP["AI 巡检<br/>只读命令 + 报告归档"]
   INSP --> RSH
   INSP --> PROV
@@ -111,6 +123,15 @@ flowchart LR
 ```bash
 npm install
 npm run tauri dev
+```
+
+### 验证
+
+```bash
+npm run build
+cd src-tauri
+cargo check
+cargo test
 ```
 
 ### 打包
@@ -140,7 +161,7 @@ src-tauri/target/release/bundle/nsis/
 
 ## 📚 文档
 
-- [密码存储加密设计](docs/密码存储加密设计.md)：凭据 AES-256-GCM 加密与主密钥管理
+- [凭据存储加密设计](docs/密码存储加密设计.md)：凭据 AES-256-GCM 加密与主密钥管理
 - [自研 AI Agent 与权限设计](docs/自研AI-Agent与权限设计.md)：Agent 运行时、审批与安全级别、AI 配置
 - [对外 MCP 服务设计](docs/对外MCP服务设计.md)：Streamable HTTP 服务、权限模式与接入
 - [AI 巡检整改功能设计](docs/AI巡检整改功能设计.md)：巡检、一键整改与通知（邮件）
@@ -154,23 +175,23 @@ src/                   前端（React + xterm.js）
   assets/              buffTerm 界面与文档 logo
 src-tauri/src/         Rust 后端
   agent.rs             AI Agent 运行时（流式解析、工具循环、审批、审计）
-  agent/tools.rs       Agent 工具定义与执行（系统提示词、工具 schema、exec/read_file/list_dir/resource_usage/query_history）
+  agent/tools.rs       Agent 工具定义与执行（系统提示词、工具 schema、exec/read_file/list_dir/resource_usage/query_history/update_task_plan）
   agent/trend.rs       历史指标趋势分析（线性回归、分钟/小时/天粒度聚合、趋势文本格式化）
   safety.rs            安全判定与脱敏（危险命令 / 只读检测 / 输出脱敏）
   guard.rs             终端危险命令拦截（行缓冲状态机 + 规则判定 + 审批）
   util.rs              通用工具函数（时间戳 / 截断 / shell 转义 / token）
-  session.rs           SSH 交互会话（russh shell channel）
-  russh.rs             russh 连接池（AI / MCP 工具执行，连接复用）
+  session.rs           SSH 交互会话（二进制 Channel 输出、退出/断线状态）
+  russh.rs             统一连接池（认证、known_hosts、并发通道、exec）
   hosts.rs             主机配置
   ai.rs                AI 平台 / 模型 / 审核规则配置
-  credentials.rs       凭据加密（AES-256-GCM）+ 主密钥管理 + 内存缓存
+  credentials.rs       凭据加密（AES-256-GCM）：主机密码 / 私钥口令 / API Key / MCP token / SMTP 密码
   audit.rs             审计日志查询
   monitor.rs           资源快照采集（CPU / 内存 / 磁盘 / 负载 / TOP 进程），写入历史指标表供 query_history 分析
   alert.rs             通知配置（邮件 SMTP 配置与测试）
   inspection.rs        AI 只读巡检（含木马 / 挖矿风险采集）、报告生成与邮件投递
   remediation.rs       一键整改（整改步骤生成、执行、重试、审计与邮件通知）
   mcp.rs               对外 MCP 服务（HTTP + token + 权限模式）
-  sftp.rs              SFTP 文件操作（russh-sftp）
+  sftp.rs              SFTP 文件操作：结构化目录与分块传输（russh-sftp）
   update.rs            GitHub Release 版本检查
   db.rs                SQLite（主机、AI 配置、规则、审计、巡检与整改、历史指标）
 src-tauri/icons/       桌面应用图标（PNG / ICNS / ICO）

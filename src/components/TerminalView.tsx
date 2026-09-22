@@ -6,6 +6,7 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { Channel } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -14,12 +15,12 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import {
   closeSession,
-  onSessionStatus,
-  onTerminalData,
+  decodeTerminalFrame,
   openSession,
   resizeSession,
   sessionInput,
 } from '../api';
+import type { TerminalStatusFrame } from '../api';
 import type { Host } from '../types';
 import { fmtError } from '../utils/errors';
 import {
@@ -308,6 +309,38 @@ export default function TerminalView({
     [],
   );
 
+  // 会话状态帧处理：closed = 手动断开；exited 区分 shell 正常退出
+  // （reason=exit，不自动重连）与底层连接断开（reason=disconnected，
+  // 可按用户开关自动重连）。首个状态帧到达后清空 requestId，后续帧忽略。
+  const handleStatus = useCallback(
+    (s: TerminalStatusFrame) => {
+      const term = termRef.current;
+      activeConnectionRequestRef.current = null;
+      sessionIdRef.current = null;
+      setConnecting(false);
+      if (s.status === 'closed') {
+        // 手动断开：不自动重连（标签页即将关闭）
+        term?.writeln(`\r\n\x1b[33m[会话已结束: closed]\x1b[0m`);
+        if (term) term.options.disableStdin = true;
+        setExited(true);
+      } else if (s.reason === 'disconnected') {
+        term?.writeln(`\r\n\x1b[31m[连接已断开]\x1b[0m`);
+        if (term) term.options.disableStdin = true;
+        setExited(true);
+        onExitedRef.current(tabKey);
+        if (autoReconnectRef.current) scheduleReconnectRef.current();
+      } else {
+        term?.writeln(
+          `\r\n\x1b[33m[会话已结束：shell 已退出${s.exit_code != null ? `，退出码 ${s.exit_code}` : ''}]\x1b[0m`,
+        );
+        if (term) term.options.disableStdin = true;
+        setExited(true);
+        onExitedRef.current(tabKey);
+      }
+    },
+    [tabKey],
+  );
+
   const connect = useCallback(async (): Promise<boolean> => {
     const term = termRef.current;
     const fit = fitRef.current;
@@ -316,7 +349,18 @@ export default function TerminalView({
     const requestId = `${tabKey}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     activeConnectionRequestRef.current = requestId;
     sessionIdRef.current = null;
-    const id = await openSession(host.id, cols, rows, requestId);
+    const ch = new Channel<ArrayBuffer>();
+    // onmessage 必须先于 invoke 设置，避免早期帧丢失
+    ch.onmessage = (buf) => {
+      if (activeConnectionRequestRef.current !== requestId) return;
+      const frame = decodeTerminalFrame(buf);
+      if (frame.kind === 'data') {
+        term.write(frame.data);
+      } else {
+        handleStatus(frame.status);
+      }
+    };
+    const id = await openSession(host.id, cols, rows, ch);
     if (disposedRef.current || activeConnectionRequestRef.current !== requestId) {
       closeSession(id).catch(() => {});
       return false;
@@ -334,7 +378,7 @@ export default function TerminalView({
     }
     applyDims();
     return true;
-  }, [host, tabKey, applyDims, sendInput]);
+  }, [host, tabKey, applyDims, sendInput, handleStatus]);
 
   const connectRef = useRef(connect);
   connectRef.current = connect;
@@ -349,8 +393,8 @@ export default function TerminalView({
 
   // 自动重连：会话结束后按指数退避重试（1s→2s→…→上限 30s，最多 5 次）。
   // 不 reset 终端以保留 scrollback；重连成功后重置计数。
-  // 注意：后端读循环无法区分网络断开与 shell 正常退出（都发 exited），
-  // 因此该行为由用户显式开启（默认关），退出命令同样会触发重连。
+  // 后端区分断开原因：只有「连接已断开（disconnected）」才触发重连，
+  // shell 正常退出不会重连；该行为仍由用户显式开启（默认关）。
   const scheduleReconnect = useCallback(() => {
     if (reconnectScheduledRef.current) return;
     const attempt = reconnectAttemptsRef.current;
@@ -405,8 +449,6 @@ export default function TerminalView({
     if (!container) return;
     let disposed = false;
     disposedRef.current = false;
-    let unData: (() => void) | undefined;
-    let unStatus: (() => void) | undefined;
 
     const term = new Terminal({
       cursorBlink: true,
@@ -534,36 +576,7 @@ export default function TerminalView({
     observer.observe(container);
 
     (async () => {
-      unData = await onTerminalData((_id, reqId, data) => {
-        if (reqId === activeConnectionRequestRef.current) term.write(data);
-      });
-      if (disposed) {
-        unData();
-        return;
-      }
-      unStatus = await onSessionStatus((_id, reqId, status) => {
-        if (reqId !== activeConnectionRequestRef.current) return;
-        activeConnectionRequestRef.current = null;
-        sessionIdRef.current = null;
-        setConnecting(false);
-        if (status === 'exited') {
-          term.writeln(`\r\n\x1b[33m[会话已结束: exited]\x1b[0m`);
-          term.options.disableStdin = true;
-          setExited(true);
-          onExitedRef.current(tabKey);
-          if (autoReconnectRef.current) scheduleReconnectRef.current();
-        } else if (status === 'closed') {
-          // 手动断开：不自动重连（标签页即将关闭）
-          term.writeln(`\r\n\x1b[33m[会话已结束: closed]\x1b[0m`);
-          term.options.disableStdin = true;
-          setExited(true);
-        }
-      });
-      if (disposed) {
-        unData();
-        unStatus();
-        return;
-      }
+      if (disposed) return;
       await connectRef.current();
     })().catch((e) => {
       if (disposed) return;
@@ -587,8 +600,6 @@ export default function TerminalView({
       container.removeEventListener('compositionstart', handleCompositionStart);
       container.removeEventListener('compositionend', handleCompositionEnd);
       container.removeEventListener('paste', handlePaste, true);
-      unData?.();
-      unStatus?.();
       activeConnectionRequestRef.current = null;
       const sid = sessionIdRef.current;
       if (sid !== null) {

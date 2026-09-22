@@ -22,7 +22,8 @@
 - **审批是硬拦截，不是软约束**：工具执行前用 `mpsc` 通道同步等待用户决定，模型无法绕过；拒绝后把“用户拒绝执行”作为工具结果回填，让模型调整方案；
 - **可观测**：每个工具调用都落审计日志（命令、审批方式、结果、耗时）；
 - **模型无关 + 配置驱动**：模型名每次请求都从激活配置读取，会话内切换立刻生效；
-- **容错**：单会话 12 轮上限、审批 10 分钟超时、流尾残留数据处理、非 2xx 响应提取 `error.message`；
+- **容错**：按模式限定轮次上限（Smart / All 12 轮、None 30 轮）、审批 10 分钟超时、流尾残留数据处理、非 2xx 响应提取 `error.message`；
+- **上下文预算**：canonical history 在内存中不原地裁剪，每次请求前按激活模型的 `context_window` 构建发送视图，任务台账优先保留；
 - **工具名契约**：系统提示词明确工具名白名单；解析层对模型漏填名称做参数推断（`command` → `exec_command`、`path` → `read_file`），并对常见别名归一化（`ls/listdir/list_directory` → `list_dir` 等），降低模型幻觉导致的调用失败。
 
 ```mermaid
@@ -42,7 +43,7 @@ flowchart TD
   AUDIT --> FB2[结果回填历史]
   FB1 --> NEXT[下一轮]
   FB2 --> NEXT
-  NEXT --> ITER{轮次 <= 12?}
+  NEXT --> ITER{未超过当前模式上限?}
   ITER -->|是| REQ
   ITER -->|否| ERR[报错停止]
 ```
@@ -52,9 +53,13 @@ flowchart TD
 **① 工具循环骨架**（`run_agent_loop`，已精简）
 
 ```rust
+let max_iterations = match permission_mode {
+    None => 30,
+    Smart | All => 12,
+};
 loop {
     iterations += 1;
-    if iterations > 12 { /* 轮次上限，防止失控 */ }
+    if iterations > max_iterations { /* 轮次上限，防止失控 */ }
     if let Ok(Control::Cancel) = rx.try_recv() { return Ok(()); }   // 用户点停止
 
     // 1. 请求：历史 + 工具 schema 发给模型
@@ -164,14 +169,14 @@ format!(
 1. `agent_chat(session_id, message, permission_mode)`：
    - 安全级别为强类型 `PermissionMode`（`all` / `smart` / `none`），由前端传入；
    - 取该会话的主机、启用的 AI 平台、**激活模型**（`ai_models.is_active`，无激活则取第一个）、钥匙串里的 API Key；
-   - 取自定义审核规则；按主机 id 恢复/新建历史（首轮注入系统提示词），历史保留最近 20 轮；
+   - 取自定义审核规则；按主机 id 恢复/新建历史（首轮注入系统提示词）；canonical history 在内存中完整保留，每次请求前按模型窗口生成发送视图；
    - 清空对话时 `agent_reset` 会停止运行中的循环并递增“历史代数”，旧循环结束后不再写回过期历史；
    - 前端通过 `get_history(host_id)` 重新打开聊天面板时恢复该主机的历史消息与工具卡片；
 2. 循环调用 OpenAI 兼容接口（`POST {base_url}/chat/completions`，`stream: true`）：
    - 解析 SSE `data:` 行，累积 `content` 与按 index 归组的 `tool_calls`（id / name / arguments 增量拼接）；
    - 处理流结束时缓冲区残留的未换行数据，避免最后一段内容丢失；
    - 无工具调用 → 写入历史，发 `ai:done`，结束；有工具调用 → 审批 → 执行 → 回填 → 进入下一轮；
-3. 单会话最多 **12 轮**工具调用，超限报错停止。
+3. 单会话工具调用轮次按模式上限（Smart / All **12 轮**、None **30 轮**），超限报错停止。
 
 ```mermaid
 sequenceDiagram
@@ -189,6 +194,16 @@ sequenceDiagram
   AG-->>UI: ai:tool state=result + ai:stream
 ```
 
+### 4.3.1 上下文预算、压缩与用量
+
+- **发送视图**：每次请求前由 `build_context_view` 按激活模型的 `context_window` 预算组装 messages；canonical history 在内存中完整保留，不做原地裁剪；
+- **整轮边界**：以「assistant（含 tool_calls）+ 全部 tool 结果」为一轮整体裁剪，tool_call / tool 结果对不会被拆散；
+- **保留优先级**：system + 任务台账 > 任务锚点（用户原始诉求）> 最近窗口 > 旧轮次确定性摘要（规则抽取，不依赖模型总结）；
+- **overflow 兜底**：平台返回 context overflow 错误时按 50% 窗口重建视图重试一次；
+- **用量统计**：优先使用平台返回的 `prompt_tokens` 实测值；平台不返回时本地估算，并按模型 EMA 校准，切换模型立即按完整历史重新估算。
+
+`update_task_plan` 写入的任务台账每轮注入发送视图且优先级最高，不会因历史压缩丢失，多步任务在长会话中仍能保持方向。
+
 ### 4.4 审批与安全级别
 
 | 级别 | 行为 |
@@ -197,11 +212,12 @@ sequenceDiagram
 | `none`（全部放行） | 直接执行，不弹审批 |
 | `smart`（智能审核） | 只读工具自动执行；`exec_command` 满足任一条件则需审批 |
 
-智能审核判定（三者 OR）：
+智能审核判定（四者 OR）：
 
 1. 模型在工具参数里标记 `requires_approval: true`；
 2. 命令命中内置危险模式（`rm -rf`、`mkfs`、`iptables`、`systemctl stop/restart/disable/mask`、`shutdown`、`reboot`、`chmod -R`、`dd if=`、`drop database` 等）；
-3. 命令包含任意自定义规则（**不区分大小写的子串匹配**，无需通配符）。
+3. 命令包含任意自定义规则（**不区分大小写的子串匹配**，无需通配符）；
+4. `is_write_operation` 判定为写操作（修改 / 删除 / 安装 / 下载 / 重定向写入等）。
 
 ```mermaid
 flowchart TD
@@ -216,7 +232,9 @@ flowchart TD
   C2 -->|是| APP1
   C2 -->|否| C3{命中自定义规则?}
   C3 -->|是| APP1
-  C3 -->|否| EXEC1
+  C3 -->|否| C4{is_write_operation?}
+  C4 -->|是| APP1
+  C4 -->|否| EXEC1
 ```
 
 ### 4.5 工具集
@@ -228,8 +246,9 @@ flowchart TD
 | `list_dir` | path | `ls -lah` 列目录 |
 | `resource_usage` | — | df / free / uptime / TOP 进程汇总 |
 | `query_history` | metric, window_hours, granularity | 查询历史指标趋势（斜率、外推预测），见 4.5.1 |
+| `update_task_plan` | goal, constraints, completed, pending, failed, current_step | 本地任务台账（目标 / 约束 / 进度 / 失败尝试），不访问服务器、免审批 |
 
-命令经单引号安全转义（`'` → `'\''`）后交给 russh 执行；输出统一脱敏（AK/SK、密钥、口令、私钥块）后截断（最长 8000 字符，超出部分丢弃并附"输出过长，已截断"提示）再回填模型历史，避免单次大输出（如误 `cat` 超大文件）长期占用对话上下文 token。
+`exec_command` 的 `command` 原样作为远端 shell 命令执行；`read_file` / `list_dir` 的 `path` 经单引号安全转义（`'` → `'\''`）后拼入远端命令。exec 底层区分 stdout / stderr，输出统一脱敏（AK/SK、密钥、口令、私钥块）后截断（最长 8000 字符，超出部分丢弃并附"输出过长，已截断"提示）再回填模型历史，避免单次大输出（如误 `cat` 超大文件）长期占用对话上下文 token。
 
 ### 4.5.1 历史指标趋势工具（query_history）
 
@@ -261,7 +280,7 @@ flowchart TD
 ## 6. AI 配置（ai.rs）
 
 - 平台 CRUD：name / base_url / protocol（默认 `openai-compatible`）/ enabled / API Key；
-- **多模型**：每个平台持有 `ai_models` 列表，保存时全量替换；`set_active_ai_model` 把目标模型置为唯一激活项（先全部置 0 再置 1）；
+- **多模型**：每个平台持有 `ai_models` 列表，保存时全量替换；`set_active_ai_model` 把目标模型置为唯一激活项（先全部置 0 再置 1）；每个模型可配置 `context_window`（默认 128k），作为发送视图的 token 预算与用量条分母，不按模型名猜测窗口；
 - **测试连接**：非流式请求 `{base_url}/chat/completions`（`max_tokens: 1`），返回成功或带错误详情的提示（401 / 429 等）；
 - 预置平台：DeepSeek、OpenAI、通义千问、Kimi、Ollama，各带两个默认模型，用户可自由增删改。
 

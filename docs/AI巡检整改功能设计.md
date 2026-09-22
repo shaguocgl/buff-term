@@ -133,7 +133,7 @@ sequenceDiagram
 
 ## 5. 通知（邮件）
 
-- 仅支持**邮件（SMTP）渠道**：SMTP 服务器 / 端口 / 加密（STARTTLS / SSL / 无）/ 用户名 / 密码 / 发件人 / 收件人，配置存 `settings` 表 `alert_settings` JSON 键；
+- 仅支持**邮件（SMTP）渠道**：SMTP 服务器 / 端口 / 加密（STARTTLS / SSL / 无）/ 用户名 / 发件人 / 收件人等非密码字段存 `settings` 表 `alert_settings` JSON 键；SMTP 密码单独以 AES-256-GCM 加密存 `credentials`（`owner_id=alert:smtp`、`kind=password`），读取时解密回填，旧版本 JSON 中的明文密码在启动时自动迁移；
 - `test_alert_settings` 用传入设置直接发测试邮件，未保存也可测试；
 - 发送基于 `lettre`：`SmtpTransport::builder_dangerous` + `Credentials`，按 `smtp_tls` 选择 Wrapper（SSL）/ Required（STARTTLS）/ 明文；
 - 巡检报告与整改结果自动投递；**邮件发送失败不影响巡检 / 整改任务本身**。

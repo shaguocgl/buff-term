@@ -15,13 +15,13 @@ flowchart LR
   TOOLS --> MODE[权限模式<br/>readonly / confirm / allow]
   MODE --> APPROVAL{需要审批?}
   APPROVAL -->|confirm 命中规则| APP["mcp:approval-request → 前端弹窗<br/>mcp_approve 回传"]
-  APPROVAL -->|放行| RSH["russh 连接池<br/>协议级执行"]
+  APPROVAL -->|放行| RSH["russh 连接池<br/>协议级执行 / 通道并发"]
   RSH --> OUT[sanitize 脱敏 + 截断]
   OUT --> EXT
 ```
 
 - 服务**按需启动**：用户勾选主机并点「启动服务」才监听 `127.0.0.1`（默认端口 48123，被占用则随机），应用启动且配置 `enabled` 时自动恢复监听；
-- 启动时生成随机 token（64 位 hex），支持吊销重生成（`rotate_mcp_token`）；关闭通过 oneshot 通知监听线程退出。
+- 首次启用时生成随机 token（64 位 hex），AES-256-GCM 加密存 `credentials` 表，不再落 `mcp_service` 明文；支持吊销重生成（`rotate_mcp_token`），旧版本明文 token 在应用启动时自动迁移；关闭通过 oneshot 通知监听线程退出。
 
 ## 2. 鉴权
 
@@ -31,18 +31,21 @@ fn check_auth(app: &AppHandle, request: &Request) -> bool {
         Some(db) => db,
         None => return false,
     };
-    let token = db.get_mcp_service().ok().and_then(|c| c.token).unwrap_or_default();
+    // 优先历史 mcp_service 明文字段（迁移兼容），否则读 credentials 中的加密 token
+    let token = db.get_mcp_service().ok().and_then(|c| c.token)
+        .filter(|t| !t.is_empty())
+        .or_else(crate::credentials::get_mcp_token)
+        .unwrap_or_default();
     if token.is_empty() { return false; }
-    if let Some(h) = request.headers().iter().find(|h| h.field.equiv("Authorization")) {
-        let v = h.value.as_str();
-        if v == token { return true; }                       // 裸 token
-        if let Some(b) = v.strip_prefix("Bearer ") { if b == token { return true; } }
-        if let Some(b) = v.strip_prefix("bearer ") { if b == token { return true; } }
-    }
-    // 也支持 ?access_token= 查询参数
-    false
+    // Authorization 支持裸 token、Bearer / bearer；比较使用 token_eq 常量时间比较。
+    // 查询参数 ?access_token=... 会先 percent-decode，再用 token_eq 校验。
+    /* ... */
 }
 ```
+
+- 生成新 token / 轮换时立即写入 `credentials` 并刷新内存缓存，鉴权立即生效；
+- 旧版 `mcp_service.token` 明文字段仅作迁移兼容，启动迁移成功后即清空；
+- CORS 仅回显 localhost / 127.0.0.1 / tauri 协议的 origin，普通本地 MCP 客户端不依赖 CORS。
 
 ## 3. 协议与请求分发
 
@@ -88,7 +91,7 @@ flowchart TD
 
 - `host` 支持 id / name / address 三种匹配，未勾选的主机直接拒绝（“未授权给 MCP 服务”）；
 - 外部 AI 不依赖“当前已连接主机”，每次调用按需通过 russh 连接池执行；
-- 输出复用 `safety::sanitize` 脱敏 + `util::format_exec_output` 截断，外部调用同样写审计日志（`permission_mode = mcp`）。
+- 输出区分 stdout / stderr（stderr 非空时分段展示），复用 `safety::sanitize` 脱敏 + `util::format_exec_output` 截断；复用连接断开时只读命令自动重连重试一次，写命令不自动重试；外部调用同样写审计日志（`permission_mode = mcp`）。
 
 ## 5. 权限模式
 

@@ -47,6 +47,7 @@ pub fn run() {
             let db = std::sync::Arc::new(db);
             crate::db::init_global(db.clone());
             crate::russh::init_app_handle(app.handle());
+            crate::russh::spawn_idle_reaper(app.handle().clone());
             // 迁移旧版本的明文敏感凭据（MCP token / SMTP 密码）到加密存储
             crate::credentials::migrate_plaintext_secrets();
             // 清理 90 天前的历史指标数据，控制 SQLite 体积
@@ -153,6 +154,7 @@ pub fn run() {
             hosts::delete_host,
             hosts::import_ssh_config,
             hosts::save_host_credentials,
+            hosts::save_host_key_passphrase,
             hosts::test_host_connection,
             session::open_session,
             session::close_session,

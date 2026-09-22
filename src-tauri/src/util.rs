@@ -52,9 +52,17 @@ pub fn extract_error(text: &str, status: reqwest::StatusCode) -> String {
     format!("AI 平台返回 HTTP {}: {}", status.as_u16(), detail)
 }
 
-/// 统一格式化命令输出：trim + 超长截断（头 8000 + 尾 4000）+ 超时/退出码标记。
+/// 统一格式化命令输出：stderr 为空时用按到达顺序合并的 text（现有行为）；
+/// stderr 有内容时分开标注 stdout / stderr 两段。之后统一 trim +
+/// 超长截断（头 8000 + 尾 4000）+ 超时/退出码标记。
 pub fn format_exec_output(out: &ExecResult) -> String {
-    let mut text = out.text.trim().to_string();
+    let mut text = if out.stderr.trim().is_empty() {
+        out.text.trim().to_string()
+    } else if out.stdout.trim().is_empty() {
+        format!("[stderr]\n{}", out.stderr.trim())
+    } else {
+        format!("{}\n[stderr]\n{}", out.stdout.trim(), out.stderr.trim())
+    };
     const MAX: usize = 12000;
     if text.chars().count() > MAX {
         let head: String = text.chars().take(8000).collect();

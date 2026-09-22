@@ -1,7 +1,6 @@
 use crate::db::Db;
 use crate::models::Host;
-use crate::russh::{connect, RusshManager};
-use chrono::{DateTime, Utc};
+use crate::russh::RusshManager;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{FileAttributes, FileType};
 use serde::Serialize;
@@ -18,6 +17,23 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub struct SftpResult {
     pub ok: bool,
     pub text: String,
+}
+
+/// SFTP 目录条目（结构化列表，替代 ls -l 文本解析：
+/// 支持符号链接 / 含空格文件名，字段不再需要前端反解析）。
+#[derive(Serialize)]
+pub struct SftpEntry {
+    pub name: String,
+    /// 符号链接时按解析后的目标判断
+    pub is_dir: bool,
+    pub is_symlink: bool,
+    pub size: u64,
+    /// unix 秒
+    pub mtime: u64,
+    /// 如 "drwxr-xr-x"（file_type_char + permission_string）
+    pub perms: String,
+    pub user: String,
+    pub group: String,
 }
 
 fn success(text: impl Into<String>) -> SftpResult {
@@ -179,6 +195,7 @@ where
 /// 通过 RusshManager 连接池执行 SFTP 操作：复用已有 SSH 连接，避免每次操作都重新
 /// TCP 握手 + 认证。通道打开 / SFTP 初始化失败时清理旧连接并重连重试一次
 /// （与 exec 的重连策略一致）；SFTP 操作本身的错误（文件不存在等）不重试。
+/// 租约持有期间 slot 锁不占用，同一连接上可并发跑其它 exec / channel。
 async fn with_sftp<F, T>(
     russh: &RusshManager,
     host: &Host,
@@ -188,19 +205,13 @@ async fn with_sftp<F, T>(
 where
     F: for<'a> Fn(&'a SftpSession) -> Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>,
 {
-    let slot = russh.slot(host);
-    let mut guard = slot.lock().await;
-
     for attempt in 0..2 {
-        if guard.is_none() {
-            russh.evict_if_needed(&host.id);
-            *guard = Some(connect(host).await?);
-        }
-        let handle = guard.as_mut().unwrap();
+        let lease = russh.acquire(host).await?;
 
         // 阶段一：打开通道 + 启动 SFTP 子系统（连接级操作，失败可重连重试）
         let sftp_setup = async {
-            let channel = handle
+            let channel = lease
+                .handle
                 .channel_open_session()
                 .await
                 .map_err(|e| format!("打开 SFTP 通道失败: {e}"))?;
@@ -217,14 +228,14 @@ where
             Ok(Ok(session)) => session,
             Ok(Err(e)) => {
                 // 通道/子系统初始化失败：连接可能已失效，清理后重连重试
-                *guard = None;
+                russh.invalidate(&host.id, &lease.handle);
                 if attempt == 0 {
                     continue;
                 }
                 return Err(e);
             }
             Err(_) => {
-                *guard = None;
+                russh.invalidate(&host.id, &lease.handle);
                 if attempt == 0 {
                     continue;
                 }
@@ -245,12 +256,62 @@ where
             Ok(r) => r,
             Err(_) => {
                 // 操作超时：SFTP session 可能处于不一致状态，清理连接避免下次复用出问题
-                *guard = None;
+                russh.invalidate(&host.id, &lease.handle);
                 Err("操作超时".to_string())
             }
         };
     }
     unreachable!()
+}
+
+/// 读取目录为结构化条目：跳过 . / ..；符号链接用 stat（follow）解析目标
+/// 决定 is_dir / size，悬空链接按非目录处理（size 保留 lstat 值）。
+/// 排序：目录优先，再按名称不区分大小写。
+async fn list_dir(sftp: &SftpSession, path: &str) -> Result<Vec<SftpEntry>, String> {
+    let dir = sftp
+        .read_dir(path)
+        .await
+        .map_err(|e| format!("读取目录失败: {e}"))?;
+    let mut entries = Vec::new();
+    for entry in dir {
+        let name = entry.file_name();
+        if name == "." || name == ".." {
+            continue;
+        }
+        let meta = entry.metadata();
+        let is_symlink = meta.file_type().is_symlink();
+        let mut is_dir = meta.file_type().is_dir();
+        let mut size = meta.len();
+        if is_symlink {
+            let joined = if path.ends_with('/') {
+                format!("{path}{name}")
+            } else {
+                format!("{path}/{name}")
+            };
+            if let Ok(target) = sftp.metadata(joined.as_str()).await {
+                is_dir = target.file_type().is_dir();
+                size = target.len();
+            } else {
+                is_dir = false;
+            }
+        }
+        entries.push(SftpEntry {
+            name,
+            is_dir,
+            is_symlink,
+            size,
+            mtime: meta.mtime.unwrap_or(0) as u64,
+            perms: format!("{}{}", file_type_char(&meta), permission_string(&meta)),
+            user: attr_value(meta.user.as_deref(), meta.uid),
+            group: attr_value(meta.group.as_deref(), meta.gid),
+        });
+    }
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(entries)
 }
 
 #[tauri::command]
@@ -259,33 +320,13 @@ pub async fn sftp_list(
     russh: State<'_, RusshManager>,
     host_id: String,
     path: String,
-) -> Result<SftpResult, String> {
+) -> Result<Vec<SftpEntry>, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    let text = with_sftp(&russh, &host, Duration::from_secs(20), |sftp| {
+    with_sftp(&russh, &host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
-        Box::pin(async move {
-            let dir = sftp
-                .read_dir(path)
-                .await
-                .map_err(|e| format!("读取目录失败: {e}"))?;
-            let mut lines = Vec::new();
-            for entry in dir {
-                let meta = entry.metadata();
-                let name = entry.file_name();
-                let perms = format!("{}{}", file_type_char(&meta), permission_string(&meta));
-                let user = attr_value(meta.user.as_deref(), meta.uid);
-                let group = attr_value(meta.group.as_deref(), meta.gid);
-                lines.push(format!(
-                    "{perms} 1 {user} {group} {} {} {name}",
-                    meta.len(),
-                    mtime_string(&meta)
-                ));
-            }
-            Ok(lines.join("\n"))
-        })
+        Box::pin(async move { list_dir(&sftp, &path).await })
     })
-    .await?;
-    Ok(success(text))
+    .await
 }
 
 #[tauri::command]
@@ -421,8 +462,9 @@ pub async fn sftp_delete(
     with_sftp(&russh, &host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
         Box::pin(async move {
+            // lstat：符号链接按链接本身删除，不跟随到目标目录
             let meta = sftp
-                .metadata(path.as_str())
+                .symlink_metadata(path.as_str())
                 .await
                 .map_err(|e| format!("读取目标信息失败: {e}"))?;
             if meta.file_type().is_dir() {
@@ -517,9 +559,97 @@ fn attr_value(value: Option<&str>, id: Option<u32>) -> String {
         .unwrap_or_else(|| id.map(|n| n.to_string()).unwrap_or_else(|| "0".to_string()))
 }
 
-fn mtime_string(meta: &FileAttributes) -> String {
-    let secs = meta.mtime.unwrap_or(0) as i64;
-    DateTime::<Utc>::from_timestamp(secs, 0)
-        .map(|dt| dt.format("%b %d %H:%M").to_string())
-        .unwrap_or_else(|| "Jan 01 00:00".to_string())
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::AuthType;
+
+    fn test_host(key_path: String) -> Host {
+        Host {
+            id: "test-host".to_string(),
+            name: "local-sshd".to_string(),
+            address: "127.0.0.1".to_string(),
+            port: std::env::var("BUFFTERM_TEST_SSH_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(2222),
+            username: std::env::var("BUFFTERM_TEST_SSH_USER")
+                .ok()
+                .or_else(|| std::env::var("USER").ok())
+                .unwrap_or_default(),
+            auth_type: AuthType::Key,
+            key_path: Some(key_path),
+            notes: None,
+            created_at: 0,
+        }
+    }
+
+    fn write_known_hosts(port: u16) {
+        let kh = std::env::var("BUFFTERM_KNOWN_HOSTS").expect("BUFFTERM_KNOWN_HOSTS 未设置");
+        let hostkey =
+            std::env::var("BUFFTERM_TEST_SSH_HOSTKEY").expect("BUFFTERM_TEST_SSH_HOSTKEY 未设置");
+        let line = std::fs::read_to_string(hostkey).expect("读取主机公钥失败");
+        std::fs::write(&kh, format!("[127.0.0.1]:{port} {line}"))
+            .expect("写测试 known_hosts 失败");
+    }
+
+    /// 集成测试（默认 ignore）：需要本机临时 sshd（环境变量与
+    /// russh::tests::local_sshd_end_to_end 相同）。fixture 建在沙盒目录下，
+    /// 覆盖：含连续空格文件名、目录符号链接（is_dir 取目标）、文件链接、
+    /// 悬空链接、目录优先排序。
+    ///   /usr/sbin/sshd -D -e -f /tmp/buffterm-sshd-test/sshd_config
+    ///   BUFFTERM_TEST_SSH_PORT=2222 BUFFTERM_TEST_SSH_USER=$USER \
+    ///   BUFFTERM_TEST_SSH_KEY=/tmp/buffterm-sshd-test/id_rsa \
+    ///   BUFFTERM_TEST_SSH_HOSTKEY=/tmp/buffterm-sshd-test/ssh_host_ed25519_key.pub \
+    ///   BUFFTERM_KNOWN_HOSTS=/tmp/buffterm-sshd-test/known_hosts \
+    ///   cargo test sftp -- --ignored
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn local_sshd_list() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("创建 tokio runtime 失败");
+        rt.block_on(async {
+            let host = test_host(
+                std::env::var("BUFFTERM_TEST_SSH_KEY").expect("BUFFTERM_TEST_SSH_KEY 未设置"),
+            );
+            write_known_hosts(host.port);
+
+            // 沙盒 sshd 跑在本机，远端路径即本地路径，直接铺 fixture
+            let fixture = "/tmp/buffterm-sshd-test/sftp-fixture";
+            let _ = std::fs::remove_dir_all(fixture);
+            std::fs::create_dir_all(format!("{fixture}/sub")).expect("创建 fixture 失败");
+            std::fs::write(format!("{fixture}/a b  c.txt"), b"hi").expect("写 fixture 文件失败");
+            std::os::unix::fs::symlink("sub", format!("{fixture}/link_dir")).unwrap();
+            std::os::unix::fs::symlink("a b  c.txt", format!("{fixture}/link_file")).unwrap();
+            std::os::unix::fs::symlink("nope", format!("{fixture}/dangling")).unwrap();
+
+            let manager = RusshManager::new();
+            let entries = with_sftp(&manager, &host, Duration::from_secs(20), |sftp| {
+                Box::pin(async move { list_dir(sftp, fixture).await })
+            })
+            .await
+            .expect("sftp_list 失败");
+
+            assert_eq!(entries.len(), 5, "条目数: {:?}", entries.iter().map(|e| &e.name).collect::<Vec<_>>());
+            let by_name = |n: &str| entries.iter().find(|e| e.name == n).expect(n);
+
+            let e = by_name("link_dir");
+            assert!(e.is_symlink && e.is_dir, "link_dir 应解析为目录");
+            let e = by_name("link_file");
+            assert!(e.is_symlink && !e.is_dir, "link_file 应为文件链接");
+            let e = by_name("dangling");
+            assert!(e.is_symlink && !e.is_dir, "悬空链接应按非目录处理");
+            by_name("a b  c.txt"); // 名称含连续两个空格，原样保留
+
+            // 目录优先（link_dir 按目标也算目录），再按名称不区分大小写
+            let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+            assert_eq!(
+                names,
+                ["link_dir", "sub", "a b  c.txt", "dangling", "link_file"],
+            );
+        });
+    }
 }

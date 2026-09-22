@@ -12,7 +12,7 @@ import {
   sftpUpload,
 } from '../api';
 import type { SftpProgressPayload } from '../api';
-import type { Host } from '../types';
+import type { Host, SftpEntry } from '../types';
 import { fmtError } from '../utils/errors';
 import ConfirmModal from './ConfirmModal';
 import PromptModal from './PromptModal';
@@ -26,13 +26,6 @@ import {
   UploadIcon,
   XIcon,
 } from './Icons';
-
-interface Entry {
-  name: string;
-  isDir: boolean;
-  size: string;
-  mtime: string;
-}
 
 interface Props {
   host: Host;
@@ -59,33 +52,18 @@ function formatBytes(n: number): string {
   return `${n} B`;
 }
 
+function formatMtime(secs: number): string {
+  const d = new Date(secs * 1000);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 interface Transfer {
   id: string;
   name: string;
   kind: 'upload' | 'download';
   transferred: number;
   total: number;
-}
-
-function parseListing(text: string): Entry[] {
-  const entries: Entry[] = [];
-  for (const line of text.split('\n')) {
-    const t = line.trim();
-    if (!t || t.startsWith('total ')) continue;
-    const parts = t.split(/\s+/);
-    if (parts.length < 9) continue;
-    const perms = parts[0];
-    if (!perms.startsWith('-') && !perms.startsWith('d')) continue;
-    const name = parts.slice(8).join(' ');
-    if (name === '.' || name === '..') continue;
-    entries.push({
-      name,
-      isDir: perms.startsWith('d'),
-      size: parts[4],
-      mtime: `${parts[5]} ${parts[6]} ${parts[7]}`,
-    });
-  }
-  return entries;
 }
 
 export default function SftpPanel({
@@ -95,13 +73,13 @@ export default function SftpPanel({
   onClose,
 }: Props) {
   const [cwd, setCwd] = useState('/');
-  const [entries, setEntries] = useState<Entry[]>([]);
+  const [entries, setEntries] = useState<SftpEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState<Entry | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<SftpEntry | null>(null);
   const [promptState, setPromptState] = useState<
-    { kind: 'mkdir' } | { kind: 'rename'; entry: Entry } | null
+    { kind: 'mkdir' } | { kind: 'rename'; entry: SftpEntry } | null
   >(null);
   // 传输任务独立于 busy：传输期间不锁定浏览/刷新
   const [transfers, setTransfers] = useState<Record<string, Transfer>>({});
@@ -146,15 +124,11 @@ export default function SftpPanel({
       setLoading(true);
       setError(null);
       try {
-        const res = await sftpList(host.id, path);
+        const list = await sftpList(host.id, path);
         if (seq !== loadSeqRef.current) return; // 已有更新的请求，丢弃过期响应
-        if (res.ok) {
-          setEntries(parseListing(res.text));
-          setCwd(path);
-          setPathInput(path);
-        } else {
-          setError(res.text || '目录读取失败');
-        }
+        setEntries(list);
+        setCwd(path);
+        setPathInput(path);
       } catch (e) {
         if (seq !== loadSeqRef.current) return;
         setError(fmtError(e));
@@ -248,18 +222,18 @@ export default function SftpPanel({
     void startTransfer('upload', picked, remote);
   };
 
-  const handleDownload = async (entry: Entry) => {
+  const handleDownload = async (entry: SftpEntry) => {
     const dest = await save({ defaultPath: entry.name });
     if (!dest) return;
     const remote = joinPath(cwd, entry.name);
     void startTransfer('download', dest, remote);
   };
 
-  const handleDelete = (entry: Entry) => {
+  const handleDelete = (entry: SftpEntry) => {
     setConfirmDelete(entry);
   };
 
-  const doDelete = async (entry: Entry) => {
+  const doDelete = async (entry: SftpEntry) => {
     setConfirmDelete(null);
     const remote = joinPath(cwd, entry.name);
     await run(() => sftpDelete(host.id, remote), () => load(cwd));
@@ -269,7 +243,7 @@ export default function SftpPanel({
     setPromptState({ kind: 'mkdir' });
   };
 
-  const handleRename = (entry: Entry) => {
+  const handleRename = (entry: SftpEntry) => {
     setPromptState({ kind: 'rename', entry });
   };
 
@@ -379,19 +353,24 @@ export default function SftpPanel({
               <div
                 key={entry.name}
                 className="sftp-row"
-                onDoubleClick={() => entry.isDir && load(joinPath(cwd, entry.name))}
+                onDoubleClick={() => entry.is_dir && load(joinPath(cwd, entry.name))}
               >
-                {entry.isDir ? <FolderIcon size={15} /> : <FileIcon size={15} />}
+                {entry.is_dir ? <FolderIcon size={15} /> : <FileIcon size={15} />}
                 <span
                   className="sftp-name"
-                  onClick={() => entry.isDir && load(joinPath(cwd, entry.name))}
+                  onClick={() => entry.is_dir && load(joinPath(cwd, entry.name))}
                 >
                   {entry.name}
                 </span>
-                <span className="sftp-size">{entry.isDir ? '—' : entry.size}</span>
-                <span className="sftp-mtime">{entry.mtime}</span>
+                {entry.is_symlink && (
+                  <span className="sftp-link-badge" title="符号链接">link</span>
+                )}
+                <span className="sftp-size">
+                  {entry.is_dir ? '—' : formatBytes(entry.size)}
+                </span>
+                <span className="sftp-mtime">{formatMtime(entry.mtime)}</span>
                 <div className="sftp-row-actions">
-                  {!entry.isDir && (
+                  {!entry.is_dir && (
                     <button
                       className="icon-btn"
                       title="下载"
@@ -441,8 +420,8 @@ export default function SftpPanel({
       )}
       {confirmDelete && (
         <ConfirmModal
-          title={confirmDelete.isDir ? '删除目录' : '删除文件'}
-          body={`确定删除 ${confirmDelete.isDir ? '目录' : '文件'} "${confirmDelete.name}" 吗？`}
+          title={confirmDelete.is_dir ? '删除目录' : '删除文件'}
+          body={`确定删除 ${confirmDelete.is_dir ? '目录' : '文件'} "${confirmDelete.name}" 吗？`}
           confirmText="删除"
           danger
           onConfirm={() => doDelete(confirmDelete)}

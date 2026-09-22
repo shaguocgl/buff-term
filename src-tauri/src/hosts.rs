@@ -77,6 +77,7 @@ pub fn delete(db: &Db, id: String) -> Result<(), String> {
     db.delete_host_cascade(&id)
         .map_err(|e| format!("删除主机失败: {e}"))?;
     credentials::delete_password(&id);
+    credentials::delete_key_passphrase(&id);
     Ok(())
 }
 
@@ -172,6 +173,12 @@ pub fn save_host_credentials(app: AppHandle, id: String, password: String) -> Re
     credentials::save_password(&id, &password)
 }
 
+/// 保存主机私钥口令（kind = passphrase），仅用于本地解密加密的私钥文件。
+#[tauri::command]
+pub fn save_host_key_passphrase(id: String, passphrase: String) -> Result<(), String> {
+    credentials::save_key_passphrase(&id, &passphrase)
+}
+
 /// 测试主机连接。传入的 Host 来自前端表单（可能是未保存的新主机）。
 /// 安全约束：仅当传入的 id 已在库中且 address/port/username 与库中记录一致时，
 /// 才允许回退使用该 id 已保存的密码；否则密码认证必须显式传入 password，
@@ -181,6 +188,7 @@ pub async fn test_host_connection(
     db: State<'_, Arc<Db>>,
     host: Host,
     password: Option<String>,
+    passphrase: Option<String>,
 ) -> Result<TestResult, String> {
     let saved = db
         .get_host(&host.id)
@@ -208,8 +216,9 @@ pub async fn test_host_connection(
             message: "密码认证需要输入密码后再测试".to_string(),
         });
     }
-    let russh = crate::russh::RusshManager::new();
-    match russh.test_connection(&host, password).await {
+    // passphrase 只用于本地解密私钥文件，不发往远端，
+    // 因此不受上面「地址不一致禁止复用已保存密码」的限制
+    match crate::russh::test_connection(&host, password, passphrase).await {
         Ok(message) => Ok(TestResult {
             ok: true,
             message,

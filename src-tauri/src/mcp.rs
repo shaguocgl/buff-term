@@ -942,6 +942,8 @@ mod tests {
     fn exec_result(text: &str, exit_code: Option<u32>, timed_out: bool) -> ExecResult {
         ExecResult {
             text: text.to_string(),
+            stdout: text.to_string(),
+            stderr: String::new(),
             exit_code,
             timed_out,
         }

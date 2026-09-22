@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
-import { createHost, deleteHost, saveHostPassword, testHostConnection, updateHost } from '../api';
+import { createHost, deleteHost, saveHostKeyPassphrase, saveHostPassword, testHostConnection, updateHost } from '../api';
 import type { Host, HostInput, TestResult } from '../types';
 import { fmtError } from '../utils/errors';
 import Modal from './Modal';
@@ -23,6 +23,8 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
   const [keyPath, setKeyPath] = useState(initial?.key_path ?? '');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [passphrase, setPassphrase] = useState('');
+  const [showPassphrase, setShowPassphrase] = useState(false);
   const [notes, setNotes] = useState(initial?.notes ?? '');
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -57,6 +59,7 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
       const res = await testHostConnection(
         hostLike,
         authType === 'password' && password ? password : undefined,
+        authType === 'key' && passphrase ? passphrase : undefined,
       );
       setTestResult(res);
     } catch (err) {
@@ -117,6 +120,16 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
             return;
           }
         }
+        if (authType === 'key' && passphrase) {
+          try {
+            await saveHostKeyPassphrase(host.id, passphrase);
+          } catch (e) {
+            await deleteHost(host.id).catch(() => {});
+            setError(`主机信息已保存但私钥口令写入失败，已撤销本次新建：${fmtError(e)}`);
+            setSaving(false);
+            return;
+          }
+        }
       }
       if (initial && authType === 'password' && password) {
         try {
@@ -124,6 +137,15 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
         } catch (e) {
           // 编辑场景：主机信息已更新（幂等），仅密码未保存，停留表单便于重试
           setError(`主机已保存，但密码写入系统钥匙串失败：${fmtError(e)}`);
+          setSaving(false);
+          return;
+        }
+      }
+      if (initial && authType === 'key' && passphrase) {
+        try {
+          await saveHostKeyPassphrase(initial.id, passphrase);
+        } catch (e) {
+          setError(`主机已保存，但私钥口令写入失败：${fmtError(e)}`);
           setSaving(false);
           return;
         }
@@ -202,14 +224,39 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
         </label>
 
         {authType === 'key' ? (
-          <label>
-            私钥路径
-            <input
-              value={keyPath}
-              onChange={(e) => setKeyPath(e.target.value)}
-              placeholder="~/.ssh/id_ed25519（留空使用默认）"
-            />
-          </label>
+          <>
+            <label>
+              私钥路径
+              <input
+                value={keyPath}
+                onChange={(e) => setKeyPath(e.target.value)}
+                placeholder="~/.ssh/id_ed25519（留空使用默认）"
+              />
+            </label>
+            <label>
+              私钥口令
+              <div className="password-input-wrap">
+                <input
+                  type={showPassphrase ? 'text' : 'password'}
+                  value={passphrase}
+                  onChange={(e) => setPassphrase(e.target.value)}
+                  placeholder={
+                    initial
+                      ? '留空保持不变；私钥无口令则无需填写'
+                      : '私钥有口令时填写，否则留空'
+                  }
+                />
+                <button
+                  type="button"
+                  className="password-eye"
+                  title={showPassphrase ? '隐藏口令' : '显示口令'}
+                  onClick={() => setShowPassphrase((v) => !v)}
+                >
+                  {showPassphrase ? <EyeOffIcon size={16} /> : <EyeIcon size={16} />}
+                </button>
+              </div>
+            </label>
+          </>
         ) : (
           <label>
             密码

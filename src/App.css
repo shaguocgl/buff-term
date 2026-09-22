@@ -1999,6 +1999,15 @@ input::placeholder {
   font-size: 11px;
 }
 
+.sftp-link-badge {
+  flex: none;
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--muted);
+}
+
 .sftp-row-actions {
   display: flex;
   gap: 2px;

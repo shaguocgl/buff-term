@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type {
   AiProvider,
@@ -33,6 +33,7 @@ import type {
   RemediationDonePayload,
   RemediationErrorPayload,
   RemediationStepInput,
+  SftpEntry,
 } from './types';
 
 export const listHosts = () => invoke<Host[]>('list_hosts');
@@ -42,8 +43,13 @@ export const deleteHost = (id: string) => invoke<void>('delete_host', { id });
 export const importSshConfig = () => invoke<ImportResult>('import_ssh_config');
 export const saveHostPassword = (id: string, password: string) =>
   invoke<void>('save_host_credentials', { id, password });
-export const testHostConnection = (host: Host, password?: string) =>
-  invoke<TestResult>('test_host_connection', { host, password });
+export const saveHostKeyPassphrase = (id: string, passphrase: string) =>
+  invoke<void>('save_host_key_passphrase', { id, passphrase });
+export const testHostConnection = (
+  host: Host,
+  password?: string,
+  passphrase?: string,
+) => invoke<TestResult>('test_host_connection', { host, password, passphrase });
 
 export const listAiProviders = () => invoke<AiProvider[]>('list_ai_providers');
 export const saveAiProvider = (input: AiProviderInput, id?: string) =>
@@ -74,7 +80,7 @@ export interface SftpResult {
 }
 
 export const sftpList = (hostId: string, path: string) =>
-  invoke<SftpResult>('sftp_list', { hostId, path });
+  invoke<SftpEntry[]>('sftp_list', { hostId, path });
 export const sftpDownload = (
   hostId: string,
   remote: string,
@@ -356,8 +362,8 @@ export const openSession = (
   hostId: string,
   cols: number,
   rows: number,
-  requestId: string,
-) => invoke<number>('open_session', { hostId, cols, rows, requestId });
+  onData: Channel<ArrayBuffer>,
+) => invoke<number>('open_session', { hostId, cols, rows, onData });
 export const closeSession = (id: number) => invoke<void>('close_session', { id });
 export const sessionInput = (
   id: number,
@@ -374,32 +380,25 @@ export const sessionInput = (
 export const resizeSession = (id: number, cols: number, rows: number) =>
   invoke<void>('session_resize', { id, cols, rows });
 
-export interface TerminalDataPayload {
-  session_id: number;
-  request_id: string;
-  data: number[];
+/** 终端状态帧（帧首字节 0x01 后的 JSON 负载） */
+export interface TerminalStatusFrame {
+  status: 'exited' | 'closed';
+  reason: 'exit' | 'disconnected' | null;
+  exit_code: number | null;
 }
 
-export interface SessionStatusPayload {
-  session_id: number;
-  request_id: string;
-  status: string;
-}
+export type TerminalFrame =
+  | { kind: 'data'; data: Uint8Array }
+  | { kind: 'status'; status: TerminalStatusFrame };
 
-export const onTerminalData = (
-  cb: (sessionId: number, requestId: string, data: Uint8Array) => void,
-) =>
-  listen<TerminalDataPayload>('terminal:data', (event) =>
-    cb(
-      event.payload.session_id,
-      event.payload.request_id,
-      new Uint8Array(event.payload.data),
-    ),
-  );
-
-export const onSessionStatus = (
-  cb: (sessionId: number, requestId: string, status: string) => void,
-) =>
-  listen<SessionStatusPayload>('session:status', (event) =>
-    cb(event.payload.session_id, event.payload.request_id, event.payload.status),
-  );
+/** 解析终端二进制帧：首字节 0x00 = 字节流，0x01 = 状态 JSON */
+export const decodeTerminalFrame = (buf: ArrayBuffer): TerminalFrame => {
+  const bytes = new Uint8Array(buf);
+  if (bytes[0] === 0x01) {
+    const status = JSON.parse(
+      new TextDecoder().decode(bytes.subarray(1)),
+    ) as TerminalStatusFrame;
+    return { kind: 'status', status };
+  }
+  return { kind: 'data', data: bytes.subarray(1) };
+};

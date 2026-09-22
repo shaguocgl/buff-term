@@ -3,11 +3,11 @@ use crate::guard::{GuardConfig, GuardEngine, TerminalGuardApproval};
 use crate::models::Host;
 use crate::russh::{do_connect, ClientHandler};
 use russh::client::Handle;
-use russh::{Channel, ChannelMsg, ChannelWriteHalf};
-use serde::Serialize;
+use russh::{ChannelMsg, ChannelWriteHalf};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 
@@ -34,7 +34,8 @@ enum GuardMsg {
 
 pub struct Session {
     pub host: Host,
-    pub request_id: String,
+    /// 终端输出通道（二进制帧：首字节 0x00 = 字节流，0x01 = 状态 JSON）
+    out: Channel<InvokeResponseBody>,
     _handle: Handle<ClientHandler>,
     write_half: Arc<ChannelWriteHalf<russh::client::Msg>>,
     resize_tx: mpsc::UnboundedSender<(u16, u16)>,
@@ -45,26 +46,48 @@ pub struct Session {
     echo_tx: mpsc::UnboundedSender<Vec<u8>>,
 }
 
+/// 终端数据帧首字节：原始字节流
+const FRAME_DATA: u8 = 0x00;
+/// 终端数据帧首字节：状态 JSON
+const FRAME_STATUS: u8 = 0x01;
+/// 合帧窗口：pending 非空时最多再等 4ms，把连续到达的输出合并发送
+const FLUSH_WINDOW: std::time::Duration = std::time::Duration::from_millis(4);
+/// pending 超过 32 KiB 立即 flush，不等窗口
+const FLUSH_AT: usize = 32 * 1024;
+
+/// 发送数据帧（0x00 + 原始字节）
+fn send_data(out: &Channel<InvokeResponseBody>, data: &[u8]) {
+    let mut frame = Vec::with_capacity(data.len() + 1);
+    frame.push(FRAME_DATA);
+    frame.extend_from_slice(data);
+    let _ = out.send(InvokeResponseBody::Raw(frame));
+}
+
+/// 发送状态帧（0x01 + UTF-8 JSON：{"status","reason","exit_code"}）
+fn send_status(
+    out: &Channel<InvokeResponseBody>,
+    status: &str,
+    reason: Option<&str>,
+    exit_code: Option<u32>,
+) {
+    let payload = serde_json::json!({
+        "status": status,
+        "reason": reason,
+        "exit_code": exit_code,
+    })
+    .to_string();
+    let mut frame = Vec::with_capacity(payload.len() + 1);
+    frame.push(FRAME_STATUS);
+    frame.extend_from_slice(payload.as_bytes());
+    let _ = out.send(InvokeResponseBody::Raw(frame));
+}
+
 #[derive(Default)]
 pub struct SessionManager {
     sessions: Mutex<HashMap<u32, Session>>,
     next_id: AtomicU32,
     /// 终端防护配置缓存（版本号 → 配置），规则变更时 bump 版本失效，避免每次按键读 DB
     guard_config_cache: Mutex<Option<(u64, GuardConfig)>>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct TerminalData {
-    pub session_id: u32,
-    pub request_id: String,
-    pub data: Vec<u8>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct SessionStatus {
-    pub session_id: u32,
-    pub request_id: String,
-    pub status: String,
 }
 
 impl SessionManager {
@@ -74,7 +97,7 @@ impl SessionManager {
         host: Host,
         cols: u16,
         rows: u16,
-        request_id: String,
+        out: Channel<InvokeResponseBody>,
     ) -> Result<u32, String> {
         let cols = cols.clamp(2, 400);
         let rows = rows.clamp(10, 200);
@@ -82,22 +105,31 @@ impl SessionManager {
         let handle = tokio::time::timeout(
             // 需覆盖首次连接的主机指纹确认窗口（60s）
             std::time::Duration::from_secs(60),
-            do_connect(&host, None),
+            do_connect(&host, None, None),
         )
         .await
         .map_err(|_| "SSH 连接超时（60 秒），请检查网络或服务器状态".to_string())??;
-        let channel: Channel<russh::client::Msg> = handle
-            .channel_open_session()
-            .await
-            .map_err(|e| format!("打开 SSH 会话通道失败: {e}"))?;
-        channel
-            .request_pty(false, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
-            .await
-            .map_err(|e| format!("请求 PTY 失败: {e}"))?;
-        channel
-            .request_shell(false)
-            .await
-            .map_err(|e| format!("请求 shell 失败: {e}"))?;
+        let channel: russh::Channel<russh::client::Msg> = tokio::time::timeout(
+            crate::russh::CHANNEL_OP_TIMEOUT,
+            handle.channel_open_session(),
+        )
+        .await
+        .map_err(|_| "打开 SSH 会话通道超时".to_string())?
+        .map_err(|e| format!("打开 SSH 会话通道失败: {e}"))?;
+        tokio::time::timeout(
+            crate::russh::CHANNEL_OP_TIMEOUT,
+            channel.request_pty(false, "xterm-256color", cols as u32, rows as u32, 0, 0, &[]),
+        )
+        .await
+        .map_err(|_| "请求 PTY 超时".to_string())?
+        .map_err(|e| format!("请求 PTY 失败: {e}"))?;
+        tokio::time::timeout(
+            crate::russh::CHANNEL_OP_TIMEOUT,
+            channel.request_shell(false),
+        )
+        .await
+        .map_err(|_| "请求 shell 超时".to_string())?
+        .map_err(|e| format!("请求 shell 失败: {e}"))?;
 
         let (mut read_half, write_half) = channel.split();
         let write_half = Arc::new(write_half);
@@ -111,7 +143,7 @@ impl SessionManager {
             id,
             Session {
                 host: host.clone(),
-                request_id: request_id.clone(),
+                out: out.clone(),
                 _handle: handle,
                 write_half: write_half.clone(),
                 resize_tx,
@@ -130,48 +162,59 @@ impl SessionManager {
         });
 
         let app_for_io = app.clone();
-        let request_id_io = request_id.clone();
+        let out_io = out.clone();
         tokio::spawn(async move {
+            // 合帧读循环：连续到达的输出在 4ms 窗口内合并为一条 Channel 消息，
+            // 减少 IPC 次数；超过 32 KiB 立即 flush
+            let mut pending: Vec<u8> = Vec::new();
+            let mut exit_code: Option<u32> = None;
+            let mut disconnected = false;
             loop {
-                match read_half.wait().await {
-                    Some(ChannelMsg::Data { data }) => {
+                let msg = if pending.is_empty() {
+                    read_half.wait().await
+                } else {
+                    match tokio::time::timeout(FLUSH_WINDOW, read_half.wait()).await {
+                        Ok(m) => m,
+                        Err(_) => {
+                            send_data(&out_io, &pending);
+                            pending.clear();
+                            continue;
+                        }
+                    }
+                };
+                match msg {
+                    Some(ChannelMsg::Data { data })
+                    | Some(ChannelMsg::ExtendedData { data, ext: 1 }) => {
                         if let Some(manager) = app_for_io.try_state::<SessionManager>() {
                             manager.feed_output(id, &data);
                         }
-                        let _ = app_for_io.emit(
-                            "terminal:data",
-                            TerminalData {
-                                session_id: id,
-                                request_id: request_id_io.clone(),
-                                data: data.to_vec(),
-                            },
-                        );
-                    }
-                    Some(ChannelMsg::ExtendedData { data, ext }) if ext == 1 => {
-                        if let Some(manager) = app_for_io.try_state::<SessionManager>() {
-                            manager.feed_output(id, &data);
+                        pending.extend_from_slice(&data);
+                        if pending.len() >= FLUSH_AT {
+                            send_data(&out_io, &pending);
+                            pending.clear();
                         }
-                        let _ = app_for_io.emit(
-                            "terminal:data",
-                            TerminalData {
-                                session_id: id,
-                                request_id: request_id_io.clone(),
-                                data: data.to_vec(),
-                            },
-                        );
                     }
-                    Some(ChannelMsg::Close) | None => break,
+                    Some(ChannelMsg::ExitStatus { exit_status }) => {
+                        exit_code = Some(exit_status);
+                    }
+                    Some(ChannelMsg::Close) => break,
+                    None => {
+                        // 底层连接断开（读端关闭），与 shell 正常退出区分
+                        disconnected = true;
+                        break;
+                    }
                     _ => {}
                 }
             }
-            let _ = app_for_io.emit(
-                "session:status",
-                SessionStatus {
-                    session_id: id,
-                    request_id: request_id_io.clone(),
-                    status: "exited".to_string(),
-                },
-            );
+            if !pending.is_empty() {
+                send_data(&out_io, &pending);
+            }
+            let reason = if disconnected && exit_code.is_none() {
+                "disconnected"
+            } else {
+                "exit"
+            };
+            send_status(&out_io, "exited", Some(reason), exit_code);
             let _ = app_for_io.state::<SessionManager>().remove(id);
         });
 
@@ -327,7 +370,7 @@ impl SessionManager {
         self.sessions.lock().unwrap().get(&id).map(|s| s.host.clone())
     }
 
-    pub async fn close(&self, app: &AppHandle, id: u32) -> Result<(), String> {
+    pub async fn close(&self, _app: &AppHandle, id: u32) -> Result<(), String> {
         let session = self
             .sessions
             .lock()
@@ -335,14 +378,7 @@ impl SessionManager {
             .remove(&id)
             .ok_or("会话不存在")?;
         let _ = session.write_half.close().await;
-        let _ = app.emit(
-            "session:status",
-            SessionStatus {
-                session_id: id,
-                request_id: session.request_id.clone(),
-                status: "closed".to_string(),
-            },
-        );
+        send_status(&session.out, "closed", None, None);
         Ok(())
     }
 
@@ -413,10 +449,10 @@ pub async fn open_session(
     host_id: String,
     cols: u16,
     rows: u16,
-    request_id: String,
+    on_data: Channel<InvokeResponseBody>,
 ) -> Result<u32, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    state.open(app, host, cols, rows, request_id).await
+    state.open(app, host, cols, rows, on_data).await
 }
 
 #[tauri::command]

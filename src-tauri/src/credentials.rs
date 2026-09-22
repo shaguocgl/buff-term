@@ -170,6 +170,43 @@ pub fn delete_password(host_id: &str) {
     }
 }
 
+// ---------- 私钥口令 ----------
+
+/// 私钥口令（kind = passphrase）：与主机密码同样 AES-256-GCM 加密存储，
+/// 仅用于本地解密加密的私钥文件，不会发送到远端。
+pub fn save_key_passphrase(host_id: &str, passphrase: &str) -> Result<(), String> {
+    let db = db().ok_or_else(|| "数据库未就绪".to_string())?;
+    if passphrase.is_empty() {
+        cache_remove("passphrase", host_id);
+        db.delete_credential(host_id, "passphrase")
+            .map_err(|e| format!("删除凭据失败: {e}"))?;
+        return Ok(());
+    }
+    let enc = encrypt_secret(passphrase)?;
+    db.set_credential(host_id, "passphrase", &enc)
+        .map_err(|e| format!("保存凭据到数据库失败: {e}"))?;
+    cache_set("passphrase", host_id, passphrase.to_string());
+    Ok(())
+}
+
+pub fn get_key_passphrase(host_id: &str) -> Option<String> {
+    if let Some(cached) = cache_get("passphrase", host_id) {
+        return Some(cached);
+    }
+    let db = db()?;
+    let enc = db.get_credential(host_id, "passphrase").ok()??;
+    let plain = decrypt_secret(&enc).ok()?;
+    cache_set("passphrase", host_id, plain.clone());
+    Some(plain)
+}
+
+pub fn delete_key_passphrase(host_id: &str) {
+    cache_remove("passphrase", host_id);
+    if let Some(db) = db() {
+        let _ = db.delete_credential(host_id, "passphrase");
+    }
+}
+
 // ---------- AI API Key ----------
 
 pub fn save_api_key(provider_id: &str, key: &str) -> Result<(), String> {
