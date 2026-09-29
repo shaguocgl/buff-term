@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -25,6 +26,7 @@ import {
 } from './api';
 import './App.css';
 import type {
+  AiModel,
   AiProvider,
   Host,
   HostKeyConfirmRequest,
@@ -97,6 +99,9 @@ type ApprovalQueueItem =
 
 const PANEL_STORAGE_KEY = 'buffterm-panel';
 const PANEL_WIDTH_STORAGE_KEY = 'buffterm-panel-width';
+
+// 稳定的空数组引用：未配置平台时避免每次渲染生成新数组，导致面板 memo 失效
+const EMPTY_MODELS: AiModel[] = [];
 
 function readSavedPanel(): PanelKind {
   try {
@@ -175,6 +180,8 @@ function App() {
   });
   const toastSeq = useRef(0);
   const tabSeq = useRef(0);
+  // 右侧面板宽度通过 CSS 变量下发：拖动时直接改 DOM，避免每帧 setState 重渲染整棵面板树
+  const workbenchBodyRef = useRef<HTMLDivElement | null>(null);
 
   const dismissToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -230,6 +237,15 @@ function App() {
     [applyPanel],
   );
 
+  // 面板 props 稳定化：配合 React.memo，避免 App 因无关状态（toast / 审批队列等）
+  // 变化时连带重渲染面板（ChatPanel 每次渲染都会重新解析 Markdown，代价高）
+  const closePanel = useCallback(() => applyPanel('none'), [applyPanel]);
+  const openAiConfig = useCallback(() => setShowAi(true), []);
+  const handleModelSwitched = useCallback(() => {
+    refreshAi().catch(() => {});
+  }, [refreshAi]);
+  const handleInsertConsumed = useCallback(() => setChatInsert(null), []);
+
   useEffect(() => {
     refresh().catch((e) => showToast('error', fmtError(e)));
     refreshAi().catch(() => {});
@@ -255,6 +271,14 @@ function App() {
   useEffect(() => {
     getAppVersion().then(setAppVersion).catch(() => {});
   }, []);
+
+  // 把面板宽度同步到 CSS 变量（首帧即生效，避免宽度跳变）
+  useLayoutEffect(() => {
+    workbenchBodyRef.current?.style.setProperty(
+      '--right-panel-width',
+      `${rightPanelWidth}px`,
+    );
+  }, [rightPanelWidth]);
 
   const enqueueApproval = useCallback((item: ApprovalQueueItem) => {
     const now = Date.now();
@@ -515,7 +539,12 @@ function App() {
       const maxW = window.innerWidth * 0.5;
       const newWidth = Math.max(280, Math.min(maxW, startWidth + delta));
       latestWidth = newWidth;
-      setRightPanelWidth(newWidth);
+      // 拖动期间只改 CSS 变量，不触发 React 重渲染：
+      // 否则每个 mousemove 都会重渲染全部右侧面板与终端（含 Markdown 重新解析），导致卡死
+      workbenchBodyRef.current?.style.setProperty(
+        '--right-panel-width',
+        `${newWidth}px`,
+      );
     };
     const onMouseUp = () => {
       setResizing(false);
@@ -523,6 +552,8 @@ function App() {
       document.removeEventListener('mouseup', onMouseUp);
       document.body.style.userSelect = '';
       document.body.style.cursor = '';
+      // 拖动结束才提交到 state，保证与 CSS 变量一致（并供其它逻辑/持久化使用）
+      setRightPanelWidth(latestWidth);
       try {
         localStorage.setItem(
           PANEL_WIDTH_STORAGE_KEY,
@@ -1007,7 +1038,7 @@ function App() {
               </button>
             </div>
 
-            <div className="workbench-body">
+            <div className="workbench-body" ref={workbenchBodyRef}>
               {tabs.map((tab) => (
                 <div
                   key={tab.key}
@@ -1077,23 +1108,20 @@ function App() {
                   sessionId={activeTab.sessionId}
                   hostId={activeTab.host.id}
                   hostName={activeTab.title}
-                  panelWidth={rightPanelWidth}
                   hidden={!chatOpen}
                   insertText={chatInsert}
-                  onInsertConsumed={() => setChatInsert(null)}
+                  onInsertConsumed={handleInsertConsumed}
                   providerLabel={
                     activeProvider
                       ? `${activeProvider.name} · ${activeModelLabel}`
                       : ''
                   }
                   providerConfigured={!!activeProvider}
-                  models={activeProvider?.models ?? []}
+                  models={activeProvider?.models ?? EMPTY_MODELS}
                   providerId={activeProvider?.id ?? null}
-                  onOpenConfig={() => setShowAi(true)}
-                  onModelSwitched={() => {
-                    refreshAi().catch(() => {});
-                  }}
-                  onClose={() => applyPanel('none')}
+                  onOpenConfig={openAiConfig}
+                  onModelSwitched={handleModelSwitched}
+                  onClose={closePanel}
                 />
               )}
 
@@ -1102,8 +1130,7 @@ function App() {
                   key={`sftp-${activeTab.sessionId}`}
                   host={activeTab.host}
                   hidden={!sftpOpen}
-                  onClose={() => applyPanel('none')}
-                  panelWidth={rightPanelWidth}
+                  onClose={closePanel}
                 />
               )}
 
@@ -1112,8 +1139,7 @@ function App() {
                   key={`mon-${activeTab.sessionId}`}
                   host={activeTab.host}
                   hidden={!monitorOpen}
-                  onClose={() => applyPanel('none')}
-                  panelWidth={rightPanelWidth}
+                  onClose={closePanel}
                 />
               )}
 
@@ -1122,8 +1148,7 @@ function App() {
                   key={`inspect-${activeTab.sessionId}`}
                   host={activeTab.host}
                   hidden={!inspectionOpen}
-                  onClose={() => applyPanel('none')}
-                  panelWidth={rightPanelWidth}
+                  onClose={closePanel}
                 />
               )}
             </div>

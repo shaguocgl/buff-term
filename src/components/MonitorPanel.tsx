@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent,
+} from 'react';
 import { monitorHistory, monitorSnapshot } from '../api';
 import type { Host, MonitorSnapshot } from '../types';
 import { fmtError } from '../utils/errors';
@@ -6,7 +13,6 @@ import { ActivityIcon, RefreshIcon, XIcon } from './Icons';
 
 interface Props {
   host: Host;
-  panelWidth?: number;
   /** 面板隐藏时保持挂载但暂停 5s 轮询（避免后台无效采集） */
   hidden?: boolean;
   onClose: () => void;
@@ -222,12 +228,7 @@ function formatAgo(sec: number): string {
   return `${Math.round(minutes / 60)}小时前`;
 }
 
-export default function MonitorPanel({
-  host,
-  panelWidth = 400,
-  hidden = false,
-  onClose,
-}: Props) {
+function MonitorPanel({ host, hidden = false, onClose }: Props) {
   const [snap, setSnap] = useState<MonitorSnapshot | null>(null);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -297,7 +298,10 @@ export default function MonitorPanel({
   return (
     <aside
       className="monitor-panel"
-      style={{ width: panelWidth, display: hidden ? 'none' : undefined }}
+      style={{
+        width: 'var(--right-panel-width, 400px)',
+        display: hidden ? 'none' : undefined,
+      }}
     >
       <div className="sftp-header">
         <div className="sftp-path">
@@ -377,3 +381,5 @@ export default function MonitorPanel({
     </aside>
   );
 }
+
+export default memo(MonitorPanel);

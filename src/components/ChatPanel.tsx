@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useRef,
@@ -72,7 +73,6 @@ interface Props {
   providerConfigured: boolean;
   models: AiModel[];
   providerId: string | null;
-  panelWidth?: number;
   /** 面板隐藏时保持挂载（不中断运行中的 AI 会话），仅隐藏显示 */
   hidden?: boolean;
   /** 由终端「问 AI」传入的选中文本，seq 用于区分重复内容 */
@@ -271,7 +271,7 @@ function historyToMessages(history: HistoryEntry[], nextId: () => number): ChatM
   return result;
 }
 
-export default function ChatPanel({
+function ChatPanel({
   sessionId,
   hostId,
   hostName,
@@ -279,7 +279,6 @@ export default function ChatPanel({
   providerConfigured,
   models,
   providerId,
-  panelWidth = 384,
   hidden = false,
   insertText = null,
   onInsertConsumed,
@@ -665,7 +664,10 @@ export default function ChatPanel({
   return (
     <aside
       className="chat-panel"
-      style={{ width: panelWidth, display: hidden ? 'none' : undefined }}
+      style={{
+        width: 'var(--right-panel-width, 384px)',
+        display: hidden ? 'none' : undefined,
+      }}
     >
       <div className="chat-header">
         <div className="chat-header-left">
@@ -1060,3 +1062,6 @@ export default function ChatPanel({
     </aside>
   );
 }
+
+// props 由 App 稳定化，memo 避免 App 无关状态变化时重渲染（含 Markdown 重新解析）
+export default memo(ChatPanel);

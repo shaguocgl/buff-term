@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import {
   onSftpProgress,
@@ -30,7 +30,6 @@ import {
 
 interface Props {
   host: Host;
-  panelWidth?: number;
   /** 面板隐藏时保持挂载（传输任务继续），仅隐藏显示 */
   hidden?: boolean;
   onClose: () => void;
@@ -44,12 +43,7 @@ interface Transfer {
   total: number;
 }
 
-export default function SftpPanel({
-  host,
-  panelWidth = 400,
-  hidden = false,
-  onClose,
-}: Props) {
+function SftpPanel({ host, hidden = false, onClose }: Props) {
   const [cwd, setCwd] = useState('/');
   const [entries, setEntries] = useState<SftpEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -243,7 +237,10 @@ export default function SftpPanel({
   return (
     <aside
       className="sftp-panel"
-      style={{ width: panelWidth, display: hidden ? 'none' : undefined }}
+      style={{
+        width: 'var(--right-panel-width, 400px)',
+        display: hidden ? 'none' : undefined,
+      }}
     >
       <div className="sftp-header">
         <input
@@ -421,3 +418,5 @@ export default function SftpPanel({
     </aside>
   );
 }
+
+export default memo(SftpPanel);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { fmtError } from '../utils/errors';
@@ -45,7 +45,6 @@ import Modal from './Modal';
 
 interface Props {
   host: Host;
-  panelWidth?: number;
   /** 面板隐藏时保持挂载（巡检/整改继续运行），仅隐藏显示 */
   hidden?: boolean;
   onClose: () => void;
@@ -58,12 +57,7 @@ const RISK_LABEL: Record<string, string> = {
   unknown: '未知',
 };
 
-export default function InspectionPanel({
-  host,
-  panelWidth = 620,
-  hidden = false,
-  onClose,
-}: Props) {
+function InspectionPanel({ host, hidden = false, onClose }: Props) {
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [status, setStatus] = useState<InspectionStatus | null>(null);
   const [progress, setProgress] =
@@ -450,7 +444,10 @@ export default function InspectionPanel({
   return (
     <aside
       className="inspection-panel"
-      style={{ width: panelWidth, display: hidden ? 'none' : undefined }}
+      style={{
+        width: 'var(--right-panel-width, 620px)',
+        display: hidden ? 'none' : undefined,
+      }}
     >
       <div className="inspection-header">
         <div className="inspection-title">
@@ -866,3 +863,5 @@ export default function InspectionPanel({
     </aside>
   );
 }
+
+export default memo(InspectionPanel);
