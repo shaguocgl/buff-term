@@ -65,10 +65,8 @@ jobs:
             ## 升级内容
 
             ### 终端剪贴板（Windows / Linux）
-            - 修复 `Ctrl+C` / `Ctrl+V` 在 Windows 上无效的问题：改为通过 Tauri 剪贴板插件显式读写系统剪贴板，不再依赖 WebView 默认行为。有选区时 `Ctrl+C` 复制，无选区时仍发送 `^C` 中断当前命令；`Ctrl+V` 粘贴（含多行）。macOS 继续使用 Cmd 组合键。
-
-            ### AI 会话
-            - macOS 输入法候选词未确认时按回车只用于上字，不再直接发送消息；非输入状态下回车才发送。
+            - 修复 `Ctrl+C` / `Ctrl+V` 在 Windows 上始终无效的根因：窗口 UA 被统一伪装为 macOS，导致前端把 Windows 误判为 mac、剪贴板处理被整体跳过。平台判定改为基于 `navigator.platform`。有选区时 `Ctrl+C` 复制，无选区时仍发送 `^C` 中断当前命令；`Ctrl+V` 粘贴（含多行）。macOS 继续使用 Cmd 组合键。
+            - 同一误判也曾让 Windows 套用 mac 专属的界面样式（`platform-mac`），一并修正。
 
             ## 安装包
 

@@ -1,8 +1,9 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { IS_MAC } from "./utils/platform";
 
-if (navigator.userAgent.includes("Mac")) {
+if (IS_MAC) {
   document.documentElement.classList.add("platform-mac");
 }
 

@@ -25,6 +25,7 @@ import {
 import type { TerminalStatusFrame } from '../api';
 import type { Host } from '../types';
 import { fmtError } from '../utils/errors';
+import { IS_MAC } from '../utils/platform';
 import {
   ActivityIcon,
   FolderIcon,
@@ -101,10 +102,6 @@ function normalizeDims(dims: { cols: number; rows: number } | undefined) {
 
 const TERMINAL_FONT_KEY = 'buffterm-term-fontsize';
 const clampFontSize = (v: number) => Math.min(24, Math.max(10, v));
-
-// macOS 用 Cmd 复制/粘贴（由系统与 xterm 原生处理）；
-// Windows / Linux 惯例是 Ctrl+C / Ctrl+V，需自行拦截处理
-const IS_MAC = navigator.userAgent.includes('Mac');
 
 // 终端内搜索条：Enter 下一个 / Shift+Enter 上一个 / Esc 关闭
 function TerminalSearchBar({
