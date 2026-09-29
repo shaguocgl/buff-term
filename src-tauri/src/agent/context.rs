@@ -367,13 +367,35 @@ fn assemble_view(
 ///
 /// 优先级：system + 任务台账 > 任务锚点 > 最近窗口 > 历史摘要。所有丢弃都以整轮为单位，
 /// 保证不会出现孤立的 tool 消息或缺失 tool 结果的 assistant.tool_calls。
+///
+/// `calibration` 是「平台实测 / 本地估算」的校准系数：本地估算只是按字符数粗估，
+/// 预算判定必须先折算成真实 token（`估算 × 系数`），否则圆环展示的是折算后的真实用量、
+/// 压缩判定却用粗估，两者会脱节（粗估偏小时用量显示到 90% 仍不触发压缩）。
+/// 返回的 `usage.used_tokens / history_tokens` 仍保持未校准的粗估，
+/// 由调用方按同一系数折算后展示，避免重复折算。
 pub(crate) fn build_context_view(
     history: &[Value],
     plan_block: Option<&str>,
     tools: &Value,
     window: u32,
     session_id: u32,
+    calibration: f64,
 ) -> Result<ContextView, String> {
+    // 系数来自平台实测的 EMA，这里再做一次兜底钳制，避免异常值把预算算飞
+    let calibration = if calibration.is_finite() {
+        calibration.clamp(0.25, 4.0)
+    } else {
+        1.0
+    };
+    // 本地粗估 → 真实 token 的折算
+    let scale = |tokens: usize| -> usize {
+        if (calibration - 1.0).abs() < f64::EPSILON {
+            tokens
+        } else {
+            ((tokens as f64) * calibration).round() as usize
+        }
+    };
+
     let (system_msg, rounds) = split_system_and_rounds(history);
     let system = system_msg.as_ref().map(content).unwrap_or("").to_string();
     let tools_tokens = estimate_tools_tokens(tools);
@@ -381,7 +403,8 @@ pub(crate) fn build_context_view(
     let plan_tokens = plan_block.map(estimate_text_tokens).unwrap_or(0);
     let system_tokens = estimate_text_tokens(&system);
     let input_budget = ((window as f64) * INPUT_BUDGET_RATIO) as usize;
-    let fixed_tokens = system_tokens + plan_tokens + tools_tokens;
+    // 固定开销（system + 台账 + 工具定义）同样折算成真实 token 后再扣预算
+    let fixed_tokens = scale(system_tokens + plan_tokens + tools_tokens);
 
     if fixed_tokens >= input_budget {
         return Err(format!(
@@ -431,13 +454,13 @@ pub(crate) fn build_context_view(
         digest_budget,
         false,
     );
-    let natural_used = estimate_messages_tokens(&natural_messages) + tools_tokens;
-    if natural_used <= trigger {
+    let natural_raw = estimate_messages_tokens(&natural_messages) + tools_tokens;
+    if scale(natural_raw) <= trigger {
         return Ok(ContextView {
             messages: natural_messages,
             usage: ContextUsage {
                 session_id,
-                used_tokens: natural_used,
+                used_tokens: natural_raw,
                 history_tokens: full_history_tokens,
                 budget_tokens: input_budget,
                 window_tokens: window,
@@ -462,13 +485,13 @@ pub(crate) fn build_context_view(
             digest_budget,
             false,
         );
-        let used = estimate_messages_tokens(&messages) + tools_tokens;
-        if used <= target {
+        let raw = estimate_messages_tokens(&messages) + tools_tokens;
+        if scale(raw) <= target {
             return Ok(ContextView {
                 messages,
                 usage: ContextUsage {
                     session_id,
-                    used_tokens: used,
+                    used_tokens: raw,
                     history_tokens: full_history_tokens,
                     budget_tokens: input_budget,
                     window_tokens: window,
@@ -485,13 +508,13 @@ pub(crate) fn build_context_view(
     // 3) 最近窗口只剩 1 轮仍超过目标线：只要没超总预算就接受，否则硬重置。
     let (messages, compressed) =
         assemble_view(&system, plan_block, &rounds, 1, digest_budget, false);
-    let used = estimate_messages_tokens(&messages) + tools_tokens;
-    if used <= input_budget {
+    let raw = estimate_messages_tokens(&messages) + tools_tokens;
+    if scale(raw) <= input_budget {
         return Ok(ContextView {
             messages,
             usage: ContextUsage {
                 session_id,
-                used_tokens: used,
+                used_tokens: raw,
                 history_tokens: full_history_tokens,
                 budget_tokens: input_budget,
                 window_tokens: window,
@@ -507,13 +530,13 @@ pub(crate) fn build_context_view(
     // 4) 硬重置：system + 台账 + 任务锚点 + 最后一轮，工具输出进一步截断。
     let (messages, compressed) =
         assemble_view(&system, plan_block, &rounds, 1, digest_budget, true);
-    let used = estimate_messages_tokens(&messages) + tools_tokens;
-    if used <= input_budget {
+    let raw = estimate_messages_tokens(&messages) + tools_tokens;
+    if scale(raw) <= input_budget {
         return Ok(ContextView {
             messages,
             usage: ContextUsage {
                 session_id,
-                used_tokens: used,
+                used_tokens: raw,
                 history_tokens: full_history_tokens,
                 budget_tokens: input_budget,
                 window_tokens: window,
@@ -529,6 +552,7 @@ pub(crate) fn build_context_view(
         });
     }
 
+    let used = scale(raw);
     Err(format!(
         "当前模型的上下文窗口配置过小（{window} tokens）：即使只保留系统提示、任务台账和最近一轮，\
          仍需要约 {used} tokens。请调大该模型的 context_window，或更换窗口更大的模型"
@@ -570,7 +594,7 @@ mod tests {
     #[test]
     fn keeps_system_anchor_and_last_round_under_extreme_budget() {
         let h = history(20);
-        let view = build_context_view(&h, None, &tools(), 2_000, 1).unwrap();
+        let view = build_context_view(&h, None, &tools(), 2_000, 1, 1.0).unwrap();
         assert_eq!(view.messages[0]["role"], "system");
         let users: Vec<&str> = view
             .messages
@@ -585,7 +609,7 @@ mod tests {
     #[test]
     fn compression_never_breaks_tool_call_pairing() {
         let h = history(20);
-        let view = build_context_view(&h, None, &tools(), 8_000, 1).unwrap();
+        let view = build_context_view(&h, None, &tools(), 8_000, 1, 1.0).unwrap();
         let mut pending: Vec<String> = Vec::new();
         for msg in &view.messages {
             if let Some(calls) = msg["tool_calls"].as_array() {
@@ -635,8 +659,8 @@ mod tests {
     #[test]
     fn digest_is_byte_identical_for_same_range() {
         let h = history(12);
-        let a = build_context_view(&h, None, &tools(), 4_000, 1).unwrap();
-        let b = build_context_view(&h, None, &tools(), 4_000, 1).unwrap();
+        let a = build_context_view(&h, None, &tools(), 4_000, 1, 1.0).unwrap();
+        let b = build_context_view(&h, None, &tools(), 4_000, 1, 1.0).unwrap();
         let sa = a.messages[0]["content"].as_str().unwrap();
         let sb = b.messages[0]["content"].as_str().unwrap();
         assert_eq!(sa, sb, "相同输入范围必须生成字节一致的摘要");
@@ -646,7 +670,7 @@ mod tests {
     fn plan_block_is_always_present_and_never_trimmed() {
         let h = history(20);
         let plan = "[任务台账｜必须遵守]\n目标：部署 nginx";
-        let view = build_context_view(&h, Some(plan), &tools(), 3_000, 1).unwrap();
+        let view = build_context_view(&h, Some(plan), &tools(), 3_000, 1, 1.0).unwrap();
         let sys = view.messages[0]["content"].as_str().unwrap();
         assert!(sys.contains("部署 nginx"), "台账必须注入: {sys}");
     }
@@ -654,10 +678,23 @@ mod tests {
     #[test]
     fn tiny_window_returns_clear_error() {
         let h = history(2);
-        let err = build_context_view(&h, None, &tools(), 40, 1).unwrap_err();
+        let err = build_context_view(&h, None, &tools(), 40, 1, 1.0).unwrap_err();
         assert!(
             err.contains("context_window"),
             "错误应提示调整 context_window: {err}"
         );
+    }
+
+    /// 回归：压缩判定必须按校准后的真实 token 折算，否则平台实测远高于本地粗估时，
+    /// 圆环已经很高却不触发压缩。
+    #[test]
+    fn calibration_factor_shifts_compression_trigger() {
+        let h = history(20);
+        // 系数 1.0：粗估即真实值，窗口够用，走自然视图
+        let loose = build_context_view(&h, None, &tools(), 12_000, 1, 1.0).unwrap();
+        assert_eq!(loose.usage.strategy, CompressionStrategy::None);
+        // 系数 4.0：平台实测是粗估的 4 倍，同样的历史应被判为超预算并压缩
+        let tight = build_context_view(&h, None, &tools(), 12_000, 1, 4.0).unwrap();
+        assert_ne!(tight.usage.strategy, CompressionStrategy::None);
     }
 }

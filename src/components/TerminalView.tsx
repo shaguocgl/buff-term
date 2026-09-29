@@ -100,6 +100,10 @@ function normalizeDims(dims: { cols: number; rows: number } | undefined) {
 const TERMINAL_FONT_KEY = 'buffterm-term-fontsize';
 const clampFontSize = (v: number) => Math.min(24, Math.max(10, v));
 
+// macOS 用 Cmd 复制/粘贴（由系统与 xterm 原生处理）；
+// Windows / Linux 惯例是 Ctrl+C / Ctrl+V，需自行拦截处理
+const IS_MAC = navigator.userAgent.includes('Mac');
+
 // 终端内搜索条：Enter 下一个 / Shift+Enter 上一个 / Esc 关闭
 function TerminalSearchBar({
   searchAddon,
@@ -487,7 +491,9 @@ export default function TerminalView({
 
     // 普通可打印字符直接从原生 keydown 截获发送（避免 WKWebView 丢字），
     // onData 收到对应单字节 ASCII 时直接忽略，避免 xterm 补发导致双显。
-    // Cmd/Ctrl + =/-/0 作为终端字号缩放，其余组合键交给系统/浏览器。
+    // Cmd/Ctrl + =/-/0 作为终端字号缩放；
+    // Windows / Linux 额外接管 Ctrl+C（复制选区）/ Ctrl+V（粘贴），
+    // 其余组合键交给 xterm 与系统处理。
     //
     // 边界标记：
     // - composingRef：IME 组合期间（compositionstart ~ compositionend）
@@ -518,6 +524,23 @@ export default function TerminalView({
           event.stopPropagation();
           zoomRef.current(0);
           return;
+        }
+        // Windows / Linux：Ctrl+C 复制选中内容、Ctrl+V 粘贴。
+        // xterm 默认把 Ctrl+字母映射成控制字符（^C / ^V）并 preventDefault，
+        // 导致浏览器原生的 copy / paste 事件不触发；这里只 stopPropagation 拦住
+        // xterm 的按键处理，不 preventDefault，从而放行原生事件，
+        // 由 xterm 自己的剪贴板逻辑完成复制 / 粘贴（含 bracketed paste 与换行归一化）。
+        if (!IS_MAC && event.ctrlKey && !event.altKey && !event.shiftKey) {
+          const key = event.key.toLowerCase();
+          if (key === 'c') {
+            // 无选区时不拦截，交给 xterm 发送 ^C 中断当前命令
+            if (term.hasSelection()) event.stopPropagation();
+            return;
+          }
+          if (key === 'v') {
+            event.stopPropagation();
+            return;
+          }
         }
         return;
       }

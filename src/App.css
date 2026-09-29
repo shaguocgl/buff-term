@@ -3293,7 +3293,7 @@ input::placeholder {
   margin: 0;
   color: var(--faint);
   font-size: 10.5px;
-  text-align: center;
+  text-align: left;
 }
 
 .chat-tip.tip-smart {

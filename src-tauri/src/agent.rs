@@ -381,15 +381,17 @@ pub fn get_context_usage(
         .map(|p| p.render_block())
         .filter(|block| !block.trim().is_empty());
     let tools = tools_schema();
+    // 校准系数同时参与预算判定与展示折算，保证「圆环显示」与「压缩时机」一致
+    let factor = agents.calibration_factor(&model);
     let view = build_context_view(
         &history,
         plan_block.as_deref(),
         &tools,
         context_window,
         session_id,
+        factor,
     )?;
     let mut usage = view.usage;
-    let factor = agents.calibration_factor(&model);
     if factor != 1.0 {
         usage.used_tokens = ((usage.used_tokens as f64) * factor).round() as usize;
         usage.history_tokens = ((usage.history_tokens as f64) * factor).round() as usize;
@@ -478,12 +480,15 @@ async fn run_agent_loop(
         let mut last_raw_estimate: usize;
         // 发送前构建视图；平台报上下文超限时按 50% 窗口重试一次。
         let resp = loop {
+            // 校准系数同时参与预算判定与展示折算，保证「圆环显示」与「压缩时机」一致
+            let factor = agents.calibration_factor(&calibration_key);
             let view = match build_context_view(
                 history,
                 plan_block.as_deref(),
                 &tools,
                 effective_window,
                 session_id,
+                factor,
             ) {
                 Ok(view) => view,
                 Err(msg) => {
@@ -506,7 +511,6 @@ async fn run_agent_loop(
                 ));
             }
             // 平台不返回 usage 时，用该模型的历史校准系数修正本地估算。
-            let factor = agents.calibration_factor(&calibration_key);
             last_raw_estimate = usage.used_tokens;
             if factor != 1.0 {
                 usage.used_tokens = ((usage.used_tokens as f64) * factor).round() as usize;
