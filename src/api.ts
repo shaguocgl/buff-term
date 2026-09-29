@@ -1,5 +1,9 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import {
+  readText as clipboardRead,
+  writeText as clipboardWrite,
+} from '@tauri-apps/plugin-clipboard-manager';
 import type {
   AiProvider,
   AiProviderInput,
@@ -402,3 +406,7 @@ export const decodeTerminalFrame = (buf: ArrayBuffer): TerminalFrame => {
   }
   return { kind: 'data', data: bytes.subarray(1) };
 };
+
+export const clipboardReadText = (): Promise<string> => clipboardRead();
+export const clipboardWriteText = (text: string): Promise<void> =>
+  clipboardWrite(text);

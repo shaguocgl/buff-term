@@ -14,6 +14,8 @@ import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import {
+  clipboardReadText,
+  clipboardWriteText,
   closeSession,
   decodeTerminalFrame,
   openSession,
@@ -491,8 +493,7 @@ export default function TerminalView({
 
     // 普通可打印字符直接从原生 keydown 截获发送（避免 WKWebView 丢字），
     // onData 收到对应单字节 ASCII 时直接忽略，避免 xterm 补发导致双显。
-    // Cmd/Ctrl + =/-/0 作为终端字号缩放；
-    // Windows / Linux 额外接管 Ctrl+C（复制选区）/ Ctrl+V（粘贴），
+    // Cmd/Ctrl + =/-/0 作为终端字号缩放（Ctrl+C / Ctrl+V 见下方 attachCustomKeyEventHandler），
     // 其余组合键交给 xterm 与系统处理。
     //
     // 边界标记：
@@ -505,6 +506,38 @@ export default function TerminalView({
     let composing = false;
     let suppressKey = false;
     let pasting = false;
+    // Windows / Linux 用 Ctrl+C / Ctrl+V 做复制粘贴（macOS 走 Cmd，保持原样）。
+    // xterm 默认把 Ctrl+字母映射成控制字符（^C / ^V）并 preventDefault；WebView2 里
+    // 浏览器默认的 copy / paste 事件也不可靠，因此这里通过 Tauri 剪贴板插件显式读写，
+    // 钩子返回 false 让 xterm 跳过该键。无选区的 Ctrl+C 不拦截，仍由 xterm 发送 ^C 中断命令。
+    term.attachCustomKeyEventHandler((event) => {
+      if (IS_MAC || event.type !== 'keydown') return true;
+      if (!event.ctrlKey || event.altKey || event.metaKey) return true;
+      const key = event.key.toLowerCase();
+      if (key === 'c') {
+        if (!term.hasSelection()) return true;
+        event.preventDefault();
+        void clipboardWriteText(term.getSelection()).catch((err) => {
+          console.warn('clipboard write failed', err);
+        });
+        return false;
+      }
+      if (key === 'v') {
+        event.preventDefault();
+        void clipboardReadText()
+          .then((text) => {
+            if (!text) return;
+            // 粘贴内容走 onData；单个 ASCII 字符也必须发送，见 pasteRef 说明
+            pasting = true;
+            term.paste(text);
+          })
+          .catch((err) => {
+            console.warn('clipboard read failed', err);
+          });
+        return false;
+      }
+      return true;
+    });
     const handleKeyDownCapture = (event: KeyboardEvent) => {
       if (event.ctrlKey || event.metaKey) {
         if (event.key === '=' || event.key === '+') {
@@ -525,23 +558,8 @@ export default function TerminalView({
           zoomRef.current(0);
           return;
         }
-        // Windows / Linux：Ctrl+C 复制选中内容、Ctrl+V 粘贴。
-        // xterm 默认把 Ctrl+字母映射成控制字符（^C / ^V）并 preventDefault，
-        // 导致浏览器原生的 copy / paste 事件不触发；这里只 stopPropagation 拦住
-        // xterm 的按键处理，不 preventDefault，从而放行原生事件，
-        // 由 xterm 自己的剪贴板逻辑完成复制 / 粘贴（含 bracketed paste 与换行归一化）。
-        if (!IS_MAC && event.ctrlKey && !event.altKey && !event.shiftKey) {
-          const key = event.key.toLowerCase();
-          if (key === 'c') {
-            // 无选区时不拦截，交给 xterm 发送 ^C 中断当前命令
-            if (term.hasSelection()) event.stopPropagation();
-            return;
-          }
-          if (key === 'v') {
-            event.stopPropagation();
-            return;
-          }
-        }
+        // Windows / Linux 的 Ctrl+C / Ctrl+V 由 attachCustomKeyEventHandler 处理，
+        // 这里不再拦截，避免与官方钩子重复
         return;
       }
       if (

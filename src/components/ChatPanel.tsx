@@ -299,6 +299,9 @@ function ChatPanel({
   const [nearBottom, setNearBottom] = useState(true);
   const activeAssistantId = useRef<number | null>(null);
   const composingRef = useRef(false);
+  // WebKit 会用「先 compositionend、后 Enter keydown」的顺序确认候选词，
+  // 需要额外标记来识别这次回车（见 textarea 的 onKeyDown）
+  const justComposedRef = useRef(false);
   const hasSentRef = useRef(false);
   const lastInsertSeqRef = useRef(0);
   const [plan, setPlan] = useState<TaskPlan | null>(null);
@@ -883,21 +886,31 @@ function ChatPanel({
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
+                if (e.key !== 'Enter' || e.shiftKey) return;
+                // 输入法组合中（候选词列表还开着）的回车只用于确认候选词，不能发送。
+                // WebKit 在「回车确认候选词」时会先派发 compositionend、再派发 Enter keydown，
+                // 此时 isComposing 已是 false，只能靠 justComposedRef 拦下这一下。
                 if (
-                  e.key === 'Enter' &&
-                  !e.shiftKey &&
-                  !e.nativeEvent.isComposing &&
-                  !composingRef.current
+                  e.nativeEvent.isComposing ||
+                  e.nativeEvent.keyCode === 229 ||
+                  composingRef.current ||
+                  justComposedRef.current
                 ) {
-                  e.preventDefault();
-                  handleSend();
+                  return;
                 }
+                e.preventDefault();
+                handleSend();
               }}
               onCompositionStart={() => {
                 composingRef.current = true;
               }}
               onCompositionEnd={() => {
                 composingRef.current = false;
+                // 标记「刚刚结束一次组合」，在下一个事件循环前拦掉紧随其后的确认回车
+                justComposedRef.current = true;
+                window.setTimeout(() => {
+                  justComposedRef.current = false;
+                }, 0);
               }}
               placeholder={providerConfigured ? '给 AI 下达指令…' : '请先配置 AI 平台'}
               rows={2}
