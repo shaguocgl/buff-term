@@ -23,13 +23,19 @@ import {
 } from '../api';
 import { copyToClipboard } from '../utils/clipboard';
 import { fmtError } from '../utils/errors';
+import { baseName } from '../utils/remote';
 import type { AiModel, ContextUsage, HistoryEntry, TaskPlan } from '../types';
 import Select, { type SelectOption } from './Select';
+import RemoteFilePicker from './RemoteFilePicker';
 import {
+  FileIcon,
+  PlusIcon,
   RefreshIcon,
   SendIcon,
+  ShieldIcon,
   SparklesIcon,
   StopIcon,
+  TerminalIcon,
   XIcon,
 } from './Icons';
 import ReactMarkdown from 'react-markdown';
@@ -69,6 +75,10 @@ interface Props {
   panelWidth?: number;
   /** 面板隐藏时保持挂载（不中断运行中的 AI 会话），仅隐藏显示 */
   hidden?: boolean;
+  /** 由终端「问 AI」传入的选中文本，seq 用于区分重复内容 */
+  insertText?: { text: string; seq: number } | null;
+  /** 消费完 insertText 后回调，避免切换标签后重复插入 */
+  onInsertConsumed?: () => void;
   onOpenConfig: () => void;
   onModelSwitched: () => void;
   onClose: () => void;
@@ -92,6 +102,20 @@ function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${Math.round(n / 1000)}k`;
   return String(n);
+}
+
+// 上下文圆环：半径 15（viewBox 36），用于把百分比换算成 dash 长度
+const RING_R = 15;
+const RING_C = 2 * Math.PI * RING_R;
+
+// 引用卡片预览取第一行非空文本
+function refPreview(text: string): string {
+  const line = text.split('\n').find((l) => l.trim());
+  return (line ?? text).trim();
+}
+
+function refLineCount(text: string): number {
+  return text.split('\n').length;
 }
 
 // 非命令类工具把参数翻成人话，避免直接展示 JSON
@@ -257,6 +281,8 @@ export default function ChatPanel({
   providerId,
   panelWidth = 384,
   hidden = false,
+  insertText = null,
+  onInsertConsumed,
   onOpenConfig,
   onModelSwitched,
   onClose,
@@ -270,13 +296,21 @@ export default function ChatPanel({
       'smart',
   );
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const [nearBottom, setNearBottom] = useState(true);
   const activeAssistantId = useRef<number | null>(null);
   const composingRef = useRef(false);
   const hasSentRef = useRef(false);
+  const lastInsertSeqRef = useRef(0);
   const [plan, setPlan] = useState<TaskPlan | null>(null);
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
   const [planExpanded, setPlanExpanded] = useState(true);
+  // 待发送的引用卡片：text = 终端选中内容，file = 服务器文件路径
+  const [references, setReferences] = useState<
+    { id: number; kind: 'text' | 'file'; text: string }[]
+  >([]);
+  const refSeqRef = useRef(0);
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -303,10 +337,16 @@ export default function ChatPanel({
   const currentWindow = currentModel?.context_window ?? 0;
   const displayWindow = contextUsage?.window_tokens ?? currentWindow;
   const displayUsed = contextUsage?.used_tokens ?? 0;
-  const displayBudget =
-    contextUsage?.budget_tokens ?? Math.round(currentWindow * 0.7);
   const windowPct =
     displayWindow > 0 ? (displayUsed / displayWindow) * 100 : 0;
+  const ringDash = RING_C * Math.min(1, windowPct / 100);
+  const ringTone = contextUsage?.warning
+    ? ' warn'
+    : windowPct > 70
+    ? ' danger'
+    : windowPct >= 50
+    ? ' warn'
+    : '';
 
   const handleModelChange = async (modelId: string) => {
     if (!providerId || !modelId) return;
@@ -400,6 +440,28 @@ export default function ChatPanel({
       cancelled = true;
     };
   }, [hostId, sessionId, currentWindow, currentModel?.model]);
+
+  // 终端「问 AI」：把选中内容作为一条引用卡片挂到输入框上方，
+  // 并把焦点移到输入框，方便用户接着补充问题。
+  useEffect(() => {
+    if (!insertText || insertText.seq === lastInsertSeqRef.current) return;
+    lastInsertSeqRef.current = insertText.seq;
+    setReferences((prev) => [
+      ...prev,
+      { id: ++refSeqRef.current, kind: 'text', text: insertText.text },
+    ]);
+    onInsertConsumed?.();
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, [insertText, onInsertConsumed]);
+
+  const addFileReference = useCallback((path: string) => {
+    setReferences((prev) =>
+      prev.some((r) => r.kind === 'file' && r.text === path)
+        ? prev
+        : [...prev, { id: ++refSeqRef.current, kind: 'file', text: path }],
+    );
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -503,11 +565,28 @@ export default function ChatPanel({
 
   const handleSend = () => {
     const text = input.trim();
-    if (!text || busy || !providerConfigured) return;
+    const refs = references;
+    if ((!text && refs.length === 0) || busy || !providerConfigured) return;
+    // 引用统一放在问题之后：文件引用给出路径（交由模型用 read_file 读取），
+    // 终端引用用代码块包裹
+    const refBlock = refs.length
+      ? refs
+          .map((r) =>
+            r.kind === 'file'
+              ? `会话引用的文件：${r.text}`
+              : `\`\`\`\n${r.text}\n\`\`\``,
+          )
+          .join('\n\n')
+      : '';
+    const payload = text
+      ? refBlock
+        ? `${text}\n\n${refBlock}`
+        : text
+      : refBlock;
     const userMsg: ChatMsg = {
       id: nextChatMessageId(),
       role: 'user',
-      content: text,
+      content: payload,
       tools: [],
     };
     const assistantMsg: ChatMsg = {
@@ -520,8 +599,9 @@ export default function ChatPanel({
     hasSentRef.current = true;
     setMessages((prev) => [...prev, userMsg, assistantMsg]);
     setInput('');
+    setReferences([]);
     setBusy(true);
-    agentChat(sessionId, text, permissionMode).catch((err) => {
+    agentChat(sessionId, payload, permissionMode).catch((err) => {
       updateLastAssistant((m) => ({ ...m, error: fmtError(err) }));
       setBusy(false);
     });
@@ -612,6 +692,7 @@ export default function ChatPanel({
               setBusy(false);
               setPlan(null);
               setContextUsage(null);
+              setReferences([]);
             }}
           >
             <RefreshIcon size={15} />
@@ -709,19 +790,16 @@ export default function ChatPanel({
             <div key={msg.id} className={`msg msg-${msg.role}`}>
               <div className="msg-bubble">
                 {msg.tools.map(renderTool)}
-                {msg.content &&
-                  (msg.role === 'assistant' ? (
-                    <div className="md-content">
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        components={{ pre: MarkdownPre }}
-                      >
-                        {msg.content}
-                      </ReactMarkdown>
-                    </div>
-                  ) : (
-                    <div className="msg-content">{msg.content}</div>
-                  ))}
+                {msg.content && (
+                  <div className="md-content">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{ pre: MarkdownPre }}
+                    >
+                      {msg.content}
+                    </ReactMarkdown>
+                  </div>
+                )}
                 {msg.error && <div className="msg-error">{msg.error}</div>}
               </div>
             </div>
@@ -756,127 +834,209 @@ export default function ChatPanel({
             </button>
           </div>
         )}
-        {(contextUsage || currentWindow > 0) && (
-          <div
-            className="context-usage"
-            title={
-              contextUsage
-                ? `模型窗口 ${formatTokens(displayWindow)} tokens；本次发送约 ${formatTokens(contextUsage.used_tokens)} tokens；输入预算 ${formatTokens(displayBudget)} tokens（预留 30% 给输出与安全余量）；${
-                    contextUsage.estimated
-                      ? contextUsage.calibrated
-                        ? '用量为本地估算，已用平台实测值校准'
-                        : '用量为本地估算（平台未返回 usage）'
-                      : '用量为平台返回的实测值（usage）'
-                  }`
-                : `模型窗口 ${formatTokens(currentWindow)} tokens；输入预算 ${formatTokens(displayBudget)} tokens（预留 30% 给输出与安全余量）；正在按当前历史估算用量`
-            }
-          >
-            <div className="context-usage-bar">
-              <span
-                className={`context-usage-fill${
-                  windowPct > 70 ? ' danger' : windowPct >= 50 ? ' warn' : ''
-                }`}
-                style={{ width: `${Math.min(100, windowPct)}%` }}
-              />
-            </div>
-            <div className="context-usage-text">
-              {contextUsage ? (
-                <>
-                  上下文 {formatTokens(contextUsage.used_tokens)} /{' '}
-                  {formatTokens(contextUsage.window_tokens)} · 输入预算{' '}
-                  {formatTokens(contextUsage.budget_tokens)}
-                  {contextUsage.estimated
-                    ? contextUsage.calibrated
-                      ? '（估算·已校准）'
-                      : '（估算）'
-                    : '（实测）'}
-                  {contextUsage.compressed_rounds > 0
-                    ? ` · 已压缩 ${contextUsage.compressed_rounds} 轮`
-                    : ''}
-                </>
-              ) : (
-                <>
-                  模型窗口 {formatTokens(currentWindow)} · 输入预算{' '}
-                  {formatTokens(displayBudget)}（正在估算当前历史…）
-                </>
-              )}
-            </div>
-            {contextUsage?.warning && (
-              <div className="context-usage-warning">{contextUsage.warning}</div>
-            )}
+        {references.length > 0 && (
+          <div className="chat-refs">
+            {references.map((ref) => (
+              <div className="chat-ref" key={ref.id}>
+                <span
+                  className={`chat-ref-icon${ref.kind === 'file' ? ' file' : ''}`}
+                >
+                  {ref.kind === 'file' ? (
+                    <FileIcon size={14} />
+                  ) : (
+                    <TerminalIcon size={14} />
+                  )}
+                </span>
+                <div className="chat-ref-main">
+                  <div className="chat-ref-title">
+                    {ref.kind === 'file' ? baseName(ref.text) : refPreview(ref.text)}
+                  </div>
+                  <div className="chat-ref-sub">
+                    {ref.kind === 'file'
+                      ? `服务器文件 · ${ref.text}`
+                      : `选中的终端内容 · ${refLineCount(ref.text)} 行`}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="chat-ref-remove"
+                  title="移除引用"
+                  onClick={() =>
+                    setReferences((prev) => prev.filter((r) => r.id !== ref.id))
+                  }
+                >
+                  <XIcon size={13} />
+                </button>
+                <div className="chat-ref-popover">
+                  <pre>{ref.text}</pre>
+                </div>
+              </div>
+            ))}
           </div>
         )}
-        <div className="chat-controls">
-          <div className={`chat-control permission-${permissionMode}`}>
-            <span className="chat-control-label">
-              安全级别
-              {permissionMode === 'smart' && (
-                <em className="permission-recommend">推荐</em>
-              )}
-            </span>
-            <Select
-              className="select-up"
-              value={permissionMode}
-              options={PERMISSION_OPTIONS}
-              onChange={changePermissionMode}
-              ariaLabel="安全级别"
+        <div className="chat-input-row">
+          <div className="chat-input-box">
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (
+                  e.key === 'Enter' &&
+                  !e.shiftKey &&
+                  !e.nativeEvent.isComposing &&
+                  !composingRef.current
+                ) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+              onCompositionStart={() => {
+                composingRef.current = true;
+              }}
+              onCompositionEnd={() => {
+                composingRef.current = false;
+              }}
+              placeholder={providerConfigured ? '给 AI 下达指令…' : '请先配置 AI 平台'}
+              rows={2}
+              disabled={!providerConfigured}
             />
+            {providerConfigured && !input && (
+              <span className="chat-input-hint">
+                Enter 发送 · Shift+Enter 换行
+              </span>
+            )}
+            {busy ? (
+              <button
+                className="icon-btn stop"
+                title="停止"
+                onClick={() => {
+                  setBusy(false);
+                  agentCancel(sessionId).catch(() => {});
+                }}
+              >
+                <StopIcon size={16} />
+              </button>
+            ) : (
+              <button
+                className="icon-btn send"
+                title="发送"
+                onClick={handleSend}
+                disabled={
+                  !providerConfigured ||
+                  (!input.trim() && references.length === 0)
+                }
+              >
+                <SendIcon size={16} />
+              </button>
+            )}
           </div>
-          {models.length > 0 && providerId && (
-            <div className="chat-control chat-control-model">
-              <span className="chat-control-label">模型</span>
+        </div>
+        <div className="chat-bottom-bar">
+          <div className="chat-bottom-left">
+            <button
+              type="button"
+              className="icon-btn chat-attach-btn"
+              title="引用服务器文件"
+              onClick={() => setPickerOpen(true)}
+              disabled={!providerConfigured}
+            >
+              <PlusIcon size={16} />
+            </button>
+            <div
+              className={`chat-control chat-control-permission permission-${permissionMode}`}
+              title={`安全级别（当前：${
+                PERMISSION_OPTIONS.find((o) => o.value === permissionMode)?.label
+              }）`}
+            >
               <Select
                 className="select-up"
-                value={currentModelId ?? ''}
-                options={models.map((m) => ({ value: m.id, label: m.label }))}
-                onChange={handleModelChange}
-                ariaLabel="模型"
+                value={permissionMode}
+                options={PERMISSION_OPTIONS}
+                onChange={changePermissionMode}
+                ariaLabel="安全级别"
+                icon={<ShieldIcon size={13} />}
               />
             </div>
-          )}
-        </div>
-        <div className="chat-input-row">
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (
-                e.key === 'Enter' &&
-                !e.shiftKey &&
-                !e.nativeEvent.isComposing &&
-                !composingRef.current
-              ) {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-            onCompositionStart={() => {
-              composingRef.current = true;
-            }}
-            onCompositionEnd={() => {
-              composingRef.current = false;
-            }}
-            placeholder={providerConfigured ? '给 AI 下达指令…' : '请先配置 AI 平台'}
-            rows={2}
-            disabled={!providerConfigured}
-          />
-          {busy ? (
-            <button className="icon-btn stop" title="停止" onClick={() => {
-              setBusy(false);
-              agentCancel(sessionId).catch(() => {});
-            }}>
-              <StopIcon size={16} />
-            </button>
-          ) : (
-            <button
-              className="icon-btn send"
-              title="发送"
-              onClick={handleSend}
-              disabled={!providerConfigured || !input.trim()}
-            >
-              <SendIcon size={16} />
-            </button>
-          )}
+            {models.length > 0 && providerId && (
+              <div className="chat-control chat-control-model" title="模型">
+                <Select
+                  className="select-up"
+                  value={currentModelId ?? ''}
+                  options={models.map((m) => ({ value: m.id, label: m.label }))}
+                  onChange={handleModelChange}
+                  ariaLabel="模型"
+                />
+              </div>
+            )}
+          </div>
+          <div className="chat-bottom-right">
+            {(contextUsage || currentWindow > 0) && (
+              <div className={`context-ring${ringTone}`} tabIndex={0}>
+                <svg className="context-ring-svg" viewBox="0 0 36 36">
+                  <circle className="context-ring-track" cx="18" cy="18" r={RING_R} />
+                  <circle
+                    className="context-ring-fill"
+                    cx="18"
+                    cy="18"
+                    r={RING_R}
+                    strokeDasharray={`${ringDash} ${RING_C}`}
+                    transform="rotate(-90 18 18)"
+                  />
+                </svg>
+                <span className="context-ring-pct">{Math.round(windowPct)}%</span>
+                <div className="context-ring-popover">
+                  {contextUsage ? (
+                    <>
+                      <div className="context-ring-row">
+                        <span>上下文用量</span>
+                        <strong>
+                          {formatTokens(contextUsage.used_tokens)} /{' '}
+                          {formatTokens(contextUsage.window_tokens)}
+                        </strong>
+                      </div>
+                      <div className="context-ring-row">
+                        <span>模型窗口</span>
+                        <strong>{formatTokens(displayWindow)}</strong>
+                      </div>
+                      <div className="context-ring-row">
+                        <span>用量来源</span>
+                        <strong>
+                          {contextUsage.estimated
+                            ? contextUsage.calibrated
+                              ? '估算 · 已校准'
+                              : '本地估算'
+                            : '平台实测'}
+                        </strong>
+                      </div>
+                      {contextUsage.compressed_rounds > 0 && (
+                        <div className="context-ring-row">
+                          <span>已压缩</span>
+                          <strong>{contextUsage.compressed_rounds} 轮</strong>
+                        </div>
+                      )}
+                      {contextUsage.warning && (
+                        <div className="context-ring-warning">
+                          {contextUsage.warning}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <div className="context-ring-row">
+                        <span>模型窗口</span>
+                        <strong>{formatTokens(currentWindow)}</strong>
+                      </div>
+                      <div className="context-ring-row">
+                        <span>状态</span>
+                        <strong>正在估算当前历史…</strong>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
         <p className={`chat-tip tip-${permissionMode}`}>
           {permissionMode === 'all' &&
@@ -885,9 +1045,18 @@ export default function ChatPanel({
             '安全级别：智能审核 · 写/危险命令需批准，只读命令自动执行'}
           {permissionMode === 'none' &&
             '安全级别：全部放行 · 命令直接执行，请谨慎使用'}
-          {' · Enter 发送 / Shift+Enter 换行'}
         </p>
       </div>
+      {pickerOpen && (
+        <RemoteFilePicker
+          hostId={hostId}
+          selectedPaths={references
+            .filter((r) => r.kind === 'file')
+            .map((r) => r.text)}
+          onSelect={addFileReference}
+          onClose={() => setPickerOpen(false)}
+        />
+      )}
     </aside>
   );
 }

@@ -14,6 +14,7 @@ import {
 import type { SftpProgressPayload } from '../api';
 import type { Host, SftpEntry } from '../types';
 import { fmtError } from '../utils/errors';
+import { baseName, formatBytes, formatMtime, joinPath } from '../utils/remote';
 import ConfirmModal from './ConfirmModal';
 import PromptModal from './PromptModal';
 import {
@@ -33,29 +34,6 @@ interface Props {
   /** 面板隐藏时保持挂载（传输任务继续），仅隐藏显示 */
   hidden?: boolean;
   onClose: () => void;
-}
-
-function joinPath(dir: string, name: string) {
-  if (dir === '/' || dir === '') return `/${name}`;
-  return `${dir.replace(/\/+$/, '')}/${name}`;
-}
-
-function baseName(p: string) {
-  const parts = p.split(/[\\/]/);
-  return parts[parts.length - 1] || p;
-}
-
-function formatBytes(n: number): string {
-  if (n >= 1024 * 1024 * 1024) return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
-  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
-  return `${n} B`;
-}
-
-function formatMtime(secs: number): string {
-  const d = new Date(secs * 1000);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 interface Transfer {

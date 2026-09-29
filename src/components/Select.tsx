@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { KeyboardEvent } from 'react';
+import type { KeyboardEvent, ReactNode } from 'react';
 import { CheckIcon, ChevronDownIcon } from './Icons';
 
 export interface SelectOption<T extends string> {
@@ -13,6 +13,8 @@ interface SelectProps<T extends string> {
   onChange: (value: T) => void;
   className?: string;
   ariaLabel?: string;
+  /** 显示在选中文字前面的图标 */
+  icon?: ReactNode;
 }
 
 export default function Select<T extends string>({
@@ -21,6 +23,7 @@ export default function Select<T extends string>({
   onChange,
   className,
   ariaLabel,
+  icon,
 }: SelectProps<T>) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -94,7 +97,10 @@ export default function Select<T extends string>({
         aria-expanded={open}
         aria-label={ariaLabel}
       >
-        <span className="select-label">{selected?.label ?? value}</span>
+        <span className="select-label">
+          {icon && <span className="select-icon">{icon}</span>}
+          <span className="select-text">{selected?.label ?? value}</span>
+        </span>
         <ChevronDownIcon size={14} />
       </button>
       {open && (

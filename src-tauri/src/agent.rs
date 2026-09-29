@@ -474,7 +474,8 @@ async fn run_agent_loop(
         let mut include_usage = !agents.usage_unsupported(&calibration_key);
         let mut usage_param_retried = false;
         let mut last_usage: ContextUsage;
-        let mut last_raw_estimate = 0usize;
+        // 循环内每次请求前都会赋值，循环退出时必然已初始化
+        let mut last_raw_estimate: usize;
         // 发送前构建视图；平台报上下文超限时按 50% 窗口重试一次。
         let resp = loop {
             let view = match build_context_view(

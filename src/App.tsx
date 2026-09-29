@@ -214,6 +214,22 @@ function App() {
     applyPanel(readSavedPanel());
   }, [applyPanel]);
 
+  // 终端「问 AI」：把选中文本交给当前标签的 AI 面板，并确保 AI 面板已展开。
+  // seq 递增用于区分相同内容的重复插入。
+  const chatInsertSeq = useRef(0);
+  const [chatInsert, setChatInsert] = useState<{ text: string; seq: number } | null>(
+    null,
+  );
+  const handleAddToChat = useCallback(
+    (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      applyPanel('chat');
+      setChatInsert({ text: trimmed, seq: ++chatInsertSeq.current });
+    },
+    [applyPanel],
+  );
+
   useEffect(() => {
     refresh().catch((e) => showToast('error', fmtError(e)));
     refreshAi().catch(() => {});
@@ -1040,6 +1056,7 @@ function App() {
                       );
                     }}
                     onDisconnect={(key) => closeTab(key)}
+                    onAddToChat={handleAddToChat}
                   />
                 </div>
               ))}
@@ -1062,6 +1079,8 @@ function App() {
                   hostName={activeTab.title}
                   panelWidth={rightPanelWidth}
                   hidden={!chatOpen}
+                  insertText={chatInsert}
+                  onInsertConsumed={() => setChatInsert(null)}
                   providerLabel={
                     activeProvider
                       ? `${activeProvider.name} · ${activeModelLabel}`

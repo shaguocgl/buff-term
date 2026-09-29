@@ -3039,6 +3039,18 @@ input::placeholder {
   color: var(--accent-2);
 }
 
+/* 用户气泡是彩色渐变，代码块改用半透明深底，避免浅色主题下白字看不清 */
+.msg-user .md-content code {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.msg-user .md-content pre,
+.msg-user .md-content pre code {
+  background: rgba(0, 0, 0, 0.24);
+  border-color: rgba(255, 255, 255, 0.22);
+  color: #fff;
+}
+
 .msg-assistant .msg-bubble {
   background: var(--panel-2);
   border: 1px solid var(--border);
@@ -3207,6 +3219,30 @@ input::placeholder {
   gap: 8px;
 }
 
+/* 发送/停止按钮叠放在输入框内右下角 */
+.chat-input-box {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+
+.chat-input-box > .icon-btn {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+}
+
+/* 输入框内的快捷键提示（空输入时显示，不遮挡输入） */
+.chat-input-hint {
+  position: absolute;
+  left: 12px;
+  bottom: 7px;
+  font-size: 10.5px;
+  color: var(--faint);
+  pointer-events: none;
+}
+
 .chat-input-row textarea {
   flex: 1;
   resize: none;
@@ -3217,7 +3253,8 @@ input::placeholder {
   font-family: inherit;
   font-size: 13.5px;
   line-height: 1.5;
-  padding: 9px 11px;
+  /* 右侧留出叠放发送按钮的空间 */
+  padding: 9px 44px 9px 11px;
   outline: none;
 }
 
@@ -3271,13 +3308,265 @@ input::placeholder {
   color: var(--warn);
 }
 
-.chat-controls {
+/* 底部工具条：安全级别 / 模型 / 上下文圆环 / 发送 */
+
+.chat-bottom-bar {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
 }
 
-.chat-controls .chat-control:first-child {
-  flex: 0 0 132px;
+.chat-bottom-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-bottom-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.chat-bottom-bar .chat-control {
+  min-width: 0;
+}
+
+/* 安全级别固定为约 5 个汉字的宽度，模型固定宽度，避免随面板拉伸/内容变化而抖动 */
+.chat-bottom-bar .chat-control-permission {
+  flex: 0 0 auto;
+  width: 126px;
+}
+
+.chat-bottom-bar .chat-control-model {
+  flex: 0 1 auto;
+  width: 140px;
+  min-width: 0;
+}
+
+.chat-bottom-bar .select-btn {
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 999px;
+  background: transparent;
+  border-color: transparent;
+  gap: 5px;
+}
+
+.chat-bottom-bar .select-btn:hover {
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+
+/* 底部下拉展开时按内容自适应宽度，保证候选项完整显示（不窄于按钮） */
+.chat-bottom-bar .select-menu {
+  right: auto;
+  width: max-content;
+  min-width: 100%;
+  max-width: 300px;
+}
+
+/* 终端引用卡片（挂在输入框上方） */
+
+.chat-refs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-ref {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 8px 7px 9px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.chat-ref:hover {
+  z-index: 2;
+}
+
+.chat-ref-icon {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  color: var(--accent-ai);
+  background: rgba(167, 139, 250, 0.12);
+  border: 1px solid rgba(167, 139, 250, 0.28);
+}
+
+/* 文件引用用蓝色区分于终端内容引用 */
+.chat-ref-icon.file {
+  color: var(--accent-2);
+  background: rgba(109, 141, 255, 0.12);
+  border-color: rgba(109, 141, 255, 0.28);
+}
+
+.chat-ref-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.chat-ref-title {
+  font-size: 12.5px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-ref-sub {
+  font-size: 10.5px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-ref-remove {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.chat-ref-remove:hover {
+  color: var(--danger);
+  background: rgba(248, 113, 113, 0.1);
+}
+
+.chat-ref-popover {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 60;
+  display: none;
+  padding: 9px 10px;
+  background: var(--panel-3);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+}
+
+.chat-ref:hover .chat-ref-popover {
+  display: block;
+}
+
+.chat-ref-popover pre {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---------- 远端文件选择弹窗 ---------- */
+
+.modal-filepicker {
+  width: 560px;
+  display: flex;
+  flex-direction: column;
+  /* 覆盖 .modal 的外层滚动，改由列表区域内部滚动 */
+  overflow: hidden;
+  max-height: calc(100vh - 96px);
+}
+
+.filepicker-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 22px 10px;
+}
+
+.filepicker-path {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--panel-3);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  outline: none;
+}
+
+.filepicker-path:focus {
+  border-color: var(--accent);
+}
+
+.filepicker-body {
+  flex: 1;
+  min-height: 180px;
+  max-height: 46vh;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.filepicker-body .sftp-row {
+  cursor: pointer;
+}
+
+.filepicker-body .sftp-row:hover {
+  background: var(--panel-3);
+}
+
+/* 选中行（对应文件） */
+.sftp-row.active {
+  background: rgba(167, 139, 250, 0.12);
+  box-shadow: inset 2px 0 0 var(--accent-ai);
+}
+
+.filepicker-badge {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  color: var(--accent-ai);
+  background: rgba(167, 139, 250, 0.14);
+}
+
+.filepicker-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 22px 18px;
+}
+
+.filepicker-picked {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-control {
@@ -3330,20 +3619,31 @@ input::placeholder {
   vertical-align: 1px;
 }
 
+/* 安全级别默认无边框，仅用文字颜色区分；悬停时才显示对应颜色的边线 */
 .chat-control.permission-smart .select-btn {
-  border-color: rgba(167, 139, 250, 0.55);
-  background: rgba(167, 139, 250, 0.08);
   color: var(--accent-ai);
   font-weight: 600;
 }
 
 .chat-control.permission-all .select-btn {
-  border-color: rgba(109, 141, 255, 0.4);
+  color: var(--text);
 }
 
 .chat-control.permission-none .select-btn {
-  border-color: rgba(251, 191, 36, 0.45);
   color: var(--warn);
+}
+
+.chat-control.permission-smart .select-btn:hover {
+  border-color: rgba(167, 139, 250, 0.55);
+  background: rgba(167, 139, 250, 0.08);
+}
+
+.chat-control.permission-all .select-btn:hover {
+  border-color: rgba(109, 141, 255, 0.4);
+}
+
+.chat-control.permission-none .select-btn:hover {
+  border-color: rgba(251, 191, 36, 0.45);
 }
 
 /* ============ 自定义下拉框 ============ */
@@ -3385,18 +3685,33 @@ input::placeholder {
 }
 
 .select-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.select-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+}
+
+.select-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.select-btn svg {
+/* 仅作用于右侧箭头，避免覆盖 label 内的自定义图标颜色 */
+.select-btn > svg {
   flex: none;
   color: var(--muted);
   transition: transform 0.15s;
 }
 
-.select-btn.open svg {
+.select-btn.open > svg {
   transform: rotate(180deg);
   color: var(--accent-ai-strong);
 }
@@ -3437,6 +3752,13 @@ input::placeholder {
   border-radius: 7px;
   cursor: pointer;
   text-align: left;
+}
+
+/* 选项文字不换行，超长省略，避免被勾选图标挤到换行 */
+.select-option > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .select-option:hover {
@@ -3715,42 +4037,112 @@ input::placeholder {
   color: var(--danger);
 }
 
-.context-usage {
+/* 上下文用量圆环：hover / 聚焦时弹出明细 */
+
+.context-ring {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  outline: none;
+}
+
+.context-ring-svg {
+  width: 26px;
+  height: 26px;
+  flex: none;
+}
+
+.context-ring-track {
+  fill: none;
+  stroke: var(--panel-3);
+  stroke-width: 3;
+}
+
+.context-ring-fill {
+  fill: none;
+  stroke: var(--success);
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition:
+    stroke-dasharray 0.25s ease,
+    stroke 0.2s ease;
+}
+
+.context-ring.warn .context-ring-fill {
+  stroke: var(--warn);
+}
+
+.context-ring.danger .context-ring-fill {
+  stroke: var(--danger);
+}
+
+.context-ring-pct {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.context-ring.warn .context-ring-pct {
+  color: var(--warn);
+}
+
+.context-ring.danger .context-ring-pct {
+  color: var(--danger);
+}
+
+.context-ring-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 60;
+  min-width: 190px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-}
-
-.context-usage-bar {
-  height: 4px;
-  border-radius: 999px;
+  gap: 5px;
+  padding: 9px 11px;
   background: var(--panel-3);
-  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(4px);
+  transition:
+    opacity 0.14s ease,
+    transform 0.14s ease,
+    visibility 0.14s;
+  pointer-events: none;
 }
 
-.context-usage-fill {
-  display: block;
-  height: 100%;
-  background: var(--success);
-  transition: width 0.2s ease;
+.context-ring:hover .context-ring-popover,
+.context-ring:focus-within .context-ring-popover {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
 }
 
-.context-usage-fill.warn {
-  background: var(--warn);
+.context-ring-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
 }
 
-.context-usage-fill.danger {
-  background: var(--danger);
+.context-ring-row strong {
+  color: var(--text);
+  font-weight: 600;
 }
 
-.context-usage-text {
-  font-size: 10.5px;
-  color: var(--faint);
-}
-
-.context-usage-warning {
+.context-ring-warning {
   font-size: 10.5px;
   color: var(--warn);
+  white-space: normal;
 }
 
 .model-default-window {
@@ -5210,6 +5602,32 @@ input::placeholder {
   width: 22px;
   height: 22px;
   flex: none;
+}
+
+/* ---------- 终端选中文本后的「问 AI」浮层 ---------- */
+
+.terminal-selection-action {
+  position: absolute;
+  z-index: 6;
+  transform: translate(-50%, calc(-100% - 8px));
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow-lg);
+  cursor: pointer;
+}
+
+.terminal-selection-action:hover {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 /* 断线自动重连开关（重连按钮旁，仅会话结束后显示） */

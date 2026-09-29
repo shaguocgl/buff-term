@@ -48,6 +48,8 @@ interface Props {
   onFailed: (tabKey: number, message: string) => void;
   onExited: (tabKey: number) => void;
   onDisconnect: (tabKey: number) => void;
+  /** 把终端中选中的文本加入 AI 会话提问 */
+  onAddToChat: (text: string) => void;
 }
 
 const TERMINAL_THEMES = {
@@ -186,6 +188,7 @@ export default function TerminalView({
   onFailed,
   onExited,
   onDisconnect,
+  onAddToChat,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sessionIdRef = useRef<number | null>(null);
@@ -200,10 +203,17 @@ export default function TerminalView({
   const onFailedRef = useRef(onFailed);
   const onExitedRef = useRef(onExited);
   const onDisconnectRef = useRef(onDisconnect);
+  const onAddToChatRef = useRef(onAddToChat);
   const zoomRef = useRef<(delta: number) => void>(() => {});
   const [connecting, setConnecting] = useState(true);
   const [exited, setExited] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  // 终端选中文本后浮出的「问 AI」按钮：记录文本与相对终端容器的坐标
+  const [selectionAction, setSelectionAction] = useState<{
+    text: string;
+    x: number;
+    y: number;
+  } | null>(null);
   const [fontSize, setFontSize] = useState(() => {
     const parsed = parseInt(
       localStorage.getItem(TERMINAL_FONT_KEY) || '14',
@@ -228,6 +238,7 @@ export default function TerminalView({
   onFailedRef.current = onFailed;
   onExitedRef.current = onExited;
   onDisconnectRef.current = onDisconnect;
+  onAddToChatRef.current = onAddToChat;
 
   // 字号缩放：Cmd/Ctrl + = / - / 0，持久化到 localStorage
   const changeFontSize = useCallback((delta: number) => {
@@ -569,6 +580,37 @@ export default function TerminalView({
     });
     term.onResize(applyDims);
 
+    // 终端内选中文本后，在鼠标松开位置浮出「问 AI」按钮，把选区加入 AI 提问。
+    // 按钮挂在 .terminal-body 上（与 .xterm 同级），点击不会清掉 xterm 选区。
+    setSelectionAction(null);
+    const hideSelectionAction = () => setSelectionAction(null);
+    const selectionDisposable = term.onSelectionChange(() => {
+      if (!term.getSelection().trim()) hideSelectionAction();
+    });
+    const handleTermMouseDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('.terminal-selection-action')) return;
+      hideSelectionAction();
+    };
+    const handleTermMouseUp = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('.terminal-selection-action')) return;
+      const text = term.getSelection();
+      if (!text.trim()) {
+        hideSelectionAction();
+        return;
+      }
+      const rect = container.getBoundingClientRect();
+      // 按钮浮在松开点上方，并夹在容器内避免溢出被裁剪
+      setSelectionAction({
+        text,
+        x: Math.max(48, Math.min(rect.width - 48, event.clientX - rect.left)),
+        y: Math.max(32, event.clientY - rect.top),
+      });
+    };
+    container.addEventListener('mousedown', handleTermMouseDown, true);
+    container.addEventListener('mouseup', handleTermMouseUp);
+
     const observer = new ResizeObserver(() => {
       fit.fit();
       applyDims();
@@ -600,6 +642,9 @@ export default function TerminalView({
       container.removeEventListener('compositionstart', handleCompositionStart);
       container.removeEventListener('compositionend', handleCompositionEnd);
       container.removeEventListener('paste', handlePaste, true);
+      selectionDisposable.dispose();
+      container.removeEventListener('mousedown', handleTermMouseDown, true);
+      container.removeEventListener('mouseup', handleTermMouseUp);
       activeConnectionRequestRef.current = null;
       const sid = sessionIdRef.current;
       if (sid !== null) {
@@ -745,6 +790,22 @@ export default function TerminalView({
             searchAddon={searchAddonRef.current}
             onClose={closeSearch}
           />
+        )}
+        {selectionAction && (
+          <button
+            type="button"
+            className="terminal-selection-action"
+            style={{ left: selectionAction.x, top: selectionAction.y }}
+            title="把选中的内容加入 AI 提问"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              onAddToChatRef.current(selectionAction.text);
+              setSelectionAction(null);
+              termRef.current?.clearSelection();
+            }}
+          >
+            <SparklesIcon size={13} /> 问 AI
+          </button>
         )}
       </div>
     </div>
