@@ -15,9 +15,19 @@
 ![Agent](https://img.shields.io/badge/Agent-自研编排%20%7C%20无框架依赖-8b5cf6.svg)
 [![Website](https://img.shields.io/badge/官网-buffTerm%20Site-22d3ee.svg)](https://shaguocgl.github.io/buff-term-site/)
 
-buffTerm 是一款有 AI Agent Buff 加持的 SSH 管理工具，——内置**自研 AI Agent 编排层**，接入你选择的大模型（DeepSeek、OpenAI、通义千问、Kimi、本地 Ollama 等），用自然语言就能查询状态、排查问题、执行运维。终端高危命令拦截、AI 操作审批与审计全程兜底，所有数据只存本机。
+buffTerm 是一款有 AI Agent Buff 加持的 SSH 管理工具，——内置**自研 AI Agent 编排层**，接入任意支持open api协议的大模型（如DeepSeek、Qwen、kimi等），用自然语言就能 查询状态、排查问题、安装程序、开展运维工作。
+
+并支持将 多个主机 同时暴露为 MCP 服务，提供给其他 AI 工具调用，安全级别由你把关。高危命令拦截、AI 操作审批与审计全程兜底，所有数据只存本机。
 
 > 🤖 **Agent 编排层完全自研**：核心工具调用循环（SSE 流式解析 → 工具执行 → 结果回填）由本项目手写实现，**不依赖 LangChain / OpenAI Agents SDK / Vercel AI SDK 等框架**——审批拦截、安全策略、审计留痕全部自己掌控。
+<p align="center">
+  <img src="images/ai-agent.webp" alt="AI Agent 会话与终端" width="100%" />
+</p>
+<p align="center">
+  <a href="https://shaguocgl.github.io/buff-term-site">
+    <img src="images/desc.webp" alt="buffTerm 功能介绍（点击访问官网）" width="100%" />
+  </a>
+</p>
 
 ## 📥 下载
 
