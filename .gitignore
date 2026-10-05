@@ -24,6 +24,9 @@ src-tauri/gen
 CLAUDE.md
 .claude/
 
+# AI Agent 规范文件（仅本地保留，不纳入版本跟踪）
+AGENTS.md
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
