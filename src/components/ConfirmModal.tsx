@@ -6,9 +6,12 @@ interface Props {
   body: string;
   confirmText?: string;
   cancelText?: string;
+  /** 可选第三按钮（如批量上传冲突时的「跳过冲突项」），不传则不渲染 */
+  altText?: string;
   /** 危险操作：确认按钮显示为红色警示 */
   danger?: boolean;
   onConfirm: () => void;
+  onAlt?: () => void;
   onCancel: () => void;
 }
 
@@ -18,8 +21,10 @@ export default function ConfirmModal({
   body,
   confirmText = '确认',
   cancelText = '取消',
+  altText,
   danger = false,
   onConfirm,
+  onAlt,
   onCancel,
 }: Props) {
   // 在捕获阶段拦截 Escape：只关闭本确认框，避免连带关闭底下的父级 Modal
@@ -45,6 +50,11 @@ export default function ConfirmModal({
           >
             {confirmText}
           </button>
+          {altText && onAlt && (
+            <button className="btn ghost small" onClick={onAlt}>
+              {altText}
+            </button>
+          )}
           <button className="btn ghost small" onClick={onCancel}>
             {cancelText}
           </button>

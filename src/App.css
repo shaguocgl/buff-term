@@ -1933,6 +1933,14 @@ input::placeholder {
   background: var(--panel-2);
 }
 
+/* 批量传输时的汇总行（任务数 + 全部取消） */
+.sftp-transfers-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .sftp-transfer-head {
   display: flex;
   align-items: center;
@@ -5589,6 +5597,8 @@ input::placeholder {
   font-size: 13px;
   color: var(--text);
   line-height: 1.6;
+  /* 批量覆盖确认会按行列出冲突文件名 */
+  white-space: pre-line;
 }
 
 .confirm-field {

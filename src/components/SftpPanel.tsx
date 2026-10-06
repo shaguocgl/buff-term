@@ -43,6 +43,58 @@ interface Transfer {
   total: number;
 }
 
+/** 待上传的本地文件与其远端目标路径 */
+interface UploadItem {
+  local: string;
+  remote: string;
+}
+
+/** 批量上传并发上限：避免一次性打开过多 SFTP 通道把连接打满 */
+const UPLOAD_CONCURRENCY = 3;
+
+/** 覆盖确认弹窗里最多列出的冲突文件名 */
+const CONFLICT_PREVIEW = 8;
+
+/** 限流并发映射：最多同时执行 limit 个任务，按原顺序返回结果 */
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  task: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    for (let i = next++; i < items.length; i = next++) {
+      results[i] = await task(items[i]);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, worker),
+  );
+  return results;
+}
+
+/** 覆盖确认弹窗文案：单个冲突保持原有措辞，多个冲突列出清单 */
+function overwriteBody({
+  conflicts,
+  rest,
+}: {
+  conflicts: UploadItem[];
+  rest: UploadItem[];
+}): string {
+  if (conflicts.length === 1 && rest.length === 0) {
+    return `远端已存在 "${baseName(conflicts[0].remote)}"，覆盖它吗？`;
+  }
+  const names = conflicts
+    .slice(0, CONFLICT_PREVIEW)
+    .map((c) => `· ${baseName(c.remote)}`);
+  const more = conflicts.length - names.length;
+  const lines = [`以下 ${conflicts.length} 个文件在远端已存在：`, ...names];
+  if (more > 0) lines.push(`· 还有 ${more} 个未列出`);
+  if (rest.length > 0) lines.push('', `其余 ${rest.length} 个文件将直接上传。`);
+  return lines.join('\n');
+}
+
 function SftpPanel({ host, hidden = false, onClose }: Props) {
   const [cwd, setCwd] = useState('/');
   const [entries, setEntries] = useState<SftpEntry[]>([]);
@@ -55,13 +107,20 @@ function SftpPanel({ host, hidden = false, onClose }: Props) {
   >(null);
   // 传输任务独立于 busy：传输期间不锁定浏览/刷新
   const [transfers, setTransfers] = useState<Record<string, Transfer>>({});
-  const [overwriteTarget, setOverwriteTarget] = useState<{
-    local: string;
-    remote: string;
+  // 批量上传的覆盖确认：conflicts 为远端已存在的目标，rest 为可直接上传的目标
+  const [overwriteBatch, setOverwriteBatch] = useState<{
+    conflicts: UploadItem[];
+    rest: UploadItem[];
   } | null>(null);
   const [pathInput, setPathInput] = useState('/');
   // 目录请求序号：快速连续切换目录时忽略过期响应，避免旧目录覆盖新目录
   const loadSeqRef = useRef(0);
+  // 当前目录的最新值：批量上传结束时据此判断用户是否还停留在目标目录
+  const cwdRef = useRef(cwd);
+
+  useEffect(() => {
+    cwdRef.current = cwd;
+  }, [cwd]);
 
   // 跟随后端 sftp:progress 事件刷新进度条
   useEffect(() => {
@@ -135,30 +194,29 @@ function SftpPanel({ host, hidden = false, onClose }: Props) {
     }
   };
 
-  // 启动一个传输任务：不经过 run()（不置 busy），进度走 sftp:progress 事件
+  // 启动一个传输任务：不经过 run()（不置 busy），进度走 sftp:progress 事件。
+  // 返回失败原因（成功或用户取消返回 null），由调用方决定如何提示。
   const startTransfer = async (
     kind: 'upload' | 'download',
     local: string,
     remote: string,
-  ) => {
+  ): Promise<string | null> => {
     const id = `t-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const name = kind === 'upload' ? baseName(local) : baseName(remote);
     setTransfers((prev) => ({
       ...prev,
       [id]: { id, name, kind, transferred: 0, total: 0 },
     }));
-    setError(null);
     try {
       const res =
         kind === 'upload'
           ? await sftpUpload(host.id, local, remote, id)
           : await sftpDownload(host.id, remote, local, id);
-      if (!res.ok) setError(res.text || '传输失败');
-      else if (kind === 'upload') load(cwd);
+      return res.ok ? null : res.text || '传输失败';
     } catch (e) {
       const msg = fmtError(e);
       // 用户主动取消不算错误
-      if (!msg.includes('取消')) setError(msg);
+      return msg.includes('取消') ? null : msg;
     } finally {
       setTransfers((prev) => {
         const next = { ...prev };
@@ -166,6 +224,21 @@ function SftpPanel({ host, hidden = false, onClose }: Props) {
         return next;
       });
     }
+  };
+
+  // 批量上传：按 UPLOAD_CONCURRENCY 限流并发，失败逐条累加提示，
+  // 全部结束后若用户仍在目标目录则刷新一次列表
+  const uploadMany = async (items: UploadItem[]) => {
+    const target = cwd;
+    setError(null);
+    const failures: string[] = [];
+    await mapLimit(items, UPLOAD_CONCURRENCY, async (item) => {
+      const err = await startTransfer('upload', item.local, item.remote);
+      if (!err) return;
+      failures.push(`${baseName(item.local)}：${err}`);
+      setError(`上传失败（${failures.length}）：${failures.join('；')}`);
+    });
+    if (cwdRef.current === target) load(target);
   };
 
   const cancelTransfer = async (id: string) => {
@@ -177,28 +250,38 @@ function SftpPanel({ host, hidden = false, onClose }: Props) {
   };
 
   const handleUpload = async () => {
-    const picked = await open({ multiple: false });
-    if (!picked || typeof picked !== 'string') return;
-    const remote = joinPath(cwd, baseName(picked));
-    // 上传前检查远端是否已存在，存在则弹窗确认覆盖
-    let exists = false;
-    try {
-      exists = await sftpExists(host.id, remote);
-    } catch {
-      exists = false;
-    }
-    if (exists) {
-      setOverwriteTarget({ local: picked, remote });
+    // 支持多选：一次可选中多个文件批量上传
+    const picked = await open({ multiple: true });
+    const locals = picked ? (Array.isArray(picked) ? picked : [picked]) : [];
+    if (locals.length === 0) return;
+    const items: UploadItem[] = locals.map((local) => ({
+      local,
+      remote: joinPath(cwd, baseName(local)),
+    }));
+    // 上传前并发检查远端是否已存在：无冲突直接上传，有冲突先弹窗确认覆盖
+    // （同样限流：每个检查都会独占一条 SFTP 通道）
+    const checked = await mapLimit(items, UPLOAD_CONCURRENCY, async (item) => {
+      try {
+        return { item, exists: await sftpExists(host.id, item.remote) };
+      } catch {
+        return { item, exists: false };
+      }
+    });
+    const conflicts = checked.filter((c) => c.exists).map((c) => c.item);
+    const rest = checked.filter((c) => !c.exists).map((c) => c.item);
+    if (conflicts.length > 0) {
+      setOverwriteBatch({ conflicts, rest });
       return;
     }
-    void startTransfer('upload', picked, remote);
+    void uploadMany(items);
   };
 
   const handleDownload = async (entry: SftpEntry) => {
     const dest = await save({ defaultPath: entry.name });
     if (!dest) return;
-    const remote = joinPath(cwd, entry.name);
-    void startTransfer('download', dest, remote);
+    setError(null);
+    const err = await startTransfer('download', dest, joinPath(cwd, entry.name));
+    if (err) setError(err);
   };
 
   const handleDelete = (entry: SftpEntry) => {
@@ -266,7 +349,12 @@ function SftpPanel({ host, hidden = false, onClose }: Props) {
           <button className="icon-btn" title="刷新" onClick={() => load(cwd)} disabled={busy}>
             <RefreshIcon size={14} />
           </button>
-          <button className="icon-btn" title="上传文件" onClick={handleUpload} disabled={busy}>
+          <button
+            className="icon-btn"
+            title="上传文件（可多选批量上传）"
+            onClick={handleUpload}
+            disabled={busy}
+          >
             <UploadIcon size={14} />
           </button>
           <button className="icon-btn" title="新建文件夹" onClick={handleMkdir} disabled={busy}>
@@ -280,6 +368,21 @@ function SftpPanel({ host, hidden = false, onClose }: Props) {
 
       {Object.values(transfers).length > 0 && (
         <div className="sftp-transfers">
+          {Object.values(transfers).length > 1 && (
+            <div className="sftp-transfers-head">
+              <span className="sftp-transfer-meta">
+                {Object.values(transfers).length} 个传输进行中
+              </span>
+              <button
+                className="btn ghost small"
+                onClick={() =>
+                  Object.values(transfers).forEach((t) => cancelTransfer(t.id))
+                }
+              >
+                全部取消
+              </button>
+            </div>
+          )}
           {Object.values(transfers).map((t) => {
             const pct =
               t.total > 0
@@ -379,18 +482,25 @@ function SftpPanel({ host, hidden = false, onClose }: Props) {
         )}
       </div>
 
-      {overwriteTarget && (
+      {overwriteBatch && (
         <ConfirmModal
           title="覆盖远端文件"
-          body={`远端已存在 "${baseName(overwriteTarget.remote)}"，覆盖它吗？`}
-          confirmText="覆盖"
+          body={overwriteBody(overwriteBatch)}
+          confirmText={overwriteBatch.conflicts.length > 1 ? '全部覆盖' : '覆盖'}
+          // 无冲突文件可传时「跳过冲突项」等同于取消，故不展示该按钮
+          altText={overwriteBatch.rest.length > 0 ? '跳过冲突项' : undefined}
           danger
           onConfirm={() => {
-            const t = overwriteTarget;
-            setOverwriteTarget(null);
-            void startTransfer('upload', t.local, t.remote);
+            const t = overwriteBatch;
+            setOverwriteBatch(null);
+            void uploadMany([...t.conflicts, ...t.rest]);
           }}
-          onCancel={() => setOverwriteTarget(null)}
+          onAlt={() => {
+            const t = overwriteBatch;
+            setOverwriteBatch(null);
+            void uploadMany(t.rest);
+          }}
+          onCancel={() => setOverwriteBatch(null)}
         />
       )}
       {confirmDelete && (
