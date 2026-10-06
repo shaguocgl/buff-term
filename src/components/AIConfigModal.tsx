@@ -5,10 +5,12 @@ import {
   deleteAiRule,
   deleteAiProvider,
   getAiDefaultContextWindow,
+  getAiMaxToolRounds,
   listAiProviders,
   listAiRules,
   listRemoteAiModels,
   saveAiDefaultContextWindow,
+  saveAiMaxToolRounds,
   saveAiProvider,
   testAiProvider,
 } from '../api';
@@ -24,10 +26,13 @@ import ConfirmModal from './ConfirmModal';
 import Modal from './Modal';
 import { CheckIcon, DownloadIcon, PlusIcon, SparklesIcon, TrashIcon } from './Icons';
 import Select from './Select';
+import type { ToastItem } from './Toast';
 
 interface Props {
   onClose: () => void;
   onSaved: () => void;
+  /** 全局提示：保存成功/失败后给出反馈 */
+  showToast: (kind: ToastItem['kind'], message: string) => void;
 }
 
 interface Preset {
@@ -74,12 +79,14 @@ function formFromPreset(preset: Preset): FormState {
   };
 }
 
-export default function AIConfigModal({ onClose, onSaved }: Props) {
+export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
   const [providers, setProviders] = useState<AiProvider[]>([]);
   const [rules, setRules] = useState<AiRule[]>([]);
   const [ruleInput, setRuleInput] = useState('');
   const [defaultContextWindow, setDefaultContextWindow] = useState(128000);
   const [defaultSaving, setDefaultSaving] = useState(false);
+  const [maxToolRounds, setMaxToolRounds] = useState(100);
+  const [roundsSaving, setRoundsSaving] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<AiProvider | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AiProvider | null>(null);
@@ -96,12 +103,14 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
   const [pickerSelected, setPickerSelected] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
-    const [list, defaultWindow] = await Promise.all([
+    const [list, defaultWindow, rounds] = await Promise.all([
       listAiProviders(),
       getAiDefaultContextWindow(),
+      getAiMaxToolRounds(),
     ]);
     setProviders(list);
     setDefaultContextWindow(defaultWindow);
+    setMaxToolRounds(rounds);
   }, []);
 
   useEffect(() => {
@@ -142,10 +151,29 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
     try {
       await saveAiDefaultContextWindow(value);
       setError(null);
+      showToast('success', '批量导入默认窗口已保存');
     } catch (err) {
       setError(fmtError(err));
     } finally {
       setDefaultSaving(false);
+    }
+  };
+
+  const saveMaxToolRounds = async () => {
+    const value = Number(maxToolRounds) || 0;
+    if (value <= 0) {
+      setError('工具轮次上限必须大于 0');
+      return;
+    }
+    setRoundsSaving(true);
+    try {
+      await saveAiMaxToolRounds(value);
+      setError(null);
+      showToast('success', `工具轮次上限已保存（${value} 轮）`);
+    } catch (err) {
+      setError(fmtError(err));
+    } finally {
+      setRoundsSaving(false);
     }
   };
 
@@ -293,6 +321,7 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
       setShowForm(false);
       await load();
       onSaved();
+      showToast('success', `AI 配置「${form.name.trim()}」已保存`);
     } catch (err) {
       setError(fmtError(err));
     } finally {
@@ -547,6 +576,35 @@ export default function AIConfigModal({ onClose, onSaved }: Props) {
                 />
                 <button className="btn secondary small" onClick={handleAddRule}>
                   添加
+                </button>
+              </div>
+            </div>
+
+            <div className="rules-section">
+              <div className="rules-header">
+                <span className="rules-title">工具轮次上限</span>
+                <span className="rules-hint">
+                  单条消息内模型最多往返多少轮
+                </span>
+              </div>
+              <div className="rules-note">
+                每次「请求模型 → 执行工具 → 回灌结果」算一轮，一轮内可包含多个工具调用。
+                达到上限时会暂停并询问是否继续下一批，不会直接中断任务；数值越大，单次任务的
+                自动化程度越高，token 消耗也越多。
+              </div>
+              <div className="rule-add">
+                <input
+                  type="number"
+                  min={1}
+                  value={maxToolRounds}
+                  onChange={(e) => setMaxToolRounds(Number(e.target.value) || 0)}
+                />
+                <button
+                  className="btn secondary small"
+                  onClick={saveMaxToolRounds}
+                  disabled={roundsSaving}
+                >
+                  {roundsSaving ? '保存中…' : '保存'}
                 </button>
               </div>
             </div>

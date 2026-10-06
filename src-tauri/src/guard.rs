@@ -986,6 +986,7 @@ pub(crate) fn write_guard_audit(
         host_id: host_id.to_string(),
         host_label: host_label.to_string(),
         tool_name: "terminal_command".to_string(),
+        source: "guard".to_string(),
         summary: truncate(&sanitize(&event.command), 500),
         permission_mode: "guard".to_string(),
         approval: approval.to_string(),

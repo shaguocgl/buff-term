@@ -43,6 +43,8 @@ pub struct AgentManager {
 
 pub enum Control {
     Approve { tool_call_id: String, allow: bool },
+    /// 达到工具轮次上限后，用户选择是否继续执行下一批
+    Continue { allow: bool },
     Cancel,
 }
 
@@ -187,6 +189,27 @@ pub struct AiPlan {
     pub plan: TaskPlan,
 }
 
+/// 达到工具轮次上限时下发，前端据此弹出「继续 / 停止」确认卡片。
+#[derive(Clone, Serialize)]
+pub struct AiRoundsExhausted {
+    pub session_id: u32,
+    /// 本批已完成的模型往返轮次
+    pub rounds_done: u32,
+    /// 每次「继续」追加的轮次数
+    pub batch: u32,
+    /// 等待继续确认的秒数，超时按停止处理
+    pub timeout_secs: u64,
+}
+
+/// 继续确认已处理（用户选择或超时），前端据此关闭确认卡片。
+#[derive(Clone, Serialize)]
+pub struct AiRoundsResolved {
+    pub session_id: u32,
+    pub continued: bool,
+    /// 是否因等待超时而自动停止（仅在 `continued = false` 时有意义）
+    pub timed_out: bool,
+}
+
 #[derive(Default)]
 struct ToolCallAcc {
     id: String,
@@ -325,6 +348,20 @@ pub fn agent_approve(
     .map_err(|_| "会话已结束".to_string())
 }
 
+/// 工具轮次达到上限后，用户确认是否继续执行下一批。
+#[tauri::command]
+pub fn agent_continue(
+    agents: State<'_, AgentManager>,
+    session_id: u32,
+    allow: bool,
+) -> Result<(), String> {
+    let tx = agents
+        .control_sender(session_id)
+        .ok_or_else(|| "当前没有等待继续确认的会话".to_string())?;
+    tx.try_send(Control::Continue { allow })
+        .map_err(|_| "会话已结束".to_string())
+}
+
 #[tauri::command]
 pub fn agent_cancel(agents: State<'_, AgentManager>, session_id: u32) -> Result<(), String> {
     if let Some(tx) = agents.control_sender(session_id) {
@@ -420,6 +457,62 @@ struct AgentLoopCtx<'a> {
     agents: &'a AgentManager,
 }
 
+/// 达到轮次上限后的处理结果。
+enum ContinueDecision {
+    /// 用户选择继续，追加下一批轮次
+    Continue,
+    /// 用户选择停止或等待超时，结束本轮执行
+    Stop,
+}
+
+/// 达到工具轮次上限后暂停，下发确认事件并等待用户选择（超时按停止处理）。
+/// 期间收到 `Cancel` 或通道关闭同样按停止处理，保证「停止」按钮始终生效。
+async fn wait_continue_decision(
+    app: &AppHandle,
+    session_id: u32,
+    rx: &mut mpsc::Receiver<Control>,
+    rounds_done: u32,
+    batch: u32,
+) -> ContinueDecision {
+    let _ = app.emit(
+        "ai:rounds-exhausted",
+        AiRoundsExhausted {
+            session_id,
+            rounds_done,
+            batch,
+            timeout_secs: APPROVAL_TIMEOUT_SECS,
+        },
+    );
+    let mut timed_out = false;
+    let allow = loop {
+        match tokio::time::timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), rx.recv()).await {
+            Err(_) => {
+                timed_out = true;
+                break false;
+            }
+            Ok(None) | Ok(Some(Control::Cancel)) => break false,
+            Ok(Some(Control::Continue { allow })) => break allow,
+            // 上一批遗留的审批回执，忽略
+            Ok(Some(Control::Approve { .. })) => continue,
+        }
+    };
+    let _ = app.emit(
+        "ai:rounds-resolved",
+        AiRoundsResolved {
+            session_id,
+            continued: allow,
+            timed_out,
+        },
+    );
+    if allow {
+        ContinueDecision::Continue
+    } else {
+        // 主动停止属于正常结束（而非报错），原因由前端确认卡片展示
+        let _ = app.emit("ai:done", AiDone { session_id });
+        ContinueDecision::Stop
+    }
+}
+
 async fn run_agent_loop(
     ctx: &AgentLoopCtx<'_>,
     mut rx: mpsc::Receiver<Control>,
@@ -441,25 +534,21 @@ async fn run_agent_loop(
         agents,
     } = *ctx;
     let mut iterations = 0;
-    // 迭代次数上限按权限模式动态调整：none 模式无需逐条审批，复杂多步运维任务
-    // 可能需要更多工具调用；smart/all 模式下每条危险命令都需审批，上限保持保守。
-    let max_iterations = match permission_mode {
-        PermissionMode::None => 30,
-        PermissionMode::Smart | PermissionMode::All => 12,
-    };
+    // 单批模型往返轮次上限（可在 AI 配置中调整）。达到上限不直接中断会话，
+    // 而是暂停并询问是否继续下一批，避免复杂多步运维任务被硬性截断。
+    let batch = db
+        .get_ai_max_tool_rounds()
+        .unwrap_or_else(|_| crate::models::default_max_tool_rounds())
+        .max(1);
+    let mut round_limit = batch;
     loop {
-        iterations += 1;
-        if iterations > max_iterations {
-            let msg = format!("工具调用次数过多（上限 {max_iterations}），已停止");
-            let _ = app.emit(
-                "ai:error",
-                AiError {
-                    session_id,
-                    message: msg.clone(),
-                },
-            );
-            return Err(msg);
+        if iterations >= round_limit {
+            match wait_continue_decision(app, session_id, &mut rx, iterations, batch).await {
+                ContinueDecision::Continue => round_limit += batch,
+                ContinueDecision::Stop => return Ok(()),
+            }
         }
+        iterations += 1;
         if let Ok(Control::Cancel) = rx.try_recv() {
             return Ok(());
         }
@@ -835,6 +924,8 @@ async fn run_agent_loop(
                             break allow;
                         }
                         Ok(Some(Control::Approve { .. })) => continue,
+                        // 继续确认只在轮次边界消费，这里收到说明已过期，忽略
+                        Ok(Some(Control::Continue { .. })) => continue,
                     }
                 };
 
@@ -878,7 +969,7 @@ async fn run_agent_loop(
                     r = &mut tool => break r,
                     msg = rx.recv() => match msg {
                         Some(Control::Cancel) | None => return Ok(()),
-                        Some(Control::Approve { .. }) => {}
+                        Some(Control::Approve { .. }) | Some(Control::Continue { .. }) => {}
                     },
                 }
             };
@@ -983,6 +1074,7 @@ fn insert_audit(db: &Db, entry: AuditEntry) -> Result<(), String> {
         host_id: entry.host.id.clone(),
         host_label: format!("{} ({})", entry.host.name, entry.host.label_address()),
         tool_name: entry.tool_name.to_string(),
+        source: "agent".to_string(),
         summary,
         permission_mode: entry.permission_mode.to_string(),
         approval: entry.approval.to_string(),
@@ -991,7 +1083,7 @@ fn insert_audit(db: &Db, entry: AuditEntry) -> Result<(), String> {
         duration_ms: Some(entry.duration_ms),
     };
     db.insert_audit_log(&log)
-        .map_err(|e| format!("写入操作日志失败: {e}"))
+        .map_err(|e| format!("写入操作审计失败: {e}"))
 }
 
 /// 解析 `update_task_plan` 的参数。采用“patch”语义：请求里出现的字段覆盖旧值，

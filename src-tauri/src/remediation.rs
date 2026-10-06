@@ -645,6 +645,7 @@ fn insert_remediation_audit(
         host_id: host.id.clone(),
         host_label: format!("{} ({})", host.name, host.label_address()),
         tool_name: "remediation".to_string(),
+        source: "remediation".to_string(),
         summary: truncate(command, 500),
         permission_mode: "remediation".to_string(),
         approval: "confirmed".to_string(),

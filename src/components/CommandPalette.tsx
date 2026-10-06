@@ -22,7 +22,7 @@ const ACTIONS: { key: string; label: string }[] = [
   { key: 'new-host', label: '新建主机' },
   { key: 'import-ssh', label: '导入 ~/.ssh/config' },
   { key: 'ai-config', label: 'AI Agent 配置' },
-  { key: 'logs', label: '操作日志' },
+  { key: 'logs', label: '操作审计' },
   { key: 'mcp', label: 'MCP 服务' },
   { key: 'guard', label: '终端防护' },
   { key: 'alerts', label: '通知配置' },

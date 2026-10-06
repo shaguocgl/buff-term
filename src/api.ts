@@ -68,6 +68,9 @@ export const getAiDefaultContextWindow = () =>
   invoke<number>('get_ai_default_context_window');
 export const saveAiDefaultContextWindow = (value: number) =>
   invoke<number>('save_ai_default_context_window', { value });
+export const getAiMaxToolRounds = () => invoke<number>('get_ai_max_tool_rounds');
+export const saveAiMaxToolRounds = (value: number) =>
+  invoke<number>('save_ai_max_tool_rounds', { value });
 export const listAiRules = () => invoke<AiRule[]>('list_ai_rules');
 export const addAiRule = (pattern: string) =>
   invoke<AiRule>('add_ai_rule', { pattern });
@@ -75,6 +78,7 @@ export const deleteAiRule = (id: string) =>
   invoke<void>('delete_ai_rule', { id });
 export const listAuditLogs = (limit?: number) =>
   invoke<AuditLog[]>('list_audit_logs', { limit });
+export const clearAuditLogs = () => invoke<number>('clear_audit_logs');
 export const checkForUpdate = () => invoke<UpdateInfo>('check_for_update');
 export const getAppVersion = () => invoke<string>('get_app_version');
 
@@ -285,6 +289,8 @@ export const agentChat = (
   });
 export const agentApprove = (sessionId: number, toolCallId: string, allow: boolean) =>
   invoke<void>('agent_approve', { sessionId, toolCallId, allow });
+export const agentContinue = (sessionId: number, allow: boolean) =>
+  invoke<void>('agent_continue', { sessionId, allow });
 export const agentCancel = (sessionId: number) =>
   invoke<void>('agent_cancel', { sessionId });
 export const agentReset = (sessionId: number, hostId: string) =>
@@ -338,6 +344,23 @@ export interface AiPlanPayload {
   plan: TaskPlan;
 }
 
+export interface AiRoundsExhaustedPayload {
+  session_id: number;
+  /** 本批已完成的模型往返轮次 */
+  rounds_done: number;
+  /** 每次「继续」追加的轮次数 */
+  batch: number;
+  /** 等待继续确认的秒数，超时按停止处理 */
+  timeout_secs: number;
+}
+
+export interface AiRoundsResolvedPayload {
+  session_id: number;
+  continued: boolean;
+  /** 是否因等待超时而自动停止 */
+  timed_out: boolean;
+}
+
 export const onAiStream = (
   cb: (sessionId: number, delta: string) => void,
 ) =>
@@ -358,6 +381,20 @@ export const onAiError = (cb: (sessionId: number, message: string) => void) =>
 
 export const onAiPlan = (cb: (payload: AiPlanPayload) => void) =>
   listen<AiPlanPayload>('ai:plan', (event) => cb(event.payload));
+
+export const onAiRoundsExhausted = (
+  cb: (payload: AiRoundsExhaustedPayload) => void,
+) =>
+  listen<AiRoundsExhaustedPayload>('ai:rounds-exhausted', (event) =>
+    cb(event.payload),
+  );
+
+export const onAiRoundsResolved = (
+  cb: (payload: AiRoundsResolvedPayload) => void,
+) =>
+  listen<AiRoundsResolvedPayload>('ai:rounds-resolved', (event) =>
+    cb(event.payload),
+  );
 
 export const onAiContext = (cb: (payload: ContextUsage) => void) =>
   listen<ContextUsage>('ai:context', (event) => cb(event.payload));

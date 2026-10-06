@@ -32,7 +32,7 @@ const PERMISSION_HINTS: Record<Permission, string> = {
     '可以执行查看类命令（ps、df、cat 等），写操作（重定向写文件、修改、删除、安装、传输等）会被拒绝。',
   confirm:
     '命中内置写/危险判定或你添加的自定义管控规则时，执行前会弹出确认框由你批准。',
-  allow: '可执行任意命令，仅记录审计日志。请确保信任外部 AI 的来源。',
+  allow: '可执行任意命令，仅记录操作审计。请确保信任外部 AI 的来源。',
 };
 
 export default function McpServiceModal({ hosts, onClose }: Props) {

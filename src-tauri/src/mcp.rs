@@ -915,6 +915,7 @@ fn write_audit(
         host_id: host.id.clone(),
         host_label: format!("{} ({})", host.name, host.label_address()),
         tool_name: tool_name.to_string(),
+        source: "mcp".to_string(),
         // 命令本身可能包含密码/Token，落库前统一脱敏
         summary: sanitize(summary).chars().take(500).collect(),
         permission_mode: "mcp".to_string(),
@@ -924,7 +925,7 @@ fn write_audit(
         duration_ms,
     };
     db.insert_audit_log(&log)
-        .map_err(|e| format!("写入操作日志失败: {e}"))
+        .map_err(|e| format!("写入操作审计失败: {e}"))
 }
 
 fn resolve_host<'a>(hosts: &'a [Host], key: Option<&str>) -> Result<&'a Host, String> {

@@ -22,7 +22,7 @@
 - **审批是硬拦截，不是软约束**：工具执行前用 `mpsc` 通道同步等待用户决定，模型无法绕过；拒绝后把“用户拒绝执行”作为工具结果回填，让模型调整方案；
 - **可观测**：每个工具调用都落审计日志（命令、审批方式、结果、耗时）；
 - **模型无关 + 配置驱动**：模型名每次请求都从激活配置读取，会话内切换立刻生效；
-- **容错**：按模式限定轮次上限（Smart / All 12 轮、None 30 轮）、审批 10 分钟超时、流尾残留数据处理、非 2xx 响应提取 `error.message`；
+- **容错**：轮次上限（单批默认 100 轮，可在 AI 配置中调整）达到后暂停询问是否继续、审批 10 分钟超时、流尾残留数据处理、非 2xx 响应提取 `error.message`；
 - **上下文预算**：canonical history 在内存中不原地裁剪，每次请求前按激活模型的 `context_window` 构建发送视图，任务台账优先保留；
 - **工具名契约**：系统提示词明确工具名白名单；解析层对模型漏填名称做参数推断（`command` → `exec_command`、`path` → `read_file`），并对常见别名归一化（`ls/listdir/list_directory` → `list_dir` 等），降低模型幻觉导致的调用失败。
 
@@ -43,9 +43,11 @@ flowchart TD
   AUDIT --> FB2[结果回填历史]
   FB1 --> NEXT[下一轮]
   FB2 --> NEXT
-  NEXT --> ITER{未超过当前模式上限?}
-  ITER -->|是| REQ
-  ITER -->|否| ERR[报错停止]
+  NEXT --> ITER{达到本批轮次上限?}
+  ITER -->|否| REQ
+  ITER -->|是| ASK[暂停 → ai:rounds-exhausted]
+  ASK -->|继续| REQ
+  ASK -->|停止/超时| DONE2[ai:done 结束]
 ```
 
 ### 4.2 代码案例（真实摘录）
@@ -53,13 +55,18 @@ flowchart TD
 **① 工具循环骨架**（`run_agent_loop`，已精简）
 
 ```rust
-let max_iterations = match permission_mode {
-    None => 30,
-    Smart | All => 12,
-};
+// 单批轮次上限可配置（settings: ai_max_tool_rounds，默认 100）
+let batch = db.get_ai_max_tool_rounds().unwrap_or(default_max_tool_rounds());
+let mut round_limit = batch;
 loop {
+    if iterations >= round_limit {
+        // 达到上限不报错中断，而是暂停询问是否继续下一批
+        match wait_continue_decision(app, session_id, &mut rx, iterations, batch).await {
+            ContinueDecision::Continue => round_limit += batch,
+            ContinueDecision::Stop => return Ok(()),
+        }
+    }
     iterations += 1;
-    if iterations > max_iterations { /* 轮次上限，防止失控 */ }
     if let Ok(Control::Cancel) = rx.try_recv() { return Ok(()); }   // 用户点停止
 
     // 1. 请求：历史 + 工具 schema 发给模型
@@ -176,7 +183,9 @@ format!(
    - 解析 SSE `data:` 行，累积 `content` 与按 index 归组的 `tool_calls`（id / name / arguments 增量拼接）；
    - 处理流结束时缓冲区残留的未换行数据，避免最后一段内容丢失；
    - 无工具调用 → 写入历史，发 `ai:done`，结束；有工具调用 → 审批 → 执行 → 回填 → 进入下一轮；
-3. 单会话工具调用轮次按模式上限（Smart / All **12 轮**、None **30 轮**），超限报错停止。
+3. 单条消息的模型往返轮次按**单批上限**（`settings.ai_max_tool_rounds`，默认 **100 轮**）计数；
+   达到上限时下发 `ai:rounds-exhausted` 暂停并等待用户选择，点「继续」追加一批（再 100 轮），
+   点「停止」或等待 10 分钟超时则发 `ai:done` 正常结束（不再报错中断）。
 
 ```mermaid
 sequenceDiagram
@@ -268,11 +277,11 @@ flowchart TD
 
 每个工具调用结束时写一条 `audit_logs`：
 
-- 时间戳、会话 ID、主机 id / 标签、工具名、命令摘要（截断 500 字符）；
+- 时间戳、会话 ID、主机 id / 标签、工具名、操作来源（`source`：`agent` / `guard` / `mcp` / `remediation`）、命令摘要（截断 500 字符）；
 - 安全级别、审批方式（`auto` / `approved` / `denied`）、执行状态（`executed` / `denied` / `error`）；
 - 结果摘要（截断 300 字符）、耗时（ms）。
 
-前端「操作日志」面板通过 `list_audit_logs` 拉取最近 100 条。
+前端「操作审计」面板通过 `list_audit_logs` 拉取最近 1000 条，并提供「清空」入口（`clear_audit_logs`，二次确认后删除全部记录）。
 
 ---
 

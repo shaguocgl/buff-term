@@ -144,6 +144,22 @@ pub fn save_ai_default_context_window(db: State<'_, Arc<Db>>, value: u32) -> Res
 }
 
 #[tauri::command]
+pub fn get_ai_max_tool_rounds(db: State<'_, Arc<Db>>) -> Result<u32, String> {
+    db.get_ai_max_tool_rounds()
+        .map_err(|e| format!("读取工具轮次上限失败: {e}"))
+}
+
+#[tauri::command]
+pub fn save_ai_max_tool_rounds(db: State<'_, Arc<Db>>, value: u32) -> Result<u32, String> {
+    if value == 0 {
+        return Err("工具轮次上限必须大于 0".to_string());
+    }
+    db.set_ai_max_tool_rounds(value)
+        .map_err(|e| format!("保存工具轮次上限失败: {e}"))?;
+    Ok(value)
+}
+
+#[tauri::command]
 pub fn set_active_ai_model(
     db: State<'_, Arc<Db>>,
     provider_id: String,

@@ -103,6 +103,13 @@ pub fn default_context_window() -> u32 {
     128_000
 }
 
+/// AI Agent 单条消息内允许的模型往返轮次上限的默认值。
+/// 达到上限后不直接中断，而是暂停并询问是否继续下一批；
+/// 用户可在 AI 配置中调整该值。
+pub fn default_max_tool_rounds() -> u32 {
+    100
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiModel {
     pub id: String,
@@ -258,6 +265,10 @@ pub struct AuditLog {
     pub host_id: String,
     pub host_label: String,
     pub tool_name: String,
+    /// 操作来源，用于区分同类工具名来自哪个执行通道：
+    /// `agent`（AI Agent 工具调用）/ `guard`（终端安全防护拦截）/
+    /// `mcp`（对外 MCP 服务）/ `remediation`（巡检修复执行）
+    pub source: String,
     pub summary: String,
     pub permission_mode: String,
     pub approval: String,

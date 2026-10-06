@@ -10,6 +10,7 @@ import {
   agentApprove,
   agentCancel,
   agentChat,
+  agentContinue,
   agentReset,
   getContextUsage,
   getHistory,
@@ -18,6 +19,8 @@ import {
   onAiError,
   onAiContext,
   onAiPlan,
+  onAiRoundsExhausted,
+  onAiRoundsResolved,
   onAiStream,
   onAiTool,
   setActiveAiModel,
@@ -55,6 +58,16 @@ interface ToolView {
   /** request 事件到达时刻，用于倒计时 */
   requestedAt?: number;
   timeoutSecs?: number;
+}
+
+/** 工具轮次达到上限后的继续确认状态 */
+interface RoundsPrompt {
+  roundsDone: number;
+  batch: number;
+  /** waiting=等待选择，continued=已继续，stopped=已停止 */
+  state: 'waiting' | 'continued' | 'stopped';
+  /** 是否因等待超时而自动停止 */
+  timedOut?: boolean;
 }
 
 interface ChatMsg {
@@ -289,6 +302,7 @@ function ChatPanel({
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  const [roundsPrompt, setRoundsPrompt] = useState<RoundsPrompt | null>(null);
   const [permissionMode, setPermissionMode] = useState<'all' | 'smart' | 'none'>(
     () =>
       (localStorage.getItem('buffterm.permissionMode') as 'all' | 'smart' | 'none') ||
@@ -473,6 +487,8 @@ function ChatPanel({
     let unError: (() => void) | undefined;
     let unPlan: (() => void) | undefined;
     let unContext: (() => void) | undefined;
+    let unRoundsExhausted: (() => void) | undefined;
+    let unRoundsResolved: (() => void) | undefined;
 
     onAiStream((sid, delta) => {
         if (sid !== sessionId) return;
@@ -537,6 +553,36 @@ function ChatPanel({
         else unPlan = fn;
       });
 
+    onAiRoundsExhausted((payload) => {
+        if (payload.session_id !== sessionId) return;
+        setRoundsPrompt({
+          roundsDone: payload.rounds_done,
+          batch: payload.batch,
+          state: 'waiting',
+        });
+      })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unRoundsExhausted = fn;
+      });
+
+    onAiRoundsResolved((payload) => {
+        if (payload.session_id !== sessionId) return;
+        setRoundsPrompt((prev) =>
+          prev
+            ? {
+                ...prev,
+                state: payload.continued ? 'continued' : 'stopped',
+                timedOut: payload.timed_out,
+              }
+            : prev,
+        );
+      })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unRoundsResolved = fn;
+      });
+
     onAiContext((payload) => {
         if (payload.session_id !== sessionId) return;
         setContextUsage(payload);
@@ -554,6 +600,8 @@ function ChatPanel({
       unError?.();
       unPlan?.();
       unContext?.();
+      unRoundsExhausted?.();
+      unRoundsResolved?.();
       // 注意：不在这里调用 agentCancel —— 面板隐藏/切换不应中断运行中的 AI 会话，
       // 仅在用户点击「停止」按钮时取消（后端会话结束前事件照常收，重开面板可看历史）
     };
@@ -602,6 +650,7 @@ function ChatPanel({
     setMessages((prev) => [...prev, userMsg, assistantMsg]);
     setInput('');
     setReferences([]);
+    setRoundsPrompt(null);
     setBusy(true);
     agentChat(sessionId, payload, permissionMode).catch((err) => {
       updateLastAssistant((m) => ({ ...m, error: fmtError(err) }));
@@ -612,6 +661,17 @@ function ChatPanel({
   const handleApprove = (toolCallId: string, allow: boolean) => {
     agentApprove(sessionId, toolCallId, allow).catch((err) => {
       updateLastAssistant((m) => ({ ...m, error: fmtError(err) }));
+    });
+  };
+
+  // 达到工具轮次上限后的选择：继续下一批 / 停止本次执行
+  const handleContinue = (allow: boolean) => {
+    setRoundsPrompt((prev) =>
+      prev ? { ...prev, state: allow ? 'continued' : 'stopped' } : prev,
+    );
+    agentContinue(sessionId, allow).catch((err) => {
+      updateLastAssistant((m) => ({ ...m, error: fmtError(err) }));
+      setBusy(false);
     });
   };
 
@@ -811,7 +871,42 @@ function ChatPanel({
           );
         })}
 
-        {busy && (
+        {roundsPrompt && roundsPrompt.state !== 'continued' && (
+          <div className="msg msg-assistant">
+            <div className="msg-bubble rounds-prompt">
+              {roundsPrompt.state === 'waiting' ? (
+                <>
+                  <div className="rounds-prompt-text">
+                    已达到工具轮次上限（{roundsPrompt.roundsDone} 轮），是否继续执行下一批（
+                    {roundsPrompt.batch} 轮）？
+                  </div>
+                  <div className="rounds-prompt-actions">
+                    <button
+                      className="btn secondary small"
+                      onClick={() => handleContinue(false)}
+                    >
+                      停止
+                    </button>
+                    <button
+                      className="btn primary small"
+                      onClick={() => handleContinue(true)}
+                    >
+                      继续
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="rounds-prompt-text">
+                  {roundsPrompt.timedOut
+                    ? '等待继续确认超时，已停止执行'
+                    : '已达到工具轮次上限，已停止执行'}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {busy && roundsPrompt?.state !== 'waiting' && (
           <div className="msg msg-assistant">
             <div className="msg-bubble msg-thinking">
               <span className="spinner" /> 思考中…

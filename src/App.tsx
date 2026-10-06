@@ -761,7 +761,7 @@ function App() {
               <button className="rail-btn" onClick={() => setShowLogs(true)}>
                 <ListIcon size={16} />
               </button>
-              <span className="rail-tip">操作日志</span>
+              <span className="rail-tip">操作审计</span>
             </div>
             <div className="rail-icon-wrap">
               <button
@@ -946,7 +946,7 @@ function App() {
           </button>
 
           <button className="log-entry" onClick={() => setShowLogs(true)}>
-            <ListIcon size={15} /> 操作日志
+            <ListIcon size={15} /> 操作审计
           </button>
           <div className="version-entry">
             <button
@@ -1195,10 +1195,13 @@ function App() {
           onSaved={() => {
             refreshAi().catch(() => {});
           }}
+          showToast={showToast}
         />
       )}
 
-      {showLogs && <AuditLogModal onClose={() => setShowLogs(false)} />}
+      {showLogs && (
+        <AuditLogModal onClose={() => setShowLogs(false)} showToast={showToast} />
+      )}
 
       {paletteOpen && (
         <CommandPalette

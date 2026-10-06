@@ -127,6 +127,8 @@ export interface AuditLog {
   host_id: string;
   host_label: string;
   tool_name: string;
+  /** 操作来源：agent（AI Agent）/ guard（终端防护）/ mcp（MCP 服务）/ remediation（修复执行） */
+  source: string;
   summary: string;
   permission_mode: string;
   approval: string;

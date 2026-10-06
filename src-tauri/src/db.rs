@@ -70,6 +70,7 @@ impl Db {
                  host_id        TEXT NOT NULL,
                  host_label     TEXT NOT NULL,
                  tool_name      TEXT NOT NULL,
+                 source         TEXT NOT NULL DEFAULT 'agent',
                  summary        TEXT NOT NULL,
                  permission_mode TEXT NOT NULL,
                  approval       TEXT NOT NULL,
@@ -159,7 +160,8 @@ impl Db {
                  top_json     TEXT NOT NULL DEFAULT '[]',
                  source       TEXT NOT NULL DEFAULT 'manual'
              );
-             CREATE INDEX IF NOT EXISTS idx_metrics_host_ts ON host_metrics(host_id, ts DESC);",
+             CREATE INDEX IF NOT EXISTS idx_metrics_host_ts ON host_metrics(host_id, ts DESC);
+             CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_logs(ts DESC);",
         )?;
 
         // 迁移：ai_models.context_window。旧库没有该列时补上，默认 128k；
@@ -179,6 +181,35 @@ impl Db {
         if !has_context_window {
             conn.execute(
                 "ALTER TABLE ai_models ADD COLUMN context_window INTEGER NOT NULL DEFAULT 128000",
+                [],
+            )?;
+        }
+
+        // 迁移：audit_logs.source。旧库没有该列时补上，并按 permission_mode 回填历史来源，
+        // 使 UI 的来源标签对历史记录同样生效。幂等，重复启动不会报错。
+        let has_audit_source = {
+            let mut stmt = conn.prepare("PRAGMA table_info(audit_logs)")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            let mut found = false;
+            for name in rows {
+                if name? == "source" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_audit_source {
+            conn.execute(
+                "ALTER TABLE audit_logs ADD COLUMN source TEXT NOT NULL DEFAULT 'agent'",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE audit_logs SET source = CASE
+                     WHEN permission_mode = 'guard' THEN 'guard'
+                     WHEN permission_mode = 'mcp' THEN 'mcp'
+                     WHEN permission_mode = 'remediation' THEN 'remediation'
+                     ELSE 'agent' END",
                 [],
             )?;
         }
@@ -429,9 +460,9 @@ impl Db {
     pub fn insert_audit_log(&self, log: &AuditLog) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO audit_logs (id, ts, session_id, host_id, host_label, tool_name, summary,
-                                     permission_mode, approval, status, result, duration_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO audit_logs (id, ts, session_id, host_id, host_label, tool_name, source,
+                                     summary, permission_mode, approval, status, result, duration_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 log.id,
                 log.ts as i64,
@@ -439,6 +470,7 @@ impl Db {
                 log.host_id,
                 log.host_label,
                 log.tool_name,
+                log.source,
                 log.summary,
                 log.permission_mode,
                 log.approval,
@@ -453,7 +485,7 @@ impl Db {
     pub fn list_audit_logs(&self, limit: u32) -> rusqlite::Result<Vec<AuditLog>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, ts, session_id, host_id, host_label, tool_name, summary,
+            "SELECT id, ts, session_id, host_id, host_label, tool_name, source, summary,
                     permission_mode, approval, status, result, duration_ms
              FROM audit_logs ORDER BY ts DESC, rowid DESC LIMIT ?1",
         )?;
@@ -512,6 +544,27 @@ impl Db {
 
     pub fn set_ai_default_context_window(&self, value: u32) -> rusqlite::Result<()> {
         self.set_setting("ai_default_context_window", &value.to_string())
+    }
+
+    /// AI Agent 单条消息内允许的模型往返轮次上限（每批）。
+    /// 达到后暂停并询问是否继续，用户可据此控制单次任务的自动化规模。
+    pub fn get_ai_max_tool_rounds(&self) -> rusqlite::Result<u32> {
+        let conn = self.conn.lock().unwrap();
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='ai_max_tool_rounds'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or_else(crate::models::default_max_tool_rounds))
+    }
+
+    pub fn set_ai_max_tool_rounds(&self, value: u32) -> rusqlite::Result<()> {
+        self.set_setting("ai_max_tool_rounds", &value.to_string())
     }
 
     pub fn get_mcp_service(&self) -> rusqlite::Result<McpService> {
@@ -1036,6 +1089,12 @@ impl Db {
         )
     }
 
+    /// 清空全部审计日志，返回删除行数（用户手动清理）。
+    pub fn clear_audit_logs(&self) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM audit_logs", [])
+    }
+
     /// 启动时把上次异常退出遗留的「运行中」任务标记为已取消。
     pub fn mark_stale_running_cancelled(&self) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -1125,12 +1184,13 @@ fn row_to_audit(row: &Row<'_>) -> rusqlite::Result<AuditLog> {
         host_id: row.get(3)?,
         host_label: row.get(4)?,
         tool_name: row.get(5)?,
-        summary: row.get(6)?,
-        permission_mode: row.get(7)?,
-        approval: row.get(8)?,
-        status: row.get(9)?,
-        result: row.get(10)?,
-        duration_ms: row.get::<_, Option<i64>>(11)?.map(|v| v as u64),
+        source: row.get(6)?,
+        summary: row.get(7)?,
+        permission_mode: row.get(8)?,
+        approval: row.get(9)?,
+        status: row.get(10)?,
+        result: row.get(11)?,
+        duration_ms: row.get::<_, Option<i64>>(12)?.map(|v| v as u64),
     })
 }
 
@@ -1236,6 +1296,89 @@ mod tests {
         let providers = db.list_ai_providers().unwrap();
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].models[0].context_window, 200_000);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn audit_source_migration_backfills_and_roundtrips() {
+        let path =
+            std::env::temp_dir().join(format!("buffterm-audit-test-{}.sqlite", uuid::Uuid::new_v4()));
+        // 构造旧库：audit_logs 无 source 列，写入一条终端防护记录
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_logs (
+                     id              TEXT PRIMARY KEY,
+                     ts              INTEGER NOT NULL,
+                     session_id      INTEGER,
+                     host_id         TEXT NOT NULL,
+                     host_label      TEXT NOT NULL,
+                     tool_name       TEXT NOT NULL,
+                     summary         TEXT NOT NULL,
+                     permission_mode TEXT NOT NULL,
+                     approval        TEXT NOT NULL,
+                     status          TEXT NOT NULL,
+                     result          TEXT,
+                     duration_ms     INTEGER
+                 );
+                 INSERT INTO audit_logs (id, ts, session_id, host_id, host_label, tool_name,
+                                         summary, permission_mode, approval, status, result, duration_ms)
+                 VALUES ('legacy', 1, 1, 'h1', '主机 (1.2.3.4)', 'terminal_command',
+                         'rm -rf /', 'guard', 'denied', 'ok', NULL, NULL);",
+            )
+            .unwrap();
+        }
+
+        // 打开后应完成迁移，并按 permission_mode 回填 source
+        let db = Db::open(&path).unwrap();
+        let logs = db.list_audit_logs(10).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].source, "guard");
+
+        // 新写入的记录按显式 source 落库并可读回
+        db.insert_audit_log(&AuditLog {
+            id: "new".to_string(),
+            ts: 2,
+            session_id: None,
+            host_id: "h1".to_string(),
+            host_label: "主机 (1.2.3.4)".to_string(),
+            tool_name: "exec_command".to_string(),
+            source: "mcp".to_string(),
+            summary: "uptime".to_string(),
+            permission_mode: "mcp".to_string(),
+            approval: "auto".to_string(),
+            status: "executed".to_string(),
+            result: None,
+            duration_ms: Some(5),
+        })
+        .unwrap();
+        let logs = db.list_audit_logs(10).unwrap();
+        assert_eq!(logs[0].source, "mcp");
+        assert_eq!(logs[0].duration_ms, Some(5));
+
+        // 清空审计：返回删除行数并清空列表
+        assert_eq!(db.clear_audit_logs().unwrap(), 2);
+        assert!(db.list_audit_logs(10).unwrap().is_empty());
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn max_tool_rounds_setting_roundtrip() {
+        let path = std::env::temp_dir()
+            .join(format!("buffterm-rounds-test-{}.sqlite", uuid::Uuid::new_v4()));
+        {
+            let db = Db::open(&path).unwrap();
+            assert_eq!(
+                db.get_ai_max_tool_rounds().unwrap(),
+                crate::models::default_max_tool_rounds()
+            );
+            db.set_ai_max_tool_rounds(50).unwrap();
+        }
+        // 再次打开：设置持久化生效
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.get_ai_max_tool_rounds().unwrap(), 50);
         drop(db);
         let _ = std::fs::remove_file(&path);
     }
