@@ -44,7 +44,9 @@ export const listHosts = () => invoke<Host[]>('list_hosts');
 export const createHost = (input: HostInput) => invoke<Host>('create_host', { input });
 export const updateHost = (host: Host) => invoke<void>('update_host', { host });
 export const deleteHost = (id: string) => invoke<void>('delete_host', { id });
-export const importSshConfig = () => invoke<ImportResult>('import_ssh_config');
+/** 导入 ~/.ssh/config；dryRun 为 true 时只解析统计（供导入前确认弹窗预览），不写库 */
+export const importSshConfig = (dryRun = false) =>
+  invoke<ImportResult>('import_ssh_config', { dryRun });
 export const saveHostPassword = (id: string, password: string) =>
   invoke<void>('save_host_credentials', { id, password });
 export const saveHostKeyPassphrase = (id: string, passphrase: string) =>

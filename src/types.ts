@@ -21,8 +21,12 @@ export interface HostInput {
 }
 
 export interface ImportResult {
+  /** 本次导入（dryRun 预览时表示「将要导入」）的主机数 */
   imported: number;
+  /** 因与已有主机重名而跳过的主机数 */
   skipped: number;
+  /** 因通配规则或空 Host 行被忽略的规则块数 */
+  ignored: number;
 }
 
 export interface AiProvider {

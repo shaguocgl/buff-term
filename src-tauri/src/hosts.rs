@@ -83,29 +83,44 @@ pub fn delete(db: &Db, id: String) -> Result<(), String> {
 
 #[derive(Debug, Serialize)]
 pub struct ImportResult {
+    /// 本次导入（dry_run 预览时表示"将要导入"）的主机数
     pub imported: usize,
+    /// 因与已有主机重名而跳过的主机数
     pub skipped: usize,
+    /// 因通配规则或空 Host 行被忽略的规则块数
+    pub ignored: usize,
 }
 
-pub fn import_config(db: &Db, path: Option<String>) -> Result<ImportResult, String> {
+/// 导入 ~/.ssh/config。
+/// `dry_run` 为 true 时只解析统计、不写库，供导入前的确认弹窗展示将要导入的数量。
+pub fn import_config(
+    db: &Db,
+    path: Option<String>,
+    dry_run: bool,
+) -> Result<ImportResult, String> {
     let path = path.unwrap_or_else(default_ssh_config_path);
     let content =
         fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败: {e}", path))?;
-    let inputs = sshconfig::parse(&content);
+    let parsed = sshconfig::parse(&content);
     let mut existing: HashSet<String> = db
         .list()
         .map_err(|e| format!("读取主机列表失败: {e}"))?
         .into_iter()
         .map(|h| h.name)
         .collect();
-    let (accepted, skipped) = filter_new_hosts(inputs, &mut existing);
-    let mut imported = 0;
-    for input in accepted {
-        let host = host_from_input(input);
-        db.insert(&host).map_err(|e| format!("导入主机失败: {e}"))?;
-        imported += 1;
+    let (accepted, skipped) = filter_new_hosts(parsed.hosts, &mut existing);
+    let imported = accepted.len();
+    if !dry_run {
+        for input in accepted {
+            let host = host_from_input(input);
+            db.insert(&host).map_err(|e| format!("导入主机失败: {e}"))?;
+        }
     }
-    Ok(ImportResult { imported, skipped })
+    Ok(ImportResult {
+        imported,
+        skipped,
+        ignored: parsed.ignored,
+    })
 }
 
 fn filter_new_hosts(
@@ -163,8 +178,12 @@ pub fn delete_host(
 }
 
 #[tauri::command]
-pub fn import_ssh_config(db: State<'_, Arc<Db>>, path: Option<String>) -> Result<ImportResult, String> {
-    import_config(&db, path)
+pub fn import_ssh_config(
+    db: State<'_, Arc<Db>>,
+    path: Option<String>,
+    dry_run: bool,
+) -> Result<ImportResult, String> {
+    import_config(&db, path, dry_run)
 }
 
 #[tauri::command]

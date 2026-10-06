@@ -118,6 +118,25 @@ pub fn user_home_dir() -> Option<PathBuf> {
     )
 }
 
+fn username_from(user: Option<&str>, username: Option<&str>) -> String {
+    user.into_iter()
+        .chain(username)
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// 本机用户名（Unix 用 USER，Windows 用 USERNAME）。
+/// ssh 在配置里没有 `User` 时就是用本机用户名登录远端，
+/// 导入 ~/.ssh/config 时按同一语义回填，避免导入出用户名为空的主机。
+pub fn local_username() -> String {
+    username_from(
+        std::env::var("USER").ok().as_deref(),
+        std::env::var("USERNAME").ok().as_deref(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +173,15 @@ mod tests {
         );
         assert_eq!(home_dir_from(None, None, None, None), None);
         assert_eq!(home_dir_from(None, None, Some("C:"), None), None);
+    }
+
+    #[test]
+    fn username_prefers_unix_var_then_windows_var() {
+        assert_eq!(username_from(Some("alice"), Some("bob")), "alice");
+        assert_eq!(username_from(None, Some("bob")), "bob");
+        assert_eq!(username_from(Some(""), Some("bob")), "bob");
+        assert_eq!(username_from(Some("  "), Some("bob")), "bob");
+        assert_eq!(username_from(Some(" alice "), None), "alice");
+        assert_eq!(username_from(None, None), "");
     }
 }

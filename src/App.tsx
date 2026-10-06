@@ -30,6 +30,7 @@ import type {
   AiProvider,
   Host,
   HostKeyConfirmRequest,
+  ImportResult,
   McpApprovalRequest,
   TerminalGuardApproval,
   UpdateInfo,
@@ -56,6 +57,7 @@ import {
   BellIcon,
   ImportIcon,
   PlusIcon,
+  ChevronDownIcon,
   ChevronRightIcon,
   ListIcon,
   PencilIcon,
@@ -139,6 +141,8 @@ function App() {
   const [showForm, setShowForm] = useState(false);
   const [editingHost, setEditingHost] = useState<Host | null>(null);
   const [deleteHostTarget, setDeleteHostTarget] = useState<Host | null>(null);
+  // 导入 ~/.ssh/config 的预览统计：非 null 时展示导入确认弹窗
+  const [importPreview, setImportPreview] = useState<ImportResult | null>(null);
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeKey, setActiveKey] = useState<number | null>(null);
   // 供全局快捷键 effect 读取最新状态（refs 让 effect 依赖保持稳定，listener 只挂一次）
@@ -174,6 +178,15 @@ function App() {
   const [collapsed, setCollapsed] = useState(() => {
     try {
       return localStorage.getItem('buffterm-sidebar-collapsed') === '1';
+    } catch {
+      return false;
+    }
+  });
+  // 底部菜单（MCP 服务 / 通知配置 / 终端防护 / 操作审计 / 检查更新）收起状态：
+  // 主机较多时可收起，把纵向空间让给主机列表
+  const [footerCollapsed, setFooterCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem('buffterm-sidebar-footer-collapsed') === '1';
     } catch {
       return false;
     }
@@ -267,6 +280,17 @@ function App() {
       /* ignore storage errors */
     }
   }, [collapsed]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        'buffterm-sidebar-footer-collapsed',
+        footerCollapsed ? '1' : '0',
+      );
+    } catch {
+      /* ignore storage errors */
+    }
+  }, [footerCollapsed]);
 
   useEffect(() => {
     getAppVersion().then(setAppVersion).catch(() => {});
@@ -507,21 +531,40 @@ function App() {
     }
   };
 
+  /** 导入结果的补充说明：跳过重名 / 忽略的规则块 */
+  const importDetail = (r: ImportResult) => {
+    const parts: string[] = [];
+    if (r.skipped > 0) parts.push(`跳过重名 ${r.skipped} 台`);
+    if (r.ignored > 0) parts.push(`忽略 ${r.ignored} 条通配规则或空 Host 行`);
+    return parts.length > 0 ? `（${parts.join('，')}）` : '';
+  };
+
+  // 导入前先预览统计：没有可导入的主机时直接提示，否则弹确认窗口
   const handleImport = async () => {
+    try {
+      const preview = await importSshConfig(true);
+      if (preview.imported === 0) {
+        showToast(
+          'info',
+          `~/.ssh/config 中没有可导入的主机${importDetail(preview)}`,
+        );
+        return;
+      }
+      setImportPreview(preview);
+    } catch (e) {
+      showToast('error', fmtError(e));
+    }
+  };
+
+  const confirmImport = async () => {
+    setImportPreview(null);
     try {
       const result = await importSshConfig();
       await refresh();
-      if (result.imported > 0) {
-        showToast(
-          'success',
-          `已从 ~/.ssh/config 导入 ${result.imported} 台主机` +
-            (result.skipped > 0 ? `，跳过 ${result.skipped} 台重名` : ''),
-        );
-      } else if (result.skipped > 0) {
-        showToast('info', `主机均已存在，跳过 ${result.skipped} 台`);
-      } else {
-        showToast('info', '~/.ssh/config 中没有可导入的主机');
-      }
+      showToast(
+        'success',
+        `已从 ~/.ssh/config 导入 ${result.imported} 台主机${importDetail(result)}`,
+      );
     } catch (e) {
       showToast('error', fmtError(e));
     }
@@ -932,49 +975,80 @@ function App() {
         </div>
 
         <div className="sidebar-footer">
-          <button className="log-entry" onClick={() => setShowMcp(true)}>
-            <WrenchIcon size={15} /> MCP 服务
-          </button>
-          <button className="log-entry" onClick={() => setShowAlerts(true)}>
-            <BellIcon size={15} /> 通知配置
-          </button>
           <button
-            className="log-entry"
-            onClick={() => setShowTerminalGuard(true)}
+            className="footer-toggle"
+            onClick={() => setFooterCollapsed((v) => !v)}
+            title={
+              footerCollapsed
+                ? '展开菜单'
+                : '收起菜单，把纵向空间让给主机列表'
+            }
+            aria-expanded={!footerCollapsed}
+            aria-controls="sidebar-footer-menu"
           >
-            <ShieldIcon size={15} /> 终端防护
+            <span>{footerCollapsed ? '展开' : '收起'}</span>
+            <span className="footer-toggle-right">
+              {footerCollapsed && updateInfo?.update_available && (
+                <span className="footer-toggle-badge">有更新</span>
+              )}
+              {footerCollapsed ? (
+                <ChevronRightIcon size={14} />
+              ) : (
+                <ChevronDownIcon size={14} />
+              )}
+            </span>
           </button>
 
-          <button className="log-entry" onClick={() => setShowLogs(true)}>
-            <ListIcon size={15} /> 操作审计
-          </button>
-          <div className="version-entry">
-            <button
-              className={`log-entry version-check${
-                updateInfo?.update_available ? ' update-ready' : ''
-              }`}
-              onClick={handleUpdateCheck}
-              disabled={checkingUpdate}
-              title={
-                updateInfo?.update_available
-                  ? `下载 v${updateInfo.latest_version}`
-                  : '检查 GitHub 最新发布版本'
-              }
-            >
-              <RefreshIcon size={15} />
-              <span>
-                {checkingUpdate
-                  ? '正在检查更新…'
-                  : updateInfo?.update_available
-                    ? `下载更新 v${updateInfo.latest_version}`
-                    : '检查更新'}
-              </span>
-            </button>
-            <span className="version-current">
-              当前版本 v{appVersion ?? '—'}
-              {updateInfo?.release_found && !updateInfo.update_available && ' · 已是最新'}
-            </span>
-          </div>
+          {!footerCollapsed && (
+            <div className="footer-menu" id="sidebar-footer-menu">
+              <button className="log-entry" onClick={() => setShowMcp(true)}>
+                <WrenchIcon size={15} /> MCP 服务
+              </button>
+              <button className="log-entry" onClick={() => setShowAlerts(true)}>
+                <BellIcon size={15} /> 通知配置
+              </button>
+              <button
+                className="log-entry"
+                onClick={() => setShowTerminalGuard(true)}
+              >
+                <ShieldIcon size={15} /> 终端防护
+              </button>
+
+              <button className="log-entry" onClick={() => setShowLogs(true)}>
+                <ListIcon size={15} /> 操作审计
+              </button>
+              <div className="version-entry">
+                <button
+                  className={`log-entry version-check${
+                    updateInfo?.update_available ? ' update-ready' : ''
+                  }`}
+                  onClick={handleUpdateCheck}
+                  disabled={checkingUpdate}
+                  title={
+                    updateInfo?.update_available
+                      ? `下载 v${updateInfo.latest_version}`
+                      : '检查 GitHub 最新发布版本'
+                  }
+                >
+                  <RefreshIcon size={15} />
+                  <span>
+                    {checkingUpdate
+                      ? '正在检查更新…'
+                      : updateInfo?.update_available
+                        ? `下载更新 v${updateInfo.latest_version}`
+                        : '检查更新'}
+                  </span>
+                </button>
+                <span className="version-current">
+                  当前版本 v{appVersion ?? '—'}
+                  {updateInfo?.release_found &&
+                    !updateInfo.update_available &&
+                    ' · 已是最新'}
+                </span>
+              </div>
+            </div>
+          )}
+
           <button className="ai-entry" onClick={() => setShowAi(true)}>
             <span className="ai-entry-icon">
               <SparklesIcon size={16} />
@@ -1271,6 +1345,24 @@ function App() {
           request={activeApproval.request}
           deadline={activeApproval.deadline}
           onResolve={(trust) => resolveApproval(activeApproval, trust)}
+        />
+      )}
+
+      {importPreview && (
+        <ConfirmModal
+          title="导入 ~/.ssh/config"
+          body={[
+            `将从 ~/.ssh/config 导入 ${importPreview.imported} 台主机。`,
+            importPreview.skipped > 0
+              ? `其中 ${importPreview.skipped} 台与现有主机重名，将自动跳过。`
+              : '',
+            '导入的主机不含密码与私钥口令，需要时请在主机编辑中补充。',
+          ]
+            .filter(Boolean)
+            .join('\n')}
+          confirmText={`导入 ${importPreview.imported} 台`}
+          onConfirm={confirmImport}
+          onCancel={() => setImportPreview(null)}
         />
       )}
 

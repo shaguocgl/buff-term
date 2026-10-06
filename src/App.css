@@ -1168,6 +1168,54 @@ input::placeholder {
   background: linear-gradient(180deg, transparent, rgba(109, 141, 255, 0.03));
 }
 
+/* 底部菜单折叠开关：主机较多时收起下面的入口，把纵向空间让给主机列表 */
+.footer-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 13px;
+  margin-bottom: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1.2px;
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    background 0.15s,
+    border-color 0.15s;
+}
+
+.footer-toggle:hover {
+  color: var(--text);
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+
+.footer-toggle-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 收起时用角标顶替被隐藏的「检查更新」入口，避免漏掉可用更新 */
+.footer-toggle-badge {
+  padding: 1px 6px;
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--accent-2);
+  background: rgba(56, 200, 232, 0.1);
+  border: 1px solid rgba(56, 200, 232, 0.25);
+}
+
 .ai-entry {
   width: 100%;
   display: flex;
