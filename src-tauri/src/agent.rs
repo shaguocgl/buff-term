@@ -9,15 +9,18 @@ use crate::russh::RusshManager;
 use crate::safety::{is_dangerous, is_write_operation, normalize_tool, sanitize};
 use crate::session::SessionManager;
 use crate::util::{extract_error, now, truncate, truncate_output};
-use context::{build_context_view, CompressionStrategy, ContextUsage};
+use context::{
+    build_context_view, repair_dangling_tool_calls, CompressionStrategy, ContextUsage,
+};
 use futures_util::StreamExt;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tools::{execute_tool, infer_tool_name, parse_args, system_prompt, tools_schema};
 
 struct ControlSlot {
@@ -36,9 +39,29 @@ pub struct AgentManager {
     usage_unsupported: Mutex<HashSet<String>>,
     /// 每模型的估算校准系数（实测 / 本地估算 的 EMA），平台不返回 usage 时用于修正显示。
     calibration: Mutex<HashMap<String, f64>>,
-    /// 会话级代数：按 session_id 索引（此前按 host_id，同主机多会话互相干扰，
-    /// 一个会话 reset 会导致另一个会话的历史写回被丢弃）
-    generations: Mutex<HashMap<u32, u64>>,
+    /// 主机级代数：按 host_id 索引，与 histories/plans 的口径一致。
+    /// reset 一台主机即作废其历史，该主机上正在运行的循环结束时据此放弃写回旧历史。
+    generations: Mutex<HashMap<String, u64>>,
+    /// 同一主机同一时刻只允许一个 agent 循环，否则两个会话各自读副本→整段写回会互相覆盖历史
+    active: Mutex<HashMap<String, u32>>,
+}
+
+/// 同主机 agent 循环的独占租约：agent_chat 结束时自动释放登记，
+/// 覆盖所有提前返回路径（包括 `?`），避免忘记清理导致该主机永久无法再发起对话。
+struct ActiveGuard<'a> {
+    agents: &'a AgentManager,
+    host_id: String,
+    session_id: u32,
+}
+
+impl Drop for ActiveGuard<'_> {
+    fn drop(&mut self) {
+        // 仅当登记仍指向本会话时才移除，防止误删后来者（理论上同主机已被独占，这里是防御性判断）
+        let mut active = self.agents.active.lock().unwrap();
+        if active.get(&self.host_id) == Some(&self.session_id) {
+            active.remove(&self.host_id);
+        }
+    }
 }
 
 pub enum Control {
@@ -132,23 +155,54 @@ impl AgentManager {
         *entry = (*entry * 0.7 + ratio * 0.3).clamp(0.25, 4.0);
     }
 
-    /// 当前会话的历史代数：每次 reset 递增，用于让正在运行的循环在结束时放弃写回旧历史。
-    fn generation(&self, session_id: u32) -> u64 {
+    /// 该主机的历史代数：每次 reset 递增，用于让正在运行的循环在结束时放弃写回旧历史。
+    fn generation(&self, host_id: &str) -> u64 {
         *self
             .generations
             .lock()
             .unwrap()
-            .get(&session_id)
+            .get(host_id)
             .unwrap_or(&0)
     }
 
-    fn bump_generation(&self, session_id: u32) {
+    fn bump_generation(&self, host_id: &str) {
         *self
             .generations
             .lock()
             .unwrap()
-            .entry(session_id)
+            .entry(host_id.to_string())
             .or_insert(0) += 1;
+    }
+
+    /// 尝试登记该主机的活动 agent 循环；同主机已有循环在跑时返回 None。
+    fn try_acquire_active(&self, host_id: &str, session_id: u32) -> Option<ActiveGuard<'_>> {
+        let mut active = self.active.lock().unwrap();
+        if active.contains_key(host_id) {
+            return None;
+        }
+        active.insert(host_id.to_string(), session_id);
+        Some(ActiveGuard {
+            agents: self,
+            host_id: host_id.to_string(),
+            session_id,
+        })
+    }
+
+    /// 等待上一个循环释放（停止/清空后旧循环退出需要少许时间），
+    /// 超时才视为真正冲突（另一标签页在用）。
+    async fn acquire_active(&self, host_id: &str, session_id: u32) -> Option<ActiveGuard<'_>> {
+        for _ in 0..ACTIVE_WAIT_SECS * 10 {
+            if let Some(guard) = self.try_acquire_active(host_id, session_id) {
+                return Some(guard);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        self.try_acquire_active(host_id, session_id)
+    }
+
+    /// 该主机上正在运行的 agent 循环所属的 session_id（reset 时据此精确取消）。
+    fn active_session(&self, host_id: &str) -> Option<u32> {
+        self.active.lock().unwrap().get(host_id).copied()
     }
 }
 
@@ -244,6 +298,18 @@ fn emit_tool_state(
     );
 }
 
+/// 中断/会话结束时为尚未回填结果的 tool_call 补一条 tool 消息，
+/// 否则历史里会留下没有 tool 结果的 assistant.tool_calls，OpenAI 兼容平台会直接拒绝下一次请求（400）。
+fn backfill_unanswered(history: &mut Vec<serde_json::Value>, calls: &[ToolCallAcc], note: &str) {
+    for acc in calls {
+        history.push(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": acc.id,
+            "content": note,
+        }));
+    }
+}
+
 #[tauri::command]
 pub async fn agent_chat(
     app: AppHandle,
@@ -257,6 +323,14 @@ pub async fn agent_chat(
     let host = sessions
         .host(session_id)
         .ok_or_else(|| "会话不存在或已断开".to_string())?;
+    // 同主机只允许一个 agent 循环：历史按主机共享，两个会话各自读副本→整段写回会互相覆盖。
+    // guard 在函数返回（含任何 ? 提前返回）时自动释放登记。
+    let _active_guard = agents
+        .acquire_active(&host.id, session_id)
+        .await
+        .ok_or_else(|| {
+            "该主机已有正在进行的 AI 对话（可能在另一个标签页），请等其完成或停止后再发送".to_string()
+        })?;
     let (provider, model_info) = crate::ai::resolve_active_ai_model(&db)?;
     let model = model_info.model.clone();
     let context_window = model_info.context_window;
@@ -275,7 +349,7 @@ pub async fn agent_chat(
     let russh = app.state::<RusshManager>();
     let (tx, rx) = mpsc::channel::<Control>(8);
     let control_token = agents.set_control(session_id, tx);
-    let generation = agents.generation(session_id);
+    let generation = agents.generation(&host.id);
 
     // 会话开始时静默采集一份主机快照写入历史指标，让趋势数据随对话自然累积。
     // 失败不影响对话流程。
@@ -283,8 +357,11 @@ pub async fn agent_chat(
         let _ = crate::monitor::save_metric(&db, &host.id, &snap, "agent");
     }
 
+    // 不能用整体 timeout：流式回复的合法总时长可能远超 120s。
+    // read_timeout 限定的是相邻数据块之间的最长空闲间隔，而不是整个响应的总时长。
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
     let url = format!(
@@ -293,6 +370,9 @@ pub async fn agent_chat(
     );
 
     let mut history = agents.history(&host.id);
+    // 上次对话被中断时历史里可能留下没有 tool 结果的 assistant.tool_calls，
+    // 先补齐占位结果，否则 OpenAI 兼容平台会直接拒绝本次请求（400）
+    repair_dangling_tool_calls(&mut history);
     let system = system_prompt(&host, &provider, &model, permission_mode);
     if history.is_empty() {
         history.push(serde_json::json!({
@@ -324,7 +404,7 @@ pub async fn agent_chat(
     };
     let result = run_agent_loop(&loop_ctx, rx, &mut history).await;
 
-    if agents.generation(session_id) == generation {
+    if agents.generation(&host.id) == generation {
         agents.save_history(&host.id, history);
     }
     agents.clear_control(session_id, control_token);
@@ -376,11 +456,14 @@ pub fn agent_reset(
     session_id: u32,
     host_id: String,
 ) -> Result<(), String> {
-    // 停止正在运行的 agent 循环（若有），并递增该会话的代数使旧循环在结束时放弃写回历史
-    if let Some(tx) = agents.control_sender(session_id) {
+    // 停止正在运行的 agent 循环（若有）：取消该主机上实际登记的会话
+    // （发起 reset 的标签页未必是正在跑循环的那个），并递增主机级代数
+    // 使旧循环在结束时放弃写回历史
+    let target = agents.active_session(&host_id).unwrap_or(session_id);
+    if let Some(tx) = agents.control_sender(target) {
         let _ = tx.try_send(Control::Cancel);
     }
-    agents.bump_generation(session_id);
+    agents.bump_generation(&host_id);
     agents.clear_history(&host_id);
     agents.clear_plan(&host_id);
     Ok(())
@@ -617,16 +700,29 @@ async fn run_agent_loop(
             if include_usage {
                 body["stream_options"] = serde_json::json!({"include_usage": true});
             }
-            let resp = client
+            // send 阶段也要响应「停止」：连接/上传/等首字节期间可能阻塞较久，
+            // 否则 Cancel 要等响应头到达才被察觉。此时历史中还没有本轮的
+            // assistant.tool_calls（流读完后才写入），直接返回不会留下悬挂调用。
+            let send = client
                 .post(url)
                 .bearer_auth(api_key)
                 .json(&body)
-                .send()
-                .await
-                .map_err(|e| {
+                .send();
+            tokio::pin!(send);
+            let resp = loop {
+                tokio::select! {
+                    r = &mut send => break r,
+                    msg = rx.recv() => match msg {
+                        Some(Control::Cancel) | None => return Ok(()),
+                        // 过期的审批/继续回执，忽略
+                        Some(Control::Approve { .. }) | Some(Control::Continue { .. }) => {}
+                    },
+                }
+            };
+            let resp = resp.map_err(|e| {
                     let detail = e.to_string();
                     let msg = if e.is_timeout() {
-                        format!("请求 AI 平台超时（120s），模型可能响应过慢或网络不畅: {detail}")
+                        format!("等待 AI 平台响应超时（120 秒内无数据），模型可能响应过慢或网络不畅: {detail}")
                     } else if e.is_connect() {
                         format!("无法连接 AI 平台，请检查网络或 Base URL: {detail}")
                     } else {
@@ -677,7 +773,8 @@ async fn run_agent_loop(
         // 在 \n 边界处解码完整行
         let mut buf: Vec<u8> = Vec::new();
         let mut content = String::new();
-        let mut tool_calls: HashMap<usize, ToolCallAcc> = HashMap::new();
+        // BTreeMap 按 tool_calls index 排序，保证执行顺序与模型声明的顺序一致且确定
+        let mut tool_calls: BTreeMap<usize, ToolCallAcc> = BTreeMap::new();
         let mut done = false;
         let mut reported_prompt_tokens: Option<usize> = None;
 
@@ -780,6 +877,14 @@ async fn run_agent_loop(
             has_name || has_args_signal
         });
 
+        // 部分模型不下发 tool_call 的 id：用其流内序号补一个本地 id，
+        // 保证审批回执匹配与 tool/tool_call_id 配对消歧
+        for (index, acc) in tool_calls.iter_mut() {
+            if acc.id.is_empty() {
+                acc.id = format!("call_{index}");
+            }
+        }
+
         if tool_calls.is_empty() {
             if content.is_empty() {
                 content = "（模型未返回内容）".to_string();
@@ -789,8 +894,9 @@ async fn run_agent_loop(
             return Ok(());
         }
 
+        let calls: Vec<ToolCallAcc> = tool_calls.into_values().collect();
         let mut calls_json = Vec::new();
-        for (_, acc) in tool_calls.iter() {
+        for acc in &calls {
             calls_json.push(serde_json::json!({
                 "id": acc.id,
                 "type": "function",
@@ -803,8 +909,12 @@ async fn run_agent_loop(
             "tool_calls": calls_json,
         }));
 
-        for (_, acc) in tool_calls {
+        // 不变量：每次迭代推进前都必须为 calls[i] 恰好补一条 tool 消息，
+        // 否则历史里会留下没有结果的 tool_call，下一次请求会被平台拒绝（400）。
+        // 因此本循环内的所有提前返回都要先 backfill 剩余调用。
+        for (i, acc) in calls.iter().enumerate() {
             if let Ok(Control::Cancel) = rx.try_recv() {
+                backfill_unanswered(history, &calls[i..], "用户已中断，该工具未执行");
                 return Ok(());
             }
             let started = Instant::now();
@@ -823,7 +933,7 @@ async fn run_agent_loop(
                 emit_tool_state(
                     app,
                     session_id,
-                    &acc,
+                    acc,
                     &args,
                     "result",
                     Some("计划已更新".to_string()),
@@ -884,7 +994,7 @@ async fn run_agent_loop(
                 emit_tool_state(
                     app,
                     session_id,
-                    &acc,
+                    acc,
                     &args,
                     "request",
                     None,
@@ -906,6 +1016,23 @@ async fn run_agent_loop(
                             break false;
                         }
                         Ok(None) => {
+                            // 当前调用的审批卡片还停在 request 态（按钮可点），
+                            // 补一条 denied 让前端关闭它；其余未展示的调用无需发事件
+                            emit_tool_state(
+                                app,
+                                session_id,
+                                acc,
+                                &args,
+                                "denied",
+                                None,
+                                Some("会话已结束".to_string()),
+                                None,
+                            );
+                            backfill_unanswered(
+                                history,
+                                &calls[i..],
+                                "会话已结束，该工具未执行",
+                            );
                             let msg = "会话已结束".to_string();
                             let _ = app.emit(
                                 "ai:error",
@@ -916,7 +1043,25 @@ async fn run_agent_loop(
                             );
                             return Err(msg);
                         }
-                        Ok(Some(Control::Cancel)) => return Ok(()),
+                        Ok(Some(Control::Cancel)) => {
+                            // 同上：先关闭当前调用的审批卡片，再回填剩余调用的结果
+                            emit_tool_state(
+                                app,
+                                session_id,
+                                acc,
+                                &args,
+                                "denied",
+                                None,
+                                Some("用户已中断".to_string()),
+                                None,
+                            );
+                            backfill_unanswered(
+                                history,
+                                &calls[i..],
+                                "用户已中断，该工具未执行",
+                            );
+                            return Ok(());
+                        }
                         Ok(Some(Control::Approve {
                             tool_call_id,
                             allow,
@@ -949,7 +1094,7 @@ async fn run_agent_loop(
                             duration_ms: started.elapsed().as_millis() as u64,
                         },
                     );
-                    emit_tool_state(app, session_id, &acc, &args, "denied", None, note, None);
+                    emit_tool_state(app, session_id, acc, &args, "denied", None, note, None);
                     history.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": acc.id,
@@ -960,15 +1105,34 @@ async fn run_agent_loop(
             }
 
             let approval_label = if need_approval { "approved" } else { "auto" };
-            emit_tool_state(app, session_id, &acc, &args, "running", None, None, None);
+            emit_tool_state(app, session_id, acc, &args, "running", None, None, None);
 
-            let tool = execute_tool(db, russh, host, normalized_name, &args);
+            let cancel = CancellationToken::new();
+            let tool = execute_tool(db, russh, host, normalized_name, &args, &cancel);
             tokio::pin!(tool);
             let result = loop {
                 tokio::select! {
                     r = &mut tool => break r,
                     msg = rx.recv() => match msg {
-                        Some(Control::Cancel) | None => return Ok(()),
+                        Some(Control::Cancel) | None => {
+                            // 取消不是简单丢弃 future：先通知工具层（SSH 通道会向远端进程
+                            // 发 SIGTERM），给它有界的清理时间，再回填未执行的工具结果
+                            cancel.cancel();
+                            let _ =
+                                tokio::time::timeout(Duration::from_secs(5), &mut tool).await;
+                            emit_tool_state(
+                                app,
+                                session_id,
+                                acc,
+                                &args,
+                                "error",
+                                Some("已中断".into()),
+                                None,
+                                None,
+                            );
+                            backfill_unanswered(history, &calls[i..], "用户已中断执行");
+                            return Ok(());
+                        }
                         Some(Control::Approve { .. }) | Some(Control::Continue { .. }) => {}
                     },
                 }
@@ -992,7 +1156,7 @@ async fn run_agent_loop(
                     emit_tool_state(
                         app,
                         session_id,
-                        &acc,
+                        acc,
                         &args,
                         "result",
                         Some(output.clone()),
@@ -1023,7 +1187,7 @@ async fn run_agent_loop(
                     emit_tool_state(
                         app,
                         session_id,
-                        &acc,
+                        acc,
                         &args,
                         "error",
                         Some(err.clone()),
@@ -1152,7 +1316,7 @@ fn is_unsupported_stream_options_error(text: &str) -> bool {
 fn apply_delta(
     delta: &serde_json::Value,
     content: &mut String,
-    tool_calls: &mut HashMap<usize, ToolCallAcc>,
+    tool_calls: &mut BTreeMap<usize, ToolCallAcc>,
     app: &AppHandle,
     session_id: u32,
 ) {
@@ -1194,6 +1358,9 @@ fn apply_delta(
 
 /// 单个工具审批的等待上限（秒），超时按拒绝处理，不终止会话
 const APPROVAL_TIMEOUT_SECS: u64 = 600;
+
+/// 同主机新会话等待上一个 agent 循环释放登记的上限（秒）
+const ACTIVE_WAIT_SECS: u64 = 10;
 
 #[cfg(test)]
 mod tests {
@@ -1264,6 +1431,55 @@ mod tests {
         assert!(agents.control_sender(7).is_some());
         agents.clear_control(7, new_token);
         assert!(agents.control_sender(7).is_none());
+    }
+
+    #[test]
+    fn backfill_unanswered_pushes_one_tool_message_per_call() {
+        let mut history = vec![serde_json::json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "exec_command", "arguments": "{}"}},
+                {"id": "c2", "type": "function", "function": {"name": "exec_command", "arguments": "{}"}},
+            ],
+        })];
+        let calls = vec![
+            ToolCallAcc {
+                id: "c1".to_string(),
+                ..Default::default()
+            },
+            ToolCallAcc {
+                id: "c2".to_string(),
+                ..Default::default()
+            },
+        ];
+        backfill_unanswered(&mut history, &calls, "用户已中断，该工具未执行");
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[1]["role"], "tool");
+        assert_eq!(history[1]["tool_call_id"], "c1");
+        assert_eq!(history[1]["content"], "用户已中断，该工具未执行");
+        assert_eq!(history[2]["role"], "tool");
+        assert_eq!(history[2]["tool_call_id"], "c2");
+    }
+
+    #[test]
+    fn active_guard_blocks_second_session_on_same_host() {
+        let agents = AgentManager::default();
+        let guard = agents
+            .try_acquire_active("h1", 1)
+            .expect("首次登记应成功");
+        assert!(
+            agents.try_acquire_active("h1", 2).is_none(),
+            "同主机第二个会话应被拒绝"
+        );
+        assert_eq!(agents.active_session("h1"), Some(1));
+        // 不同主机互不影响
+        assert!(agents.try_acquire_active("h2", 3).is_some());
+        drop(guard);
+        assert!(
+            agents.try_acquire_active("h1", 2).is_some(),
+            "释放后应能重新登记"
+        );
     }
 
     #[test]

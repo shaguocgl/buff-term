@@ -7,6 +7,7 @@ use crate::models::{AiProvider, Host};
 use crate::russh::RusshManager;
 use crate::safety::{normalize_tool, sanitize};
 use crate::util::{format_exec_output, now, shq};
+use tokio_util::sync::CancellationToken;
 
 pub(crate) fn system_prompt(
     host: &Host,
@@ -233,6 +234,7 @@ pub(crate) async fn execute_tool(
     host: &Host,
     name: &str,
     args: &serde_json::Value,
+    cancel: &CancellationToken,
 ) -> Result<String, String> {
     match name {
         "exec_command" => {
@@ -246,7 +248,7 @@ pub(crate) async fn execute_tool(
                 .unwrap_or(30)
                 .clamp(1, 600);
             let out = russh
-                .exec(host, command, std::time::Duration::from_secs(timeout))
+                .exec_cancellable(host, command, std::time::Duration::from_secs(timeout), cancel)
                 .await?;
             Ok(sanitize(&format_exec_output(&out)))
         }
@@ -256,10 +258,11 @@ pub(crate) async fn execute_tool(
                 .and_then(|p| p.as_str())
                 .ok_or_else(|| "缺少 path 参数".to_string())?;
             let out = russh
-                .exec(
+                .exec_cancellable(
                     host,
                     &format!("cat -- {}", shq(path)),
                     std::time::Duration::from_secs(15),
+                    cancel,
                 )
                 .await?;
             Ok(sanitize(&format_exec_output(&out)))
@@ -267,10 +270,11 @@ pub(crate) async fn execute_tool(
         "list_dir" => {
             let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
             let out = russh
-                .exec(
+                .exec_cancellable(
                     host,
                     &format!("ls -lah -- {}", shq(path)),
                     std::time::Duration::from_secs(15),
+                    cancel,
                 )
                 .await?;
             Ok(sanitize(&format_exec_output(&out)))
@@ -278,7 +282,7 @@ pub(crate) async fn execute_tool(
         "resource_usage" => {
             let script = "echo '-- 磁盘 --'; df -h; echo; echo '-- 内存 --'; (free -h 2>/dev/null || vm_stat); echo; echo '-- 负载 --'; uptime; echo; echo '-- TOP 进程 --'; (ps aux --sort=-%mem 2>/dev/null || ps aux) | head -8";
             let out = russh
-                .exec(host, script, std::time::Duration::from_secs(25))
+                .exec_cancellable(host, script, std::time::Duration::from_secs(25), cancel)
                 .await?;
             Ok(sanitize(&format_exec_output(&out)))
         }
@@ -315,7 +319,7 @@ pub(crate) async fn execute_tool(
             let effective = infer_tool_name(name, args);
             let normalized = normalize_tool(effective);
             if normalized != name {
-                return Box::pin(execute_tool(db, russh, host, normalized, args)).await;
+                return Box::pin(execute_tool(db, russh, host, normalized, args, cancel)).await;
             }
             eprintln!("[agent] 未知工具调用: {name}，参数: {args}");
             Err(format!(

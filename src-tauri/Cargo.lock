@@ -693,7 +693,7 @@ dependencies = [
 
 [[package]]
 name = "buff-term"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "aes-gcm 0.10.3",
  "base64 0.22.1",
@@ -722,6 +722,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tiny_http",
  "tokio",
+ "tokio-util",
  "uuid",
 ]
 

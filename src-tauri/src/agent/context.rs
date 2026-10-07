@@ -107,6 +107,51 @@ fn clip_head_tail(s: &str, max: usize) -> String {
     }
 }
 
+/// 修复历史里悬挂的 tool_call：assistant 消息声明了 tool_calls，但其后连续的
+/// tool 消息没有覆盖全部 id（上次对话被中断/会话结束时可能留下这种历史）。
+/// OpenAI 兼容平台会拒绝携带未配对 tool_calls 的请求（400），因此为每个未应答的
+/// id 补一条占位 tool 消息，插在该 tool 组末尾（无 tool 消息时紧随 assistant）。
+pub(crate) fn repair_dangling_tool_calls(history: &mut Vec<Value>) {
+    let mut i = 0;
+    while i < history.len() {
+        if role(&history[i]) != "assistant" {
+            i += 1;
+            continue;
+        }
+        let Some(calls) = history[i]["tool_calls"].as_array() else {
+            i += 1;
+            continue;
+        };
+        let mut pending: Vec<String> = calls
+            .iter()
+            .filter_map(|c| c["id"].as_str())
+            .filter(|id| !id.is_empty())
+            .map(String::from)
+            .collect();
+        // 其后连续的 tool 消息依次应答这些调用
+        let mut j = i + 1;
+        while j < history.len() && role(&history[j]) == "tool" {
+            if let Some(id) = history[j]["tool_call_id"].as_str() {
+                pending.retain(|p| p != id);
+            }
+            j += 1;
+        }
+        let n = pending.len();
+        for (k, id) in pending.into_iter().enumerate() {
+            history.insert(
+                j + k,
+                json!({
+                    "role": "tool",
+                    "tool_call_id": id,
+                    "content": "（该工具调用未完成，无结果）",
+                }),
+            );
+        }
+        // 新插入的是 tool 消息无需再扫，从插入点之后继续
+        i = j + n;
+    }
+}
+
 /// 把历史拆成「system 消息 + 若干轮」。一轮 = 一条 user 消息 + 其后的 assistant/tool
 /// 消息；若历史开头不是 user，则这些消息并入第一轮。
 fn split_system_and_rounds(history: &[Value]) -> (Option<Value>, Vec<Vec<Value>>) {
@@ -683,6 +728,55 @@ mod tests {
             err.contains("context_window"),
             "错误应提示调整 context_window: {err}"
         );
+    }
+
+    /// 回归：中断后历史里会留下没有 tool 结果的 assistant.tool_calls，
+    /// 修复时应为缺失的 id 补占位 tool 消息，且完整历史原样不动。
+    #[test]
+    fn repair_backfills_missing_tool_results() {
+        let mut h = vec![
+            json!({"role": "user", "content": "任务"}),
+            json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "exec_command", "arguments": "{}"}},
+                    {"id": "c2", "type": "function", "function": {"name": "exec_command", "arguments": "{}"}},
+                ]
+            }),
+            json!({"role": "tool", "tool_call_id": "c1", "content": "ok"}),
+            json!({"role": "user", "content": "下一条"}),
+        ];
+        repair_dangling_tool_calls(&mut h);
+        // c2 的占位结果插在该 tool 组末尾、下一条 user 之前
+        assert_eq!(h.len(), 5);
+        assert_eq!(h[3]["role"], "tool");
+        assert_eq!(h[3]["tool_call_id"], "c2");
+        assert_eq!(h[4]["role"], "user");
+
+        let mut complete = history(3);
+        let before = complete.clone();
+        repair_dangling_tool_calls(&mut complete);
+        assert_eq!(complete, before, "完整历史不应被改动");
+    }
+
+    #[test]
+    fn repair_inserts_tool_result_before_next_user() {
+        let mut h = vec![
+            json!({"role": "user", "content": "任务"}),
+            json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "exec_command", "arguments": "{}"}}]
+            }),
+            json!({"role": "user", "content": "新问题"}),
+        ];
+        repair_dangling_tool_calls(&mut h);
+        assert_eq!(h.len(), 4);
+        assert_eq!(h[2]["role"], "tool");
+        assert_eq!(h[2]["tool_call_id"], "c1");
+        assert!(h[2]["content"].as_str().unwrap().contains("未完成"));
+        assert_eq!(h[3]["role"], "user");
     }
 
     /// 回归：压缩判定必须按校准后的真实 token 折算，否则平台实测远高于本地粗估时，

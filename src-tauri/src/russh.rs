@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
+use tokio_util::sync::CancellationToken;
 
 pub struct ExecResult {
     /// stdout / stderr 按到达顺序合并的文本（兼容现有调用方）
@@ -502,13 +503,30 @@ impl RusshManager {
         command: &str,
         timeout: Duration,
     ) -> Result<ExecResult, String> {
+        self.exec_cancellable(host, command, timeout, &CancellationToken::new())
+            .await
+    }
+
+    /// 可被外部取消的 exec：`cancel` 触发时 exec_on 会向远端进程发送 SIGTERM
+    /// 并返回错误。取消只关闭了本次通道，连接本身仍然健康，因此不 invalidate、
+    /// 也不换连接重试（重试会让已被用户取消的命令再执行一遍）。
+    pub async fn exec_cancellable(
+        &self,
+        host: &Host,
+        command: &str,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<ExecResult, String> {
         let lease = self.acquire(host).await?;
-        match exec_on(&lease.handle, command, timeout).await {
+        match exec_on(&lease.handle, command, timeout, cancel).await {
             Ok(r) => {
                 self.touch(&host.id);
                 Ok(r)
             }
             Err(e) => {
+                if cancel.is_cancelled() {
+                    return Err(e);
+                }
                 self.invalidate(&host.id, &lease.handle);
                 if !lease.reused {
                     // 新建连接上执行失败：连接或命令本身有问题，直接报错
@@ -524,7 +542,7 @@ impl RusshManager {
                 }
                 // 复用连接上执行失败：换新连接重试一次（只读操作可安全重试）
                 let lease = self.acquire(host).await?;
-                match exec_on(&lease.handle, command, timeout).await {
+                match exec_on(&lease.handle, command, timeout, cancel).await {
                     Ok(r) => {
                         self.touch(&host.id);
                         Ok(r)
@@ -861,6 +879,7 @@ async fn exec_on(
     handle: &Handle<ClientHandler>,
     command: &str,
     timeout: Duration,
+    cancel: &CancellationToken,
 ) -> Result<ExecResult, String> {
     let mut channel: Channel<russh::client::Msg> =
         tokio::time::timeout(CHANNEL_OP_TIMEOUT, handle.channel_open_session())
@@ -888,7 +907,16 @@ async fn exec_on(
             timed_out = true;
             break;
         }
-        let msg = match tokio::time::timeout(remaining, channel.wait()).await {
+        let msg = match tokio::select! {
+            m = tokio::time::timeout(remaining, channel.wait()) => m,
+            // 用户取消：向远端进程发 TERM 并关闭通道。否则只断开本地通道的话，
+            // 远端命令会以孤儿进程的形式继续在后台运行
+            _ = cancel.cancelled() => {
+                let _ = channel.signal(russh::Sig::TERM).await;
+                let _ = channel.close().await;
+                return Err("命令已被用户中断（已向远端进程发送 SIGTERM）".to_string());
+            }
+        } {
             Ok(m) => m,
             Err(_) => {
                 timed_out = true;
