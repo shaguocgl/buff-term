@@ -1,6 +1,8 @@
 use crate::db::Db;
-use crate::models::Host;
+use crate::models::{AuditLog, Host};
 use crate::russh::RusshManager;
+use crate::safety::sanitize;
+use crate::util::{now, truncate};
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{FileAttributes, FileType};
 use serde::Serialize;
@@ -527,6 +529,351 @@ pub async fn sftp_rename(
     Ok(success("已重命名"))
 }
 
+/// 内置编辑器单文件大小上限（2 MiB）：超过该值不读入内存，避免大文件卡死 / 内存膨胀，
+/// 前端据此提示改用「下载到本地编辑」。
+const MAX_EDIT_BYTES: u64 = 2 * 1024 * 1024;
+
+/// 二进制嗅探取样长度（前 8 KiB 内出现 NUL 即判定为二进制）
+const BINARY_SNIFF_BYTES: usize = 8 * 1024;
+
+/// 远端文本文件内容（供中间区内置编辑器打开）。
+#[derive(Serialize)]
+pub struct SftpFileContent {
+    /// 文件文本内容（UTF-8）
+    pub content: String,
+    /// 文件字节数
+    pub size: u64,
+    /// 最近修改时间（unix 秒），保存时回传用于检测远端是否被他人改动
+    pub mtime: u64,
+    /// 是否命中敏感路径（保存时需前端二次确认）
+    pub sensitive: bool,
+}
+
+/// 保存结果：`requires_confirm` 为 true 表示命中敏感路径且本次未确认，未执行写入。
+#[derive(Serialize)]
+pub struct SftpWriteOutcome {
+    pub ok: bool,
+    pub text: String,
+    pub requires_confirm: bool,
+    /// 写入后远端文件的 mtime（unix 秒），前端据此更新并发修改基线；0 表示未取到
+    pub mtime: u64,
+}
+
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn looks_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(BINARY_SNIFF_BYTES).any(|b| *b == 0)
+}
+
+/// 敏感路径判定：命中时保存需用户二次确认。
+/// 覆盖私钥 / 账号口令 / sudo / 认证配置，以及可持久化执行任意命令的
+/// 定时任务、开机自启与登录 shell 启动脚本。
+fn is_sensitive_remote_path(path: &str) -> bool {
+    let p = path.replace('\\', "/").to_ascii_lowercase();
+    if p.contains("/.ssh/") || p.ends_with("/.ssh") {
+        return true;
+    }
+    const CRITICAL: &[&str] = &[
+        // 账号 / 口令 / 提权 / 认证
+        "/etc/shadow",
+        "/etc/gshadow",
+        "/etc/passwd",
+        "/etc/group",
+        "/etc/sudoers",
+        "/etc/pam.d/",
+        "/etc/ld.so.preload",
+        "/etc/ssh/",
+        "/etc/krb5.keytab",
+        "/etc/ssl/private/",
+        // 定时任务 / 开机自启
+        "/etc/crontab",
+        "/etc/cron.d/",
+        "/etc/cron.daily/",
+        "/etc/cron.hourly/",
+        "/etc/cron.weekly/",
+        "/var/spool/cron",
+        "/etc/systemd/",
+        "/etc/init.d/",
+        "/etc/rc.local",
+        "/etc/profile.d/",
+        // 登录 shell 启动脚本
+        "/.bashrc",
+        "/.bash_profile",
+        "/.bash_login",
+        "/.bash_logout",
+        "/.profile",
+        "/.zshrc",
+        "/.zprofile",
+        "/.config/fish/",
+    ];
+    CRITICAL.iter().any(|f| p.contains(f))
+}
+
+/// 取远端路径的父目录（`/a/b.txt` → `/a`，`b.txt` → ``）。
+fn remote_parent(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(0) => "/",
+        Some(idx) => &path[..idx],
+        None => "",
+    }
+}
+
+/// 拼接远端路径并归一化 `.` / `..`（用于把相对符号链接目标解析成绝对路径）。
+fn join_remote(dir: &str, name: &str) -> String {
+    let base = if name.starts_with('/') {
+        String::new()
+    } else if dir.is_empty() || dir == "/" {
+        String::new()
+    } else {
+        dir.to_string()
+    };
+    let joined = format!("{base}/{name}");
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in joined.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    format!("/{}", parts.join("/"))
+}
+
+/// 符号链接解析：保存时若直接 rename 到链接路径会把链接替换成普通文件，
+/// 因此先解析到真实目标再写入（相对目标按链接所在目录拼接）。
+async fn resolve_link(sftp: &SftpSession, path: &str) -> String {
+    match sftp.symlink_metadata(path).await {
+        Ok(meta) if meta.file_type().is_symlink() => match sftp.read_link(path).await {
+            Ok(target) => join_remote(remote_parent(path), &target),
+            Err(_) => path.to_string(),
+        },
+        _ => path.to_string(),
+    }
+}
+
+/// 同目录临时文件名：`/etc/nginx.conf` → `/etc/.nginx.conf.buffterm-<uuid>.tmp`
+fn temp_path(path: &str) -> String {
+    let dir = remote_parent(path);
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let prefix = if dir.is_empty() || dir == "/" { "" } else { dir };
+    format!(
+        "{prefix}/.{name}.buffterm-{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+/// 原子写入：先写同目录临时文件，再 rename 覆盖目标。
+/// 直接截断写入时中途断连会留下半个文件，rename 是原子替换，失败也不会破坏原文件。
+async fn write_atomic(
+    sftp: &SftpSession,
+    path: &str,
+    bytes: &[u8],
+    expected_mtime: Option<u64>,
+) -> Result<(), String> {
+    let existing = sftp.symlink_metadata(path).await.ok();
+    if let Some(meta) = &existing {
+        if meta.file_type().is_dir() {
+            return Err("目标是目录，无法写入文件".to_string());
+        }
+        if let Some(expected) = expected_mtime {
+            if meta.mtime.unwrap_or(0) as u64 != expected {
+                return Err("远端文件已被其它程序修改，请重新打开后再编辑".to_string());
+            }
+        }
+    }
+
+    let temp = temp_path(path);
+    let write = async {
+        let mut file = sftp
+            .create(temp.as_str())
+            .await
+            .map_err(|e| format!("创建临时文件失败: {e}"))?;
+        file.write_all(bytes)
+            .await
+            .map_err(|e| format!("写入临时文件失败: {e}"))?;
+        // 沿用原文件权限（best-effort：部分服务端不支持 fsetstat 时忽略）
+        if let Some(meta) = &existing {
+            let _ = file
+                .set_metadata(FileAttributes {
+                    permissions: meta.permissions,
+                    ..Default::default()
+                })
+                .await;
+        }
+        let _ = file.sync_all().await;
+        file.close()
+            .await
+            .map_err(|e| format!("关闭临时文件失败: {e}"))?;
+        Ok::<(), String>(())
+    };
+    if let Err(e) = write.await {
+        let _ = sftp.remove_file(temp.as_str()).await;
+        return Err(e);
+    }
+
+    // 多数服务端的 rename 直接覆盖目标；个别实现会拒绝已存在的目标，
+    // 此时退化为「先删后改名」（不再原子，但保证保存成功）。
+    if sftp.rename(temp.as_str(), path).await.is_err() {
+        let _ = sftp.remove_file(path).await;
+        if let Err(e) = sftp.rename(temp.as_str(), path).await {
+            let _ = sftp.remove_file(temp.as_str()).await;
+            return Err(format!("替换目标文件失败: {e}"));
+        }
+    }
+    Ok(())
+}
+
+/// 读取远端文本文件（供中间区内置编辑器打开）：
+/// 解析符号链接后按大小上限与二进制嗅探做前置校验，UTF-8 解码失败同样拒绝。
+#[tauri::command]
+pub async fn sftp_read_file(
+    db: State<'_, Arc<Db>>,
+    russh: State<'_, RusshManager>,
+    host_id: String,
+    path: String,
+) -> Result<SftpFileContent, String> {
+    let host = crate::hosts::load_host(&db, &host_id)?;
+    let sensitive = is_sensitive_remote_path(&path);
+    with_sftp(&russh, &host, Duration::from_secs(20), |sftp| {
+        let path = path.clone();
+        Box::pin(async move {
+            let real = resolve_link(sftp, &path).await;
+            let meta = sftp
+                .metadata(real.as_str())
+                .await
+                .map_err(|e| format!("读取远程文件信息失败: {e}"))?;
+            if meta.file_type().is_dir() {
+                return Err("目标是目录，无法作为文件打开".to_string());
+            }
+            let size = meta.len();
+            if size > MAX_EDIT_BYTES {
+                return Err(format!(
+                    "文件大小 {} 超过内置编辑器上限 {}，请下载到本地编辑",
+                    human_bytes(size),
+                    human_bytes(MAX_EDIT_BYTES)
+                ));
+            }
+            let bytes = sftp
+                .read(real.as_str())
+                .await
+                .map_err(|e| format!("读取远程文件失败: {e}"))?;
+            // stat 与读取之间文件可能变大，读完再兜底校验一次
+            if bytes.len() as u64 > MAX_EDIT_BYTES {
+                return Err(format!(
+                    "文件大小超过内置编辑器上限 {}，请下载到本地编辑",
+                    human_bytes(MAX_EDIT_BYTES)
+                ));
+            }
+            if looks_binary(&bytes) {
+                return Err("疑似二进制文件，已拒绝在内置编辑器中打开".to_string());
+            }
+            let content = String::from_utf8(bytes)
+                .map_err(|_| "文件不是 UTF-8 文本，请下载到本地编辑".to_string())?;
+            Ok(SftpFileContent {
+                content,
+                size,
+                mtime: meta.mtime.unwrap_or(0) as u64,
+                sensitive,
+            })
+        })
+    })
+    .await
+}
+
+/// 保存远端文本文件：敏感路径需 `confirmed` 为 true 才写入（前端先弹窗确认），
+/// `expected_mtime` 与远端当前 mtime 不一致时拒绝覆盖（防止静默冲掉他人改动）。
+/// 每次写入（成功或失败）都写操作审计，弥补 SFTP 通道绕过终端防护的审计缺口。
+#[tauri::command]
+pub async fn sftp_write_file(
+    db: State<'_, Arc<Db>>,
+    russh: State<'_, RusshManager>,
+    host_id: String,
+    path: String,
+    content: String,
+    expected_mtime: Option<u64>,
+    confirmed: bool,
+) -> Result<SftpWriteOutcome, String> {
+    let host = crate::hosts::load_host(&db, &host_id)?;
+    let sensitive = is_sensitive_remote_path(&path);
+    if sensitive && !confirmed {
+        return Ok(SftpWriteOutcome {
+            ok: false,
+            text: format!("{path} 属于敏感路径，写入需要确认"),
+            requires_confirm: true,
+            mtime: 0,
+        });
+    }
+
+    let bytes = content.into_bytes();
+    if bytes.len() as u64 > MAX_EDIT_BYTES {
+        return Err(format!(
+            "内容大小超过内置编辑器上限 {}，已拒绝写入",
+            human_bytes(MAX_EDIT_BYTES)
+        ));
+    }
+    let total = bytes.len() as u64;
+    let started = Instant::now();
+    let result = with_sftp(&russh, &host, Duration::from_secs(30), |sftp| {
+        let path = path.clone();
+        let bytes = bytes.clone();
+        Box::pin(async move {
+            let real = resolve_link(sftp, &path).await;
+            write_atomic(sftp, &real, &bytes, expected_mtime).await?;
+            // 回传写入后的 mtime，前端据此更新后续保存的并发修改基线
+            Ok(sftp
+                .metadata(real.as_str())
+                .await
+                .ok()
+                .and_then(|m| m.mtime)
+                .unwrap_or(0) as u64)
+        })
+    })
+    .await;
+
+    let log = AuditLog {
+        id: uuid::Uuid::new_v4().to_string(),
+        ts: now(),
+        session_id: None,
+        host_id: host.id.clone(),
+        host_label: host.name.clone(),
+        tool_name: "sftp_write_file".to_string(),
+        source: "sftp".to_string(),
+        summary: truncate(&sanitize(&path), 500),
+        permission_mode: "edit".to_string(),
+        approval: if sensitive { "approved" } else { "auto" }.to_string(),
+        status: if result.is_ok() { "ok" } else { "error" }.to_string(),
+        result: match &result {
+            Ok(_) => Some(format!("已写入 {} 字节", total)),
+            Err(e) => Some(truncate(&sanitize(e), 500)),
+        },
+        duration_ms: Some(started.elapsed().as_millis() as u64),
+    };
+    let _ = db.insert_audit_log(&log);
+
+    let mtime = result?;
+    Ok(SftpWriteOutcome {
+        ok: true,
+        text: format!("已保存（{}）", human_bytes(total)),
+        requires_confirm: false,
+        mtime,
+    })
+}
+
 fn file_type_char(meta: &FileAttributes) -> char {
     match meta.file_type() {
         FileType::Dir => 'd',
@@ -591,6 +938,148 @@ mod tests {
         let line = std::fs::read_to_string(hostkey).expect("读取主机公钥失败");
         std::fs::write(&kh, format!("[127.0.0.1]:{port} {line}"))
             .expect("写测试 known_hosts 失败");
+    }
+
+    #[test]
+    fn sensitive_paths_cover_credentials_and_persistence() {
+        for p in [
+            "/root/.ssh/authorized_keys",
+            "/home/alice/.ssh/config",
+            "/etc/shadow",
+            "/etc/sudoers",
+            "/etc/cron.d/backdoor",
+            "/var/spool/cron/root",
+            "/etc/systemd/system/x.service",
+            "/etc/rc.local",
+            "/home/alice/.bashrc",
+        ] {
+            assert!(is_sensitive_remote_path(p), "{p} 应判定为敏感路径");
+        }
+        for p in [
+            "/var/log/nginx/access.log",
+            "/etc/nginx/nginx.conf",
+            "/home/alice/app.py",
+            "/tmp/a.txt",
+        ] {
+            assert!(!is_sensitive_remote_path(p), "{p} 不应判定为敏感路径");
+        }
+    }
+
+    #[test]
+    fn join_remote_normalizes_dots() {
+        assert_eq!(
+            join_remote("/etc/nginx", "../sites-enabled/foo"),
+            "/etc/sites-enabled/foo"
+        );
+        assert_eq!(join_remote("/etc", "./a/b"), "/etc/a/b");
+        assert_eq!(join_remote("/", "x"), "/x");
+        assert_eq!(join_remote("/etc/nginx", "/abs/path"), "/abs/path");
+    }
+
+    #[test]
+    fn temp_path_stays_in_same_directory() {
+        let t = temp_path("/etc/nginx/nginx.conf");
+        assert!(t.starts_with("/etc/nginx/.nginx.conf.buffterm-"), "{t}");
+        assert!(t.ends_with(".tmp"), "{t}");
+        let t = temp_path("/a.txt");
+        assert!(t.starts_with("/.a.txt.buffterm-"), "{t}");
+    }
+
+    #[test]
+    fn looks_binary_detects_nul_in_head() {
+        assert!(!looks_binary(b"hello\nworld"));
+        assert!(looks_binary(b"\x00\x01\x02"));
+        // 嗅探窗口之外出现的 NUL 不影响判定（只取样前 8 KiB）
+        let mut data = vec![b'a'; BINARY_SNIFF_BYTES + 1];
+        data.push(0);
+        assert!(!looks_binary(&data));
+    }
+
+    #[test]
+    fn human_bytes_formats_units() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(2048), "2.0 KB");
+    }
+
+    /// 集成测试（默认 ignore）：验证内置编辑器的读写链路——符号链接保留、
+    /// 权限沿用、原子写不留临时文件、mtime 冲突拒绝覆盖。环境变量同上。
+    ///   cargo test sftp::tests::local_sshd_edit_roundtrip -- --ignored
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn local_sshd_edit_roundtrip() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("创建 tokio runtime 失败");
+        rt.block_on(async {
+            let host = test_host(
+                std::env::var("BUFFTERM_TEST_SSH_KEY").expect("BUFFTERM_TEST_SSH_KEY 未设置"),
+            );
+            write_known_hosts(host.port);
+
+            let fixture = "/tmp/buffterm-sshd-test/sftp-edit";
+            let _ = std::fs::remove_dir_all(fixture);
+            std::fs::create_dir_all(fixture).expect("创建 fixture 失败");
+            let target = format!("{fixture}/app.conf");
+            std::fs::write(&target, b"port=80\n").expect("写 fixture 文件失败");
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640))
+                .expect("设置 fixture 权限失败");
+            let link = format!("{fixture}/link.conf");
+            std::os::unix::fs::symlink("app.conf", &link).unwrap();
+
+            let manager = RusshManager::new();
+
+            // 1) 经符号链接写入：链接保留，内容落到目标文件，权限沿用
+            let mtime = with_sftp(&manager, &host, Duration::from_secs(20), |sftp| {
+                let link = link.clone();
+                Box::pin(async move {
+                    let real = resolve_link(sftp, &link).await;
+                    write_atomic(sftp, &real, b"port=8080\n", None).await?;
+                    Ok::<u64, String>(
+                        sftp.metadata(real.as_str())
+                            .await
+                            .map_err(|e| e.to_string())?
+                            .mtime
+                            .unwrap_or(0) as u64,
+                    )
+                })
+            })
+            .await
+            .expect("写入失败");
+
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "符号链接应保留"
+            );
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "port=8080\n");
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o640, "写入后应保留原文件权限");
+
+            // 2) mtime 冲突：expected 与远端不一致时拒绝覆盖，内容不变
+            let stale = with_sftp(&manager, &host, Duration::from_secs(20), |sftp| {
+                let target = target.clone();
+                Box::pin(async move { write_atomic(sftp, &target, b"x\n", Some(mtime + 999)).await })
+            })
+            .await;
+            assert!(stale.is_err(), "过期 mtime 应拒绝写入: {stale:?}");
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "port=8080\n");
+
+            // 3) 目录内不残留临时文件
+            let leftovers: Vec<String> = std::fs::read_dir(fixture)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.contains("buffterm-"))
+                .collect();
+            assert!(leftovers.is_empty(), "不应残留临时文件: {leftovers:?}");
+        });
     }
 
     /// 集成测试（默认 ignore）：需要本机临时 sshd（环境变量与

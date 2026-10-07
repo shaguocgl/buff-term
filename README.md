@@ -48,6 +48,7 @@ buffTerm 是一款有 AI Agent Buff 加持的 SSH 管理工具，——内置**�
 - **并发连接复用**：AI、MCP、监控、巡检和 SFTP 按主机复用 SSH 连接，通道级并发，空闲连接自动回收
 - **结构化 SFTP**：目录浏览、上传、下载、重命名、删除、建目录、覆盖确认、进度与取消；支持符号链接和含空格文件名
 - **批量上传**：文件选择支持多选，最多 3 个并发传输（每条独立进度与取消，可一键全部取消）；冲突文件汇总为一次覆盖确认，可选择「全部覆盖」或「跳过冲突项」仅上传其余文件
+- **内置文件编辑器**：文件面板行内悬浮按钮（或双击文件行）即可在中间区以标签页打开文件（CodeMirror 6，按扩展名高亮），支持编辑与 Ctrl/Cmd+S 保存；保存采用「同目录临时文件 + rename」原子替换并沿用原权限，写入前校验 mtime 避免冲掉他人改动；符号链接写入落到真实目标而不替换链接；单文件 2 MiB 上限并对二进制 / 非 UTF-8 文件直接拒绝；`~/.ssh`、`/etc/sudoers`、`/etc/shadow`、cron、systemd、登录 shell 启动脚本等敏感路径需二次确认，每次保存写入操作审计
 
 ### 终端防护
 
@@ -74,7 +75,7 @@ buffTerm 是一款有 AI Agent Buff 加持的 SSH 管理工具，——内置**�
 
 - 三级安全级别：全部审核 / 智能审核（只读自动执行，危险命令需批准）/ 全部放行
 - 凭据加密：SSH 密码 / 私钥口令、AI API Key、MCP token、SMTP 密码统一 AES-256-GCM 加密存本机，主密钥存系统钥匙串；私钥口令仅用于本地解密私钥
-- 操作审计：记录 AI Agent、终端防护、MCP 服务与修复执行的时间、主机、来源、命令、审批方式与结果摘要
+- 操作审计：记录 AI Agent、终端防护、MCP 服务、修复执行与文件编辑的时间、主机、来源、命令、审批方式与结果摘要
 - 输出脱敏：命令输出进入模型前过滤 AK/SK、密钥、口令等敏感信息；私钥与 API Key 永不进入模型上下文
 
 ### 监控、巡检与通知
@@ -89,7 +90,7 @@ buffTerm 是一款有 AI Agent Buff 加持的 SSH 管理工具，——内置**�
 | 层次 | 技术 |
 | --- | --- |
 | 桌面框架 | Tauri 2（Rust 后端） |
-| 前端 | React 19 + TypeScript + xterm.js + Vite |
+| 前端 | React 19 + TypeScript + xterm.js + CodeMirror 6 + Vite |
 | 交互终端 / SFTP / AI / MCP / 监控 | russh + russh-sftp（协议级 SSH，全部能力走同一套连接实现） |
 | 存储 | SQLite（rusqlite）存配置 / 审计 / 加密凭据 + 系统钥匙串（keyring）存主密钥 |
 | AI 接入 | OpenAI 兼容协议，SSE 流式解析，自研工具调用循环 |
@@ -182,7 +183,7 @@ src-tauri/target/release/bundle/nsis/
 
 ```text
 src/                   前端（React + xterm.js）
-  components/          聊天面板 / 终端 / 弹窗 / 下拉框等
+  components/          聊天面板 / 终端 / 文件编辑器 / 弹窗 / 下拉框等
   assets/              buffTerm 界面与文档 logo
 src-tauri/src/         Rust 后端
   agent.rs             AI Agent 运行时（流式解析、工具循环、审批、审计）
@@ -202,7 +203,7 @@ src-tauri/src/         Rust 后端
   inspection.rs        AI 只读巡检（含木马 / 挖矿风险采集）、报告生成与邮件投递
   remediation.rs       一键整改（整改步骤生成、执行、重试、审计与邮件通知）
   mcp.rs               对外 MCP 服务（HTTP + token + 权限模式）
-  sftp.rs              SFTP 文件操作：结构化目录与分块传输（russh-sftp）
+  sftp.rs              SFTP 文件操作：结构化目录、分块传输与内置编辑器读写（原子写 / 敏感路径 / 审计）
   update.rs            GitHub Release 版本检查
   db.rs                SQLite（主机、AI 配置、规则、审计、巡检与整改、历史指标）
 src-tauri/icons/       桌面应用图标（PNG / ICNS / ICO）

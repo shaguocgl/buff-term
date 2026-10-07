@@ -19,9 +19,11 @@ import ConfirmModal from './ConfirmModal';
 import PromptModal from './PromptModal';
 import {
   DownloadIcon,
+  FileEditIcon,
   FileIcon,
   FolderIcon,
   FolderPlusIcon,
+  PencilIcon,
   RefreshIcon,
   TrashIcon,
   UploadIcon,
@@ -32,6 +34,8 @@ interface Props {
   host: Host;
   /** 面板隐藏时保持挂载（传输任务继续），仅隐藏显示 */
   hidden?: boolean;
+  /** 悬浮按钮「在内置编辑器中打开」：在中间区打开该文件 */
+  onOpenFile: (path: string) => void;
   onClose: () => void;
 }
 
@@ -95,7 +99,7 @@ function overwriteBody({
   return lines.join('\n');
 }
 
-function SftpPanel({ host, hidden = false, onClose }: Props) {
+function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
   const [cwd, setCwd] = useState('/');
   const [entries, setEntries] = useState<SftpEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -167,7 +171,9 @@ function SftpPanel({ host, hidden = false, onClose }: Props) {
         if (seq === loadSeqRef.current) setLoading(false);
       }
     },
-    [host],
+    // 只依赖 host.id：同一主机的 Host 对象引用可能随标签增删而变化，
+    // 若依赖整个对象会导致 load 重建 → 挂载 effect 重跑 → 目录被重置回 /
+    [host.id],
   );
 
   useEffect(() => {
@@ -427,56 +433,76 @@ function SftpPanel({ host, hidden = false, onClose }: Props) {
                 <span className="sftp-name">..</span>
               </div>
             )}
-            {entries.map((entry) => (
-              <div
-                key={entry.name}
-                className="sftp-row"
-                onDoubleClick={() => entry.is_dir && load(joinPath(cwd, entry.name))}
-              >
-                {entry.is_dir ? <FolderIcon size={15} /> : <FileIcon size={15} />}
-                <span
-                  className="sftp-name"
-                  onClick={() => entry.is_dir && load(joinPath(cwd, entry.name))}
+            {entries.map((entry) => {
+              const full = joinPath(cwd, entry.name);
+              return (
+                <div
+                  key={entry.name}
+                  className="sftp-row"
+                  // 双击进入目录 / 打开文件；单击不再触发，文件的开合统一走悬浮按钮
+                  onDoubleClick={() => {
+                    if (entry.is_dir) load(full);
+                    else onOpenFile(full);
+                  }}
                 >
-                  {entry.name}
-                </span>
-                {entry.is_symlink && (
-                  <span className="sftp-link-badge" title="符号链接">link</span>
-                )}
-                <span className="sftp-size">
-                  {entry.is_dir ? '—' : formatBytes(entry.size)}
-                </span>
-                <span className="sftp-mtime">{formatMtime(entry.mtime)}</span>
-                <div className="sftp-row-actions">
-                  {!entry.is_dir && (
+                  {entry.is_dir ? <FolderIcon size={15} /> : <FileIcon size={15} />}
+                  <span
+                    className={`sftp-name${entry.is_dir ? '' : ' plain'}`}
+                    title={entry.is_dir ? '打开目录' : entry.name}
+                    onClick={() => {
+                      if (entry.is_dir) load(full);
+                    }}
+                  >
+                    {entry.name}
+                  </span>
+                  {entry.is_symlink && (
+                    <span className="sftp-link-badge" title="符号链接">link</span>
+                  )}
+                  <span className="sftp-size">
+                    {entry.is_dir ? '—' : formatBytes(entry.size)}
+                  </span>
+                  <span className="sftp-mtime">{formatMtime(entry.mtime)}</span>
+                  <div className="sftp-row-actions">
+                    {!entry.is_dir && (
+                      <button
+                        className="icon-btn"
+                        title="在内置编辑器中打开"
+                        disabled={busy}
+                        onClick={() => onOpenFile(full)}
+                      >
+                        <FileEditIcon size={13} />
+                      </button>
+                    )}
+                    {!entry.is_dir && (
+                      <button
+                        className="icon-btn"
+                        title="下载"
+                        disabled={busy}
+                        onClick={() => handleDownload(entry)}
+                      >
+                        <DownloadIcon size={13} />
+                      </button>
+                    )}
                     <button
                       className="icon-btn"
-                      title="下载"
+                      title="重命名"
                       disabled={busy}
-                      onClick={() => handleDownload(entry)}
+                      onClick={() => handleRename(entry)}
                     >
-                      <DownloadIcon size={13} />
+                      <PencilIcon size={13} />
                     </button>
-                  )}
-                  <button
-                    className="icon-btn"
-                    title="重命名"
-                    disabled={busy}
-                    onClick={() => handleRename(entry)}
-                  >
-                    ✎
-                  </button>
-                  <button
-                    className="icon-btn danger"
-                    title="删除"
-                    disabled={busy}
-                    onClick={() => handleDelete(entry)}
-                  >
-                    <TrashIcon size={13} />
-                  </button>
+                    <button
+                      className="icon-btn danger"
+                      title="删除"
+                      disabled={busy}
+                      onClick={() => handleDelete(entry)}
+                    >
+                      <TrashIcon size={13} />
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
             {entries.length === 0 && <div className="sftp-status">空目录</div>}
           </div>
         )}

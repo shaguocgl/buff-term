@@ -2116,6 +2116,8 @@ input::placeholder {
   border-bottom: 1px solid rgba(148, 163, 184, 0.06);
   font-size: 12.5px;
   cursor: default;
+  /* 操作按钮悬浮定位的参照 */
+  position: relative;
 }
 
 .sftp-row:hover {
@@ -2134,6 +2136,11 @@ input::placeholder {
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
+}
+
+/* 文件行不响应点击（打开走悬浮按钮），避免误导性的手型光标 */
+.sftp-name.plain {
+  cursor: default;
 }
 
 .sftp-size {
@@ -2161,21 +2168,41 @@ input::placeholder {
   color: var(--muted);
 }
 
+/* 操作按钮悬浮在行内容之上：不占布局空间（列宽不为其让位），
+   悬浮该行时覆盖在时间列上方，并把时间隐藏掉避免文字透出。
+   未悬浮时 pointer-events 关闭，避免不可见的按钮抢走时间区域的点击 */
 .sftp-row-actions {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  transform: translateY(-50%);
   display: flex;
   gap: 2px;
-  flex: none;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.12s;
 }
 
 .sftp-row:hover .sftp-row-actions {
   opacity: 1;
+  pointer-events: auto;
 }
 
+.sftp-row:hover .sftp-mtime {
+  visibility: hidden;
+}
+
+/* 22px：文件行 4 个按钮（94px）正好落在 96px 的时间列内，不侵占文件大小列。
+   必须把浏览器默认的 button padding（1px 6px）归零：否则内容区只剩 8px，
+   13px 的图标会溢出，grid 对溢出子项的居中会退化成靠一侧对齐 → 图标偏右 */
 .sftp-row-actions .icon-btn {
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+}
+
+.sftp-row-actions .icon-btn svg {
+  display: block;
 }
 
 /* ============ 监控面板 ============ */
@@ -5941,4 +5968,177 @@ input::placeholder {
   font-size: 11px;
   color: var(--faint);
   border-top: 1px solid var(--border);
+}
+
+/* ============ 中间区文件编辑器（远端文件标签） ============ */
+
+.tab-dot-file {
+  border-radius: 2px;
+  background: var(--accent-2);
+}
+
+.tab.dirty .tab-dot-file {
+  background: var(--accent-2);
+}
+
+.tab-dirty {
+  flex: none;
+  color: var(--warn);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.file-editor {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.file-editor-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.file-editor-path {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-editor-badge {
+  flex: none;
+  font-family: var(--sans);
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 99px;
+  color: var(--warn);
+  background: rgba(251, 191, 36, 0.12);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+}
+
+.file-editor-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.file-editor-status {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 12px;
+  font-size: 11.5px;
+  color: var(--faint);
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+  min-height: 26px;
+}
+
+.file-editor-status .dirty {
+  color: var(--warn);
+}
+
+.file-editor-status .err {
+  color: var(--danger);
+}
+
+.file-editor-save-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-editor-body {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.file-editor-body .cm-editor {
+  height: 100%;
+  font-size: 12.5px;
+}
+
+.file-editor-body .cm-scroller {
+  font-family: var(--mono);
+  line-height: 1.55;
+}
+
+.file-editor-body .cm-editor.cm-focused {
+  outline: none;
+}
+
+.file-editor-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+  /* 覆盖在已挂载的编辑器之上：重新加载失败时避免旧内容透过文字显示 */
+  background: var(--bg);
+}
+
+.file-editor-placeholder p {
+  margin: 0;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.file-editor-placeholder span {
+  font-size: 12px;
+  color: var(--faint);
+}
+
+/* 操作审计：文件编辑来源徽章 */
+.audit-source.audit-source-sftp {
+  color: var(--accent);
+  background: rgba(109, 141, 255, 0.12);
+  border: 1px solid rgba(109, 141, 255, 0.3);
+}
+
+/* 编辑器按需加载时的占位（React.lazy fallback） */
+.file-editor-loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* 文件编辑器工具栏：已展开的文件面板按钮高亮 */
+.file-editor-actions .btn.active {
+  color: var(--accent);
+  background: rgba(109, 141, 255, 0.14);
+  border-color: rgba(109, 141, 255, 0.4);
 }

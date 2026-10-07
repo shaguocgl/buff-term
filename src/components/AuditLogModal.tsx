@@ -30,12 +30,13 @@ const STATUS_LABEL: Record<string, string> = {
   ok: '正常',
 };
 
-/** 操作来源标签：区分 AI Agent / 终端防护 / MCP 服务 / 修复执行 */
+/** 操作来源标签：区分 AI Agent / 终端防护 / MCP 服务 / 修复执行 / 文件编辑 */
 const SOURCE_LABEL: Record<string, string> = {
   agent: 'AI Agent',
   guard: '终端防护',
   mcp: 'MCP 服务',
   remediation: '修复执行',
+  sftp: '文件编辑',
 };
 
 /** 来源筛选项，value 为空串表示“全部” */
@@ -45,6 +46,7 @@ const SOURCE_FILTERS: { value: string; label: string }[] = [
   { value: 'guard', label: '终端防护' },
   { value: 'mcp', label: 'MCP 服务' },
   { value: 'remediation', label: '修复执行' },
+  { value: 'sftp', label: '文件编辑' },
 ];
 
 function formatTime(ts: number) {
@@ -100,7 +102,7 @@ export default function AuditLogModal({ onClose, showToast }: Props) {
   return (
     <Modal
       title="操作审计"
-      subtitle="AI Agent / 终端防护 / MCP 服务 / 修复执行的操作记录（最近 1000 条）"
+      subtitle="AI Agent / 终端防护 / MCP 服务 / 修复执行 / 文件编辑的操作记录（最近 1000 条）"
       className="modal-wide"
       onClose={onClose}
     >

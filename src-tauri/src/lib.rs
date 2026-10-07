@@ -131,6 +131,8 @@ pub fn run() {
             sftp::sftp_rename,
             sftp::sftp_exists,
             sftp::sftp_cancel_transfer,
+            sftp::sftp_read_file,
+            sftp::sftp_write_file,
             monitor::monitor_snapshot,
             monitor::monitor_history,
             inspection::start_inspection,

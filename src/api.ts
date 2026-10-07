@@ -38,6 +38,8 @@ import type {
   RemediationErrorPayload,
   RemediationStepInput,
   SftpEntry,
+  SftpFileContent,
+  SftpWriteOutcome,
 } from './types';
 
 export const listHosts = () => invoke<Host[]>('list_hosts');
@@ -113,6 +115,28 @@ export const sftpMkdir = (hostId: string, path: string) =>
   invoke<SftpResult>('sftp_mkdir', { hostId, path });
 export const sftpRename = (hostId: string, from: string, to: string) =>
   invoke<SftpResult>('sftp_rename', { hostId, from, to });
+/** 读取远端文本文件（内置编辑器打开）；超限 / 二进制 / 非 UTF-8 会直接报错 */
+export const sftpReadFile = (hostId: string, path: string) =>
+  invoke<SftpFileContent>('sftp_read_file', { hostId, path });
+/**
+ * 保存远端文本文件。
+ * `expectedMtime` 为打开时记录的 mtime，与远端当前值不一致时后端拒绝覆盖；
+ * `confirmed` 为 true 表示敏感路径已由用户确认。
+ */
+export const sftpWriteFile = (
+  hostId: string,
+  path: string,
+  content: string,
+  expectedMtime: number | null,
+  confirmed: boolean,
+) =>
+  invoke<SftpWriteOutcome>('sftp_write_file', {
+    hostId,
+    path,
+    content,
+    expectedMtime,
+    confirmed,
+  });
 
 export const monitorSnapshot = (hostId: string) =>
   invoke<MonitorSnapshot>('monitor_snapshot', { hostId });

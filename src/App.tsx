@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -10,6 +12,7 @@ import {
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { fmtError } from './utils/errors';
+import { baseName } from './utils/remote';
 import {
   checkForUpdate,
   deleteHost,
@@ -77,13 +80,28 @@ import {
   WrenchIcon,
 } from './components/Icons';
 
-interface Tab {
+/** 终端标签：一台主机对应一个 SSH 会话 */
+interface TerminalTab {
+  kind: 'terminal';
   key: number;
   host: Host;
   sessionId: number | null;
   status: 'connecting' | 'connected' | 'exited';
   title: string;
 }
+
+/** 文件标签：中间区内置编辑器打开的远端文件 */
+interface FileTab {
+  kind: 'file';
+  key: number;
+  host: Host;
+  /** 远端文件绝对路径 */
+  path: string;
+  title: string;
+}
+
+/** 中间工作区标签：终端会话或远端文件编辑器 */
+type Tab = TerminalTab | FileTab;
 
 /** 右侧面板类型（chat / sftp / monitor / inspection），none 表示全部收起 */
 type PanelKind = 'chat' | 'sftp' | 'monitor' | 'inspection' | 'none';
@@ -106,8 +124,26 @@ type ApprovalQueueItem =
 const PANEL_STORAGE_KEY = 'buffterm-panel';
 const PANEL_WIDTH_STORAGE_KEY = 'buffterm-panel-width';
 
+// 文件编辑器（CodeMirror）体积较大且只有打开文件才用得到，按需加载：
+// 首屏只加载终端与面板所需代码
+const FileEditor = lazy(() => import('./components/FileEditor'));
+
 // 稳定的空数组引用：未配置平台时避免每次渲染生成新数组，导致面板 memo 失效
 const EMPTY_MODELS: AiModel[] = [];
+
+/**
+ * 是否按在标签栏的横向滚动条上。
+ * 滚动条是元素自身的一部分（事件 target 仍是该元素而非子节点），
+ * 只能按几何位置判断：元素内容区下沿、厚度等于滚动条高度的一条带。
+ * 命中时交给原生滚动，避免被标题栏拖动逻辑吞掉。
+ */
+function isOnHorizontalScrollbar(target: HTMLElement, clientY: number): boolean {
+  const box = target.closest<HTMLElement>('.tab-list');
+  if (!box) return false;
+  const barHeight = box.offsetHeight - box.clientHeight;
+  if (barHeight <= 0) return false;
+  return clientY >= box.getBoundingClientRect().bottom - barHeight;
+}
 
 function readSavedPanel(): PanelKind {
   try {
@@ -149,6 +185,12 @@ function App() {
   const [importPreview, setImportPreview] = useState<ImportResult | null>(null);
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeKey, setActiveKey] = useState<number | null>(null);
+  // 文件标签的未保存标记：关闭标签前据此弹确认；ref 保证 closeTab 引用稳定
+  const [dirtyTabs, setDirtyTabs] = useState<Record<number, boolean>>({});
+  const dirtyTabsRef = useRef(dirtyTabs);
+  dirtyTabsRef.current = dirtyTabs;
+  // 待确认关闭的标签（有未保存改动）
+  const [pendingCloseKey, setPendingCloseKey] = useState<number | null>(null);
   // 供全局快捷键 effect 读取最新状态（refs 让 effect 依赖保持稳定，listener 只挂一次）
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
@@ -421,6 +463,8 @@ function App() {
     const target = event.target as HTMLElement | null;
     if (!target) return;
     if (target.closest('button, input, textarea, select, .tab')) return;
+    // 标签过多时标签栏会出现横向滚动条：拖它应滚动标签，而不是拖动窗口
+    if (isOnHorizontalScrollbar(target, event.clientY)) return;
     event.preventDefault();
     // 无边框窗口下原生标题栏不存在，双击标题栏区域补上“最大化 / 还原”
     if (customWindowControls && event.detail === 2) {
@@ -438,6 +482,34 @@ function App() {
 
   const activeTab = tabs.find((t) => t.key === activeKey) ?? null;
 
+  // 最近一次激活的终端标签：切到文件标签时右侧面板继续挂在它上面，
+  // 保持挂载（目录 / 传输 / AI 会话状态不重置），只是被隐藏
+  const lastTerminalTabRef = useRef<TerminalTab | null>(null);
+  useEffect(() => {
+    if (activeTab?.kind === 'terminal') lastTerminalTabRef.current = activeTab;
+  }, [activeTab]);
+  const terminalActive = activeTab?.kind === 'terminal';
+  const panelTab = useMemo(() => {
+    if (activeTab?.kind === 'terminal') return activeTab;
+    const remembered = lastTerminalTabRef.current;
+    if (!remembered) return null;
+    // 记住的终端标签可能已被关闭，需要回查当前标签列表
+    return (
+      (tabs.find(
+        (t) => t.kind === 'terminal' && t.key === remembered.key,
+      ) as TerminalTab | undefined) ?? null
+    );
+  }, [activeTab, tabs]);
+  // 文件面板只需要主机信息：文件标签同样有 host，编辑文件时也能继续浏览目录
+  const sftpPanelHost = activeTab?.host ?? panelTab?.host ?? null;
+  // 所有有标签页的主机（去重）：每台主机各挂一个文件面板实例并保持挂载，
+  // 在不同主机的标签间来回切换时目录位置 / 传输任务不会被重置
+  const sftpHosts = useMemo(() => {
+    const seen = new Map<string, Host>();
+    for (const t of tabs) if (!seen.has(t.host.id)) seen.set(t.host.id, t.host);
+    return [...seen.values()];
+  }, [tabs]);
+
   // 主机搜索过滤（侧栏与 rail 弹层共用）：按名称 / 地址 / 备注
   const filteredHosts = useMemo(() => {
     const q = hostSearch.trim().toLowerCase();
@@ -452,7 +524,7 @@ function App() {
 
   const handleConnect = (host: Host) => {
     const existing = tabs.find(
-      (t) => t.host.id === host.id && t.status === 'connected',
+      (t) => t.kind === 'terminal' && t.host.id === host.id && t.status === 'connected',
     );
     if (existing) {
       setActiveKey(existing.key);
@@ -462,18 +534,59 @@ function App() {
     const key = ++tabSeq.current;
     setTabs((prev) => [
       ...prev,
-      { key, host, sessionId: null, status: 'connecting', title: host.name },
+      {
+        kind: 'terminal',
+        key,
+        host,
+        sessionId: null,
+        status: 'connecting',
+        title: host.name,
+      },
     ]);
     setActiveKey(key);
     setLoadingHostId(host.id);
     restorePanel();
   };
 
+  // 文件面板点击文件：在中间区打开；同一主机同一路径复用已有标签
+  const handleOpenFile = useCallback((host: Host, path: string) => {
+    const existing = tabsRef.current.find(
+      (t) => t.kind === 'file' && t.host.id === host.id && t.path === path,
+    );
+    if (existing) {
+      setActiveKey(existing.key);
+      return;
+    }
+    const key = ++tabSeq.current;
+    setTabs((prev) => [
+      ...prev,
+      { kind: 'file', key, host, path, title: baseName(path) },
+    ]);
+    setActiveKey(key);
+  }, []);
+
+  // 文件编辑器的脏状态上报（引用稳定，避免每次渲染重挂 FileEditor 的监听）
+  const handleFileDirtyChange = useCallback((key: number, dirty: boolean) => {
+    setDirtyTabs((prev) => {
+      if (!!prev[key] === dirty) return prev;
+      const next = { ...prev };
+      if (dirty) next[key] = true;
+      else delete next[key];
+      return next;
+    });
+  }, []);
+
   // useCallback + refs 保证引用稳定：避免每次 render 重建导致全局快捷键 effect 反复卸载/挂载
-  const closeTab = useCallback((key: number) => {
+  const doCloseTab = useCallback((key: number) => {
     const idx = tabsRef.current.findIndex((t) => t.key === key);
     const closing = tabsRef.current[idx];
     setTabs((prev) => prev.filter((t) => t.key !== key));
+    setDirtyTabs((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
     if (activeKeyRef.current === key) {
       const remaining = tabsRef.current.filter((t) => t.key !== key);
       const neighbor = remaining[Math.min(idx, remaining.length - 1)];
@@ -485,6 +598,18 @@ function App() {
     }
   }, []);
 
+  // 关闭标签：文件标签有未保存改动时先弹确认，确认后走 doCloseTab
+  const closeTab = useCallback(
+    (key: number) => {
+      if (dirtyTabsRef.current[key]) {
+        setPendingCloseKey(key);
+        return;
+      }
+      doCloseTab(key);
+    },
+    [doCloseTab],
+  );
+
   // 全局快捷键：Cmd/Ctrl+K 命令面板、Cmd/Ctrl+F 终端搜索、Cmd/Ctrl+T 新建主机、
   // Cmd/Ctrl+W 关闭标签、Ctrl+Tab / Ctrl+Shift+Tab 切换标签。
   // 注意：macOS 系统菜单可能拦截 Cmd+W/Cmd+T（按键到不了 WebView），此时改用 Ctrl 组合键。
@@ -495,7 +620,8 @@ function App() {
       if (e.isComposing) return;
       const target = e.target as HTMLElement | null;
       const inField = !!target?.closest(
-        'input, textarea, select, [role="dialog"], .modal',
+        // 代码编辑器（.cm-editor）内同样不劫持：K/T/W 交给编辑器自身处理
+        'input, textarea, select, [role="dialog"], .modal, .cm-editor',
       );
       const inTerminal = !!target?.closest('.xterm');
       const mod = e.metaKey || e.ctrlKey;
@@ -651,10 +777,14 @@ function App() {
     }
   };
 
-  const rightPanelVisible =
-    activeTab !== null &&
-    activeTab.sessionId !== null &&
-    (chatOpen || sftpOpen || monitorOpen || inspectionOpen);
+  // 分隔条可见性：文件面板只要打开且当前有主机上下文就显示；
+  // 其余三个面板依赖终端会话，仅在终端标签激活时显示
+  const sessionPanelVisible =
+    terminalActive &&
+    panelTab !== null &&
+    panelTab.sessionId !== null &&
+    (chatOpen || monitorOpen || inspectionOpen);
+  const rightPanelVisible = (sftpOpen && sftpPanelHost !== null) || sessionPanelVisible;
 
   return (
     <div className="app">
@@ -715,7 +845,10 @@ function App() {
                   <div className="rail-host-list">
                     {filteredHosts.map((host) => {
                       const active = tabs.some(
-                        (t) => t.host.id === host.id && t.status === 'connected',
+                        (t) =>
+                          t.kind === 'terminal' &&
+                          t.host.id === host.id &&
+                          t.status === 'connected',
                       );
                       return (
                         <div
@@ -927,7 +1060,10 @@ function App() {
 
           {filteredHosts.map((host) => {
             const active = tabs.some(
-              (t) => t.host.id === host.id && t.status === 'connected',
+              (t) =>
+                t.kind === 'terminal' &&
+                t.host.id === host.id &&
+                t.status === 'connected',
             );
             return (
               <div
@@ -1089,35 +1225,48 @@ function App() {
               onMouseDown={startWindowDrag}
             >
               <div className="tab-list">
-                {tabs.map((tab) => (
-                  <div
-                    key={tab.key}
-                    className={`tab${tab.key === activeKey ? ' active' : ''}${
-                      tab.status === 'connecting' ? ' connecting' : ''
-                    }${
-                      tab.status === 'exited' ? ' exited' : ''
-                    }`}
-                    onClick={() => setActiveKey(tab.key)}
-                  >
-                    <span className="tab-dot" />
-                    <span className="tab-title">{tab.title}</span>
-                    {tab.status === 'exited' && (
-                      <span className="tab-alert" title="连接已断开">
-                        !
-                      </span>
-                    )}
-                    <button
-                      className="tab-close"
-                      title="关闭标签"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        closeTab(tab.key);
-                      }}
+                {tabs.map((tab) => {
+                  const isTerminal = tab.kind === 'terminal';
+                  return (
+                    <div
+                      key={tab.key}
+                      className={`tab${tab.key === activeKey ? ' active' : ''}${
+                        isTerminal && tab.status === 'connecting'
+                          ? ' connecting'
+                          : ''
+                      }${
+                        isTerminal && tab.status === 'exited' ? ' exited' : ''
+                      }${dirtyTabs[tab.key] ? ' dirty' : ''}`}
+                      onClick={() => setActiveKey(tab.key)}
+                      title={isTerminal ? tab.title : tab.path}
                     >
-                      ×
-                    </button>
-                  </div>
-                ))}
+                      <span
+                        className={`tab-dot${isTerminal ? '' : ' tab-dot-file'}`}
+                      />
+                      <span className="tab-title">{tab.title}</span>
+                      {dirtyTabs[tab.key] && (
+                        <span className="tab-dirty" title="有未保存的改动">
+                          ●
+                        </span>
+                      )}
+                      {isTerminal && tab.status === 'exited' && (
+                        <span className="tab-alert" title="连接已断开">
+                          !
+                        </span>
+                      )}
+                      <button
+                        className="tab-close"
+                        title="关闭标签"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          closeTab(tab.key);
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  );
+                })}
                 <button
                   className="tab-new"
                   title="新建连接"
@@ -1140,51 +1289,83 @@ function App() {
                   key={tab.key}
                   className={`tab-pane${tab.key === activeKey ? ' active' : ''}`}
                 >
-                  <TerminalView
-                    host={tab.host}
-                    tabKey={tab.key}
-                    theme={theme}
-                    chatOpen={chatOpen}
-                    sftpOpen={sftpOpen}
-                    monitorOpen={monitorOpen}
-                    inspectionOpen={inspectionOpen}
-                    onToggleChat={() => applyPanel(chatOpen ? 'none' : 'chat')}
-                    onToggleSftp={() => applyPanel(sftpOpen ? 'none' : 'sftp')}
-                    onToggleMonitor={() =>
-                      applyPanel(monitorOpen ? 'none' : 'monitor')
-                    }
-                    onToggleInspection={() =>
-                      applyPanel(inspectionOpen ? 'none' : 'inspection')
-                    }
-                    onOpened={(key, id) => {
-                      setTabs((prev) =>
-                        prev.map((t) =>
-                          t.key === key ? { ...t, sessionId: id, status: 'connected' } : t,
-                        ),
-                      );
-                      setLoadingHostId(null);
-                      restorePanel();
-                    }}
-                    onFailed={(key, message) => {
-                      setTabs((prev) =>
-                        prev.map((t) => (t.key === key ? { ...t, status: 'exited' } : t)),
-                      );
-                      // 只清当前失败主机的 loading，避免快速连两台主机时
-                      // 前一个失败回调误清后一个的 loading
-                      setLoadingHostId((cur) => {
-                        const tab = tabs.find((t) => t.key === key);
-                        return tab && cur === tab.host.id ? null : cur;
-                      });
-                      showToast('error', `连接失败: ${message}`);
-                    }}
-                    onExited={(key) => {
-                      setTabs((prev) =>
-                        prev.map((t) => (t.key === key ? { ...t, status: 'exited' } : t)),
-                      );
-                    }}
-                    onDisconnect={(key) => closeTab(key)}
-                    onAddToChat={handleAddToChat}
-                  />
+                  {tab.kind === 'terminal' ? (
+                    <TerminalView
+                      host={tab.host}
+                      tabKey={tab.key}
+                      theme={theme}
+                      chatOpen={chatOpen}
+                      sftpOpen={sftpOpen}
+                      monitorOpen={monitorOpen}
+                      inspectionOpen={inspectionOpen}
+                      onToggleChat={() => applyPanel(chatOpen ? 'none' : 'chat')}
+                      onToggleSftp={() => applyPanel(sftpOpen ? 'none' : 'sftp')}
+                      onToggleMonitor={() =>
+                        applyPanel(monitorOpen ? 'none' : 'monitor')
+                      }
+                      onToggleInspection={() =>
+                        applyPanel(inspectionOpen ? 'none' : 'inspection')
+                      }
+                      onOpened={(key, id) => {
+                        setTabs((prev) =>
+                          prev.map((t) =>
+                            t.kind === 'terminal' && t.key === key
+                              ? { ...t, sessionId: id, status: 'connected' }
+                              : t,
+                          ),
+                        );
+                        setLoadingHostId(null);
+                        restorePanel();
+                      }}
+                      onFailed={(key, message) => {
+                        setTabs((prev) =>
+                          prev.map((t) =>
+                            t.kind === 'terminal' && t.key === key
+                              ? { ...t, status: 'exited' }
+                              : t,
+                          ),
+                        );
+                        // 只清当前失败主机的 loading，避免快速连两台主机时
+                        // 前一个失败回调误清后一个的 loading
+                        setLoadingHostId((cur) => {
+                          const tab = tabs.find((t) => t.key === key);
+                          return tab && cur === tab.host.id ? null : cur;
+                        });
+                        showToast('error', `连接失败: ${message}`);
+                      }}
+                      onExited={(key) => {
+                        setTabs((prev) =>
+                          prev.map((t) =>
+                            t.kind === 'terminal' && t.key === key
+                              ? { ...t, status: 'exited' }
+                              : t,
+                          ),
+                        );
+                      }}
+                      onDisconnect={(key) => closeTab(key)}
+                      onAddToChat={handleAddToChat}
+                    />
+                  ) : (
+                    <Suspense
+                      fallback={
+                        <div className="file-editor-loading">
+                          正在加载编辑器…
+                        </div>
+                      }
+                    >
+                      <FileEditor
+                        host={tab.host}
+                        path={tab.path}
+                        tabKey={tab.key}
+                        theme={theme}
+                        sftpOpen={sftpOpen}
+                        onToggleSftp={() => applyPanel(sftpOpen ? 'none' : 'sftp')}
+                        onDirtyChange={handleFileDirtyChange}
+                        onClose={() => closeTab(tab.key)}
+                        onNotify={showToast}
+                      />
+                    </Suspense>
+                  )}
                 </div>
               ))}
 
@@ -1196,15 +1377,15 @@ function App() {
               )}
 
               {/* 四个右侧面板保持挂载（用 display 隐藏而非卸载）：
-                  切换面板不会中断正在运行的 AI 会话 / SFTP 传输 / 巡检任务，
-                  再次打开时状态与进度仍然保留 */}
-              {activeTab && activeTab.sessionId !== null && (
+                  切换面板 / 切到文件标签都不会中断正在运行的 AI 会话 / SFTP 传输 /
+                  巡检任务，再次打开时状态与进度仍然保留 */}
+              {panelTab && panelTab.sessionId !== null && (
                 <ChatPanel
-                  key={activeTab.sessionId}
-                  sessionId={activeTab.sessionId}
-                  hostId={activeTab.host.id}
-                  hostName={activeTab.title}
-                  hidden={!chatOpen}
+                  key={panelTab.sessionId}
+                  sessionId={panelTab.sessionId}
+                  hostId={panelTab.host.id}
+                  hostName={panelTab.title}
+                  hidden={!chatOpen || !terminalActive}
                   insertText={chatInsert}
                   onInsertConsumed={handleInsertConsumed}
                   providerLabel={
@@ -1221,29 +1402,32 @@ function App() {
                 />
               )}
 
-              {activeTab && activeTab.sessionId !== null && (
+              {/* 文件面板按主机挂载（每台有标签页的主机一个实例，全部保持挂载）：
+                  编辑文件时仍可用、关闭编辑器或在主机间切换标签后目录都不重置 */}
+              {sftpHosts.map((host) => (
                 <SftpPanel
-                  key={`sftp-${activeTab.sessionId}`}
-                  host={activeTab.host}
-                  hidden={!sftpOpen}
+                  key={`sftp-${host.id}`}
+                  host={host}
+                  hidden={!sftpOpen || sftpPanelHost?.id !== host.id}
+                  onOpenFile={(path) => handleOpenFile(host, path)}
                   onClose={closePanel}
                 />
-              )}
+              ))}
 
-              {activeTab && activeTab.sessionId !== null && (
+              {panelTab && panelTab.sessionId !== null && (
                 <MonitorPanel
-                  key={`mon-${activeTab.sessionId}`}
-                  host={activeTab.host}
-                  hidden={!monitorOpen}
+                  key={`mon-${panelTab.sessionId}`}
+                  host={panelTab.host}
+                  hidden={!monitorOpen || !terminalActive}
                   onClose={closePanel}
                 />
               )}
 
-              {activeTab && activeTab.sessionId !== null && (
+              {panelTab && panelTab.sessionId !== null && (
                 <InspectionPanel
-                  key={`inspect-${activeTab.sessionId}`}
-                  host={activeTab.host}
-                  hidden={!inspectionOpen}
+                  key={`inspect-${panelTab.sessionId}`}
+                  host={panelTab.host}
+                  hidden={!inspectionOpen || !terminalActive}
                   onClose={closePanel}
                 />
               )}
@@ -1400,6 +1584,21 @@ function App() {
           danger
           onConfirm={() => handleDelete(deleteHostTarget)}
           onCancel={() => setDeleteHostTarget(null)}
+        />
+      )}
+
+      {pendingCloseKey !== null && (
+        <ConfirmModal
+          title="关闭标签"
+          body="该文件有未保存的改动，关闭后这些改动将丢失。确定关闭吗？"
+          confirmText="丢弃并关闭"
+          danger
+          onConfirm={() => {
+            const key = pendingCloseKey;
+            setPendingCloseKey(null);
+            doCloseTab(key);
+          }}
+          onCancel={() => setPendingCloseKey(null)}
         />
       )}
 

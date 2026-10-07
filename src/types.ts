@@ -365,6 +365,28 @@ export interface SftpEntry {
   group: string;
 }
 
+/** 远端文本文件内容：中间区内置编辑器打开时返回 */
+export interface SftpFileContent {
+  /** 文件文本内容（UTF-8） */
+  content: string;
+  /** 文件字节数 */
+  size: number;
+  /** 最近修改时间（unix 秒），保存时回传用于并发修改检测 */
+  mtime: number;
+  /** 是否命中敏感路径（保存需二次确认） */
+  sensitive: boolean;
+}
+
+/** 远端文件保存结果 */
+export interface SftpWriteOutcome {
+  ok: boolean;
+  text: string;
+  /** 命中敏感路径且本次未确认：本次未执行写入 */
+  requires_confirm: boolean;
+  /** 写入后远端文件的 mtime（unix 秒），0 表示未取到 */
+  mtime: number;
+}
+
 export interface RemediationErrorPayload {
   remediation_id: string;
   message: string;

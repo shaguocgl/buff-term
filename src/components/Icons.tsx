@@ -133,6 +133,13 @@ export const InspectIcon = (p: IconProps) => (
   </Svg>
 );
 
+export const SaveIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+    <path d="M17 21v-8H7v8M7 3v5h8" />
+  </Svg>
+);
+
 export const ListIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="M8 6h13M8 12h13M8 18h13" />
@@ -156,6 +163,13 @@ export const FileIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
     <path d="M14 2v6h6" />
+  </Svg>
+);
+
+export const FileEditIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7" />
+    <path d="M18.4 2.6a2 2 0 0 1 2.8 2.8L13 13.6l-3.6.9.9-3.6z" />
   </Svg>
 );
 
