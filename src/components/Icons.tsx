@@ -253,3 +253,45 @@ export const PanelLeftOpenIcon = (p: IconProps) => (
     <path d="m14 9 3 3-3 3" />
   </Svg>
 );
+
+/** 窗口按钮图标：10×10 细线，观感与 Windows 原生标题栏按钮一致 */
+function WindowSvg({ size = 10, children }: IconProps & { children: React.ReactNode }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 10 10"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1}
+      aria-hidden="true"
+    >
+      {children}
+    </svg>
+  );
+}
+
+export const WindowMinimizeIcon = (p: IconProps) => (
+  <WindowSvg {...p}>
+    <path d="M0 5h10" />
+  </WindowSvg>
+);
+
+export const WindowMaximizeIcon = (p: IconProps) => (
+  <WindowSvg {...p}>
+    <rect x="0.5" y="0.5" width="9" height="9" />
+  </WindowSvg>
+);
+
+export const WindowRestoreIcon = (p: IconProps) => (
+  <WindowSvg {...p}>
+    <path d="M2.5 2.5v-2h7v7h-2" />
+    <rect x="0.5" y="2.5" width="7" height="7" />
+  </WindowSvg>
+);
+
+export const WindowCloseIcon = (p: IconProps) => (
+  <WindowSvg {...p}>
+    <path d="M0 0l10 10M10 0L0 10" />
+  </WindowSvg>
+);

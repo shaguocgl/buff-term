@@ -52,6 +52,10 @@ import SftpPanel from './components/SftpPanel';
 import TerminalGuardModal from './components/TerminalGuardModal';
 import TerminalView from './components/TerminalView';
 import ToastContainer, { type ToastItem } from './components/Toast';
+import WindowControls, {
+  toggleWindowMaximize,
+  useCustomWindowControls,
+} from './components/WindowControls';
 import logoUrl from './assets/buffterm-logo.png';
 import {
   BellIcon,
@@ -191,6 +195,9 @@ function App() {
       return false;
     }
   });
+  // 无边框窗口（Windows）下，标签栏右侧自绘最小化 / 最大化 / 关闭按钮
+  const { custom: customWindowControls, maximized: windowMaximized } =
+    useCustomWindowControls();
   const toastSeq = useRef(0);
   const tabSeq = useRef(0);
   // 右侧面板宽度通过 CSS 变量下发：拖动时直接改 DOM，避免每帧 setState 重渲染整棵面板树
@@ -415,6 +422,11 @@ function App() {
     if (!target) return;
     if (target.closest('button, input, textarea, select, .tab')) return;
     event.preventDefault();
+    // 无边框窗口下原生标题栏不存在，双击标题栏区域补上“最大化 / 还原”
+    if (customWindowControls && event.detail === 2) {
+      toggleWindowMaximize();
+      return;
+    }
     getCurrentWindow().startDragging();
   };
 
@@ -1070,46 +1082,56 @@ function App() {
       <main className="main">
         {tabs.length > 0 ? (
           <div className="workbench">
-            <div className="tab-bar" onMouseDown={startWindowDrag}>
-              {tabs.map((tab) => (
-                <div
-                  key={tab.key}
-                  className={`tab${tab.key === activeKey ? ' active' : ''}${
-                    tab.status === 'connecting' ? ' connecting' : ''
-                  }${
-                    tab.status === 'exited' ? ' exited' : ''
-                  }`}
-                  onClick={() => setActiveKey(tab.key)}
-                >
-                  <span className="tab-dot" />
-                  <span className="tab-title">{tab.title}</span>
-                  {tab.status === 'exited' && (
-                    <span className="tab-alert" title="连接已断开">
-                      !
-                    </span>
-                  )}
-                  <button
-                    className="tab-close"
-                    title="关闭标签"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      closeTab(tab.key);
-                    }}
+            <div
+              className={`tab-bar${
+                customWindowControls ? ' with-window-controls' : ''
+              }`}
+              onMouseDown={startWindowDrag}
+            >
+              <div className="tab-list">
+                {tabs.map((tab) => (
+                  <div
+                    key={tab.key}
+                    className={`tab${tab.key === activeKey ? ' active' : ''}${
+                      tab.status === 'connecting' ? ' connecting' : ''
+                    }${
+                      tab.status === 'exited' ? ' exited' : ''
+                    }`}
+                    onClick={() => setActiveKey(tab.key)}
                   >
-                    ×
-                  </button>
-                </div>
-              ))}
-              <button
-                className="tab-new"
-                title="新建连接"
-                onClick={() => {
-                  setEditingHost(null);
-                  setShowForm(true);
-                }}
-              >
-                <PlusIcon size={13} />
-              </button>
+                    <span className="tab-dot" />
+                    <span className="tab-title">{tab.title}</span>
+                    {tab.status === 'exited' && (
+                      <span className="tab-alert" title="连接已断开">
+                        !
+                      </span>
+                    )}
+                    <button
+                      className="tab-close"
+                      title="关闭标签"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        closeTab(tab.key);
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+                <button
+                  className="tab-new"
+                  title="新建连接"
+                  onClick={() => {
+                    setEditingHost(null);
+                    setShowForm(true);
+                  }}
+                >
+                  <PlusIcon size={13} />
+                </button>
+              </div>
+              {customWindowControls && (
+                <WindowControls maximized={windowMaximized} />
+              )}
             </div>
 
             <div className="workbench-body" ref={workbenchBodyRef}>
@@ -1229,6 +1251,10 @@ function App() {
           </div>
         ) : (
           <div className="welcome" onMouseDown={startWindowDrag}>
+            {/* 无标签页时没有标签栏，窗口按钮固定到右上角，避免无法关闭 / 最小化 */}
+            {customWindowControls && (
+              <WindowControls maximized={windowMaximized} />
+            )}
             <div className="welcome-logo brand-mark">
               <img className="brand-logo" src={logoUrl} alt="buffTerm" />
             </div>

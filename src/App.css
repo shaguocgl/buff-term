@@ -736,6 +736,7 @@ button {
 }
 
 .welcome {
+  position: relative;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -743,6 +744,14 @@ button {
   justify-content: center;
   gap: 10px;
   color: var(--muted);
+}
+
+/* 欢迎页没有标签栏，窗口按钮固定在右上角 */
+.welcome .window-controls {
+  position: absolute;
+  top: 0;
+  right: 0;
+  margin: 0;
 }
 
 .welcome-logo {
@@ -1805,8 +1814,56 @@ input::placeholder {
   padding: 6px 10px 0;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
-  overflow-x: auto;
   flex: none;
+}
+
+/* 标签横向滚动容器：窗口按钮固定在右侧，不随标签滚动 */
+.tab-list {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+/* 无边框窗口（Windows）下自绘的窗口按钮组 */
+.tab-bar.with-window-controls {
+  padding-right: 0;
+}
+
+.window-controls {
+  flex: none;
+  align-self: stretch;
+  margin-top: -6px;
+  margin-left: 6px;
+  display: flex;
+  align-items: stretch;
+}
+
+.window-control {
+  width: 46px;
+  min-height: 32px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  cursor: default;
+  transition:
+    background 0.12s,
+    color 0.12s;
+}
+
+.window-control:hover {
+  background: rgba(148, 163, 184, 0.16);
+  color: var(--text);
+}
+
+.window-control.close:hover {
+  background: #e81123;
+  color: #ffffff;
 }
 
 .tab {
