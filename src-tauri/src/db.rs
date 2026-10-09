@@ -525,6 +525,17 @@ impl Db {
         Ok(())
     }
 
+    /// 通用 settings 读取：键不存在时返回 None。
+    pub fn get_setting(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT value FROM settings WHERE key=?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()
+    }
+
     /// AI 配置页的全局默认上下文窗口：仅用于批量导入预填和旧数据迁移，
     /// 不覆盖每个模型已保存的 context_window。
     pub fn get_ai_default_context_window(&self) -> rusqlite::Result<u32> {

@@ -83,6 +83,14 @@ export interface UpdateInfo {
   release_found: boolean;
 }
 
+/** 启动计数与 Star 引导状态（recordLaunch 返回） */
+export interface LaunchState {
+  /** 本机累计启动次数（含本次） */
+  launches: number;
+  /** 本次启动是否应展示 GitHub Star 引导弹窗 */
+  show_star_prompt: boolean;
+}
+
 export interface AiRule {
   id: string;
   pattern: string;
@@ -142,10 +150,19 @@ export interface AuditLog {
 }
 
 export interface DiskInfo {
+  /** 挂载点 */
   mount: string;
+  /** 文件系统/设备名 */
   fs: string;
+  /** 人类可读总容量，如 "40G" */
   total: string;
+  /** 人类可读已用量 */
   used: string;
+  /** 总容量（KB），供磁盘卡片头部汇总 */
+  total_kb: number;
+  /** 已用容量（KB） */
+  used_kb: number;
+  /** 使用率 0-100 */
   percent: number;
 }
 
@@ -162,14 +179,59 @@ export interface TopProc {
   cmd: string;
 }
 
+/** 单块物理网卡的累计收发字节数（自系统启动起） */
+export interface NetIface {
+  name: string;
+  rx_bytes: number;
+  tx_bytes: number;
+}
+
+/** 网络流量：rx/tx 为所有物理网卡累计值之和，ifaces 为逐网卡明细 */
+export interface NetInfo {
+  rx_bytes: number;
+  tx_bytes: number;
+  ifaces: NetIface[];
+}
+
 export interface MonitorSnapshot {
   ts: number;
   host_label: string;
   load: string;
   cpu_percent: number;
   mem: MemInfo;
+  swap: MemInfo;
   disks: DiskInfo[];
-  top: TopProc[];
+  net: NetInfo;
+  /** 按 CPU 排序的 TOP10 进程 */
+  top_cpu: TopProc[];
+  /** 按内存排序的 TOP10 进程 */
+  top_mem: TopProc[];
+}
+
+/** 服务器静态信息：面板打开时一次性采集，不随 5s 轮询刷新 */
+export interface HostInfo {
+  /** 主机名 */
+  hostname: string;
+  /** 系统发行版名，如 Ubuntu 24.04.2 LTS */
+  os: string;
+  /** 内核版本 */
+  kernel: string;
+  /** CPU 架构，如 x86_64 */
+  arch: string;
+  /** CPU 型号 */
+  cpu_model: string;
+  /** 物理核心数（Socket × 每 socket 核数），取不到时=线程数 */
+  cores: number;
+  /** 逻辑线程数（vCPU） */
+  threads: number;
+  /** 内存总大小（MB） */
+  mem_total_mb: number;
+  /** 系统已运行秒数 */
+  uptime_secs: number;
+  /** 服务器出口公网 IP，获取失败为空串 */
+  public_ip: string;
+  /** 国家 / 城市，如「美国 · 洛杉矶」，获取失败为空串 */
+  location: string;
 }
 
 /** 历史指标点（host_metrics 表的精简投影，供监控面板趋势图回填） */

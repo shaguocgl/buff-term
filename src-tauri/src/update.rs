@@ -1,6 +1,8 @@
-//! GitHub Release 版本检查。
+//! GitHub Release 版本检查，以及应用启动计数 / Star 引导状态。
 
+use crate::db::Db;
 use serde::{Deserialize, Serialize};
+use tauri::State;
 
 const RELEASES_LATEST_URL: &str =
     "https://api.github.com/repos/shaguocgl/buff-term/releases/latest";
@@ -65,6 +67,71 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
         release_url: release.html_url,
         release_found: true,
     })
+}
+
+/// 首次弹出 Star 引导的启动次数（打开超过 5 次，即第 6 次启动）。
+const STAR_PROMPT_FIRST_LAUNCH: u64 = 6;
+/// 「以后再说」之后再次提示所需间隔的启动次数。
+const STAR_PROMPT_SNOOZE_LAUNCHES: u64 = 10;
+
+#[derive(Debug, Serialize)]
+pub struct LaunchState {
+    /// 本机累计启动次数（含本次）
+    pub launches: u64,
+    /// 本次启动是否应展示 GitHub Star 引导弹窗
+    pub show_star_prompt: bool,
+}
+
+/// 应用启动时调用一次：累计启动次数，并按规则判断是否弹出 Star 引导。
+/// 规则：未永久关闭时第 6 次启动首弹；「以后再说」后每过 10 次启动再弹。
+#[tauri::command]
+pub fn record_launch(
+    db: State<'_, std::sync::Arc<Db>>,
+) -> Result<LaunchState, String> {
+    let read = |key: &str| -> Result<u64, String> {
+        Ok(db
+            .get_setting(key)
+            .map_err(|e| format!("读取启动状态失败: {e}"))?
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(0))
+    };
+    let launches = read("launch_count")?.saturating_add(1);
+    db.set_setting("launch_count", &launches.to_string())
+        .map_err(|e| format!("记录启动次数失败: {e}"))?;
+    let never = db
+        .get_setting("star_prompt_never")
+        .map_err(|e| format!("读取 Star 引导状态失败: {e}"))?
+        .as_deref()
+        == Some("1");
+    let next = read("star_prompt_next_launch")?.max(STAR_PROMPT_FIRST_LAUNCH);
+    Ok(LaunchState {
+        launches,
+        show_star_prompt: !never && launches >= next,
+    })
+}
+
+/// 「以后再说」：把下次允许提示的启动次数向后推迟 SNOOZE_LAUNCHES 次。
+#[tauri::command]
+pub fn star_prompt_snooze(db: State<'_, std::sync::Arc<Db>>) -> Result<(), String> {
+    let launches = db
+        .get_setting("launch_count")
+        .map_err(|e| format!("读取启动次数失败: {e}"))?
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    db.set_setting(
+        "star_prompt_next_launch",
+        &launches.saturating_add(STAR_PROMPT_SNOOZE_LAUNCHES).to_string(),
+    )
+    .map_err(|e| format!("保存 Star 引导状态失败: {e}"))?;
+    Ok(())
+}
+
+/// 「去 Star」/「不再提示」：永久关闭引导弹窗。
+#[tauri::command]
+pub fn star_prompt_dismiss(db: State<'_, std::sync::Arc<Db>>) -> Result<(), String> {
+    db.set_setting("star_prompt_never", "1")
+        .map_err(|e| format!("保存 Star 引导状态失败: {e}"))?;
+    Ok(())
 }
 
 fn is_newer(candidate: &str, current: &str) -> bool {

@@ -24,8 +24,11 @@ import {
   onMcpApprovalRequest,
   onHostKeyConfirm,
   onTerminalGuardApproval,
+  recordLaunch,
   sessionGuardApprove,
   sshConfirmHostKey,
+  starPromptDismiss,
+  starPromptSnooze,
 } from './api';
 import './App.css';
 import type {
@@ -52,6 +55,7 @@ import McpApprovalModal from './components/McpApprovalModal';
 import McpServiceModal from './components/McpServiceModal';
 import MonitorPanel from './components/MonitorPanel';
 import SftpPanel from './components/SftpPanel';
+import StarPromptModal from './components/StarPromptModal';
 import TerminalGuardModal from './components/TerminalGuardModal';
 import TerminalView from './components/TerminalView';
 import ToastContainer, { type ToastItem } from './components/Toast';
@@ -131,6 +135,13 @@ const FileEditor = lazy(() => import('./components/FileEditor'));
 // 稳定的空数组引用：未配置平台时避免每次渲染生成新数组，导致面板 memo 失效
 const EMPTY_MODELS: AiModel[] = [];
 
+/** GitHub 项目仓库地址（Star 引导弹窗跳转目标） */
+const REPO_URL = 'https://github.com/shaguocgl/buff-term';
+
+// React.StrictMode 开发模式下 mount effect 会执行两次；
+// 启动类一次性动作（自动更新检查、启动次数统计）据此模块级标记去重
+let startupDone = false;
+
 /**
  * 是否按在标签栏的横向滚动条上。
  * 滚动条是元素自身的一部分（事件 target 仍是该元素而非子节点），
@@ -201,6 +212,10 @@ function App() {
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  // Star 引导弹窗：非 null 时展示，值为当前累计启动次数（用于感谢文案）
+  const [starPromptLaunches, setStarPromptLaunches] = useState<number | null>(
+    null,
+  );
   const [rightPanelWidth, setRightPanelWidth] = useState(() => {
     try {
       const saved = parseInt(
@@ -344,6 +359,30 @@ function App() {
   useEffect(() => {
     getAppVersion().then(setAppVersion).catch(() => {});
   }, []);
+
+  // 启动时静默检查一次更新（发现新版则 toast 提示，左下角入口同步变为「下载更新」），
+  // 并累计启动次数：超过 5 次后弹出 GitHub Star 引导（可以后再说 / 不再提示）。
+  useEffect(() => {
+    if (startupDone) return;
+    startupDone = true;
+    checkForUpdate()
+      .then((next) => {
+        setUpdateInfo(next);
+        setAppVersion(next.current_version);
+        if (next.update_available) {
+          showToast(
+            'info',
+            `发现新版本 v${next.latest_version}，可在左下角菜单下载更新。`,
+          );
+        }
+      })
+      .catch(() => {});
+    recordLaunch()
+      .then((s) => {
+        if (s.show_star_prompt) setStarPromptLaunches(s.launches);
+      })
+      .catch(() => {});
+  }, [showToast]);
 
   // 把面板宽度同步到 CSS 变量（首帧即生效，避免宽度跳变）
   useLayoutEffect(() => {
@@ -775,6 +814,24 @@ function App() {
     } finally {
       setCheckingUpdate(false);
     }
+  };
+
+  // Star 引导弹窗三个出口：去 Star / 以后再说 / 不再提示。
+  // 语义见 StarPromptModal：X、Esc、遮罩关闭一律按「以后再说」延后处理
+  const handleStar = () => {
+    setStarPromptLaunches(null);
+    void starPromptDismiss();
+    openUrl(REPO_URL).catch(() => {
+      showToast('error', '无法打开浏览器，请手动访问 GitHub 项目页');
+    });
+  };
+  const handleStarLater = () => {
+    setStarPromptLaunches(null);
+    void starPromptSnooze();
+  };
+  const handleStarNever = () => {
+    setStarPromptLaunches(null);
+    void starPromptDismiss();
   };
 
   // 分隔条可见性：文件面板只要打开且当前有主机上下文就显示；
@@ -1573,6 +1630,15 @@ function App() {
           confirmText={`导入 ${importPreview.imported} 台`}
           onConfirm={confirmImport}
           onCancel={() => setImportPreview(null)}
+        />
+      )}
+
+      {starPromptLaunches !== null && (
+        <StarPromptModal
+          launches={starPromptLaunches}
+          onStar={handleStar}
+          onLater={handleStarLater}
+          onNever={handleStarNever}
         />
       )}
 

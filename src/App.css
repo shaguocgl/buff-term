@@ -2471,6 +2471,148 @@ input::placeholder {
   color: var(--faint);
 }
 
+/* ---- 服务器信息卡 ---- */
+
+.monitor-info {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+
+.monitor-info-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 6px;
+  margin-bottom: 3px;
+  border-bottom: 1px solid var(--border);
+}
+
+.monitor-info-host {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-info-host svg {
+  flex: none;
+  color: var(--accent-2);
+}
+
+.monitor-info-ip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--accent-2);
+}
+
+.monitor-copy {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  color: var(--muted);
+}
+
+.monitor-copy:hover {
+  color: var(--text);
+}
+
+.info-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.info-label {
+  flex: none;
+  width: 30px;
+  color: var(--faint);
+}
+
+.info-value {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- 流量卡（↓绿 ↑青） ---- */
+
+.monitor-chart-label i.dot-rx {
+  background: var(--success);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.18);
+}
+
+.monitor-chart-label i.dot-tx {
+  background: var(--accent-2);
+  box-shadow: 0 0 0 3px rgba(56, 200, 232, 0.18);
+}
+
+.monitor-chart-label i.dot-disk {
+  background: var(--warn);
+  box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.18);
+}
+
+/* 磁盘卡：包裹 SWAP + 各挂载盘进度条 */
+.monitor-disks {
+  gap: 12px;
+  padding-bottom: 10px;
+}
+
+.chart-line-rx {
+  stroke: var(--success);
+}
+
+.chart-line-tx {
+  stroke: var(--accent-2);
+}
+
+.chart-dot-rx {
+  fill: var(--success);
+}
+
+.chart-dot-tx {
+  fill: var(--accent-2);
+}
+
+.monitor-chart-value.net {
+  display: inline-flex;
+  gap: 10px;
+}
+
+.monitor-chart-value.net .rx {
+  color: var(--success);
+}
+
+.monitor-chart-value.net .tx {
+  color: var(--accent-2);
+}
+
+.monitor-net-total {
+  color: var(--faint);
+  font-family: var(--mono);
+}
+
 .monitor-section-title {
   font-size: 12px;
   font-weight: 600;
@@ -2483,6 +2625,44 @@ input::placeholder {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.monitor-procs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* TOP10 进程的 CPU/MEM 切换小分段控件 */
+.proc-switch {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.proc-switch button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  font-family: var(--mono);
+  letter-spacing: 0.3px;
+  padding: 2px 10px;
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    background 0.15s;
+}
+
+.proc-switch button:hover {
+  color: var(--text);
+}
+
+.proc-switch button.active {
+  background: var(--panel-3);
+  color: var(--accent-2);
 }
 
 .proc-row {
@@ -2514,7 +2694,15 @@ input::placeholder {
 .proc-cpu,
 .proc-mem {
   flex: none;
+  /* 非排序维度的列弱化显示 */
+  color: var(--faint);
+}
+
+/* 当前排序维度的列高亮：一眼看出榜单按什么排 */
+.monitor-procs.sort-cpu .proc-cpu,
+.monitor-procs.sort-mem .proc-mem {
   color: var(--accent-2);
+  font-weight: 650;
 }
 
 .proc-cmd {
@@ -5731,6 +5919,26 @@ input::placeholder {
   line-height: 1.6;
   /* 批量覆盖确认会按行列出冲突文件名 */
   white-space: pre-line;
+}
+
+/* ---- Star 引导弹窗 ---- */
+
+.star-prompt {
+  padding: 2px 20px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.star-prompt-text {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.7;
+  margin: 0;
+}
+
+.star-prompt .tool-actions {
+  padding: 0;
 }
 
 .confirm-field {

@@ -20,7 +20,9 @@ import type {
   McpService,
   McpServiceInput,
   MonitorSnapshot,
+  HostInfo,
   HostMetricPoint,
+  LaunchState,
   RemoteAiModel,
   TerminalGuardApproval,
   TerminalGuardSettings,
@@ -85,6 +87,12 @@ export const listAuditLogs = (limit?: number) =>
 export const clearAuditLogs = () => invoke<number>('clear_audit_logs');
 export const checkForUpdate = () => invoke<UpdateInfo>('check_for_update');
 export const getAppVersion = () => invoke<string>('get_app_version');
+/** 应用启动时调用一次：累计启动次数并判断是否应弹出 GitHub Star 引导 */
+export const recordLaunch = () => invoke<LaunchState>('record_launch');
+/** Star 引导「以后再说」：间隔若干次启动后再提示 */
+export const starPromptSnooze = () => invoke<void>('star_prompt_snooze');
+/** Star 引导「去 Star / 不再提示」：永久关闭 */
+export const starPromptDismiss = () => invoke<void>('star_prompt_dismiss');
 
 export interface SftpResult {
   ok: boolean;
@@ -142,6 +150,9 @@ export const monitorSnapshot = (hostId: string) =>
   invoke<MonitorSnapshot>('monitor_snapshot', { hostId });
 export const monitorHistory = (hostId: string, windowSecs = 1800) =>
   invoke<HostMetricPoint[]>('monitor_history', { hostId, windowSecs });
+/** 一次性采集服务器静态信息（公网 IP / 国家 / 系统 / CPU / 内存），面板打开时调用 */
+export const monitorHostInfo = (hostId: string) =>
+  invoke<HostInfo>('monitor_host_info', { hostId });
 
 export interface SftpProgressPayload {
   transfer_id: string;

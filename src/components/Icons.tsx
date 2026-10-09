@@ -194,6 +194,26 @@ export const FolderPlusIcon = (p: IconProps) => (
   </Svg>
 );
 
+export const GlobeIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="10" />
+    <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+  </Svg>
+);
+
+export const CopyIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="9" y="9" width="13" height="13" rx="2" />
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+  </Svg>
+);
+
+export const StarIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+  </Svg>
+);
+
 export const ActivityIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="M22 12h-4l-3 9L9 3l-3 9H2" />

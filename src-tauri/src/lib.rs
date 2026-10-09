@@ -135,6 +135,7 @@ pub fn run() {
             sftp::sftp_write_file,
             monitor::monitor_snapshot,
             monitor::monitor_history,
+            monitor::monitor_host_info,
             inspection::start_inspection,
             inspection::get_inspection_report,
             inspection::list_inspection_reports,
@@ -176,7 +177,10 @@ pub fn run() {
             guard::session_guard_approve,
             russh::ssh_confirm_host_key,
             update::check_for_update,
-            update::get_app_version
+            update::get_app_version,
+            update::record_launch,
+            update::star_prompt_snooze,
+            update::star_prompt_dismiss
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
