@@ -185,6 +185,27 @@ impl Db {
             )?;
         }
 
+        // 迁移：ai_models.supports_vision。旧库没有该列时补上，默认 0；
+        // 用户随后可在 AI 配置中按模型实际能力开启。幂等，重复启动不会报错。
+        let has_supports_vision = {
+            let mut stmt = conn.prepare("PRAGMA table_info(ai_models)")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            let mut found = false;
+            for name in rows {
+                if name? == "supports_vision" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_supports_vision {
+            conn.execute(
+                "ALTER TABLE ai_models ADD COLUMN supports_vision INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+
         // 迁移：audit_logs.source。旧库没有该列时补上，并按 permission_mode 回填历史来源，
         // 使 UI 的来源标签对历史记录同样生效。幂等，重复启动不会报错。
         let has_audit_source = {
@@ -320,7 +341,7 @@ impl Db {
 
     fn models_of(&self, conn: &Connection, provider_id: &str) -> rusqlite::Result<Vec<AiModel>> {
         let mut stmt = conn.prepare(
-            "SELECT id, label, model, is_active, context_window FROM ai_models
+            "SELECT id, label, model, is_active, context_window, supports_vision FROM ai_models
              WHERE provider_id=?1 ORDER BY sort, rowid",
         )?;
         let rows = stmt.query_map(params![provider_id], row_to_ai_model)?;
@@ -398,8 +419,8 @@ impl Db {
         )?;
         for (idx, m) in models.iter().enumerate() {
             tx.execute(
-                "INSERT INTO ai_models (id, provider_id, label, model, is_active, context_window, sort)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO ai_models (id, provider_id, label, model, is_active, context_window, supports_vision, sort)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     m.id,
                     provider.id,
@@ -407,6 +428,7 @@ impl Db {
                     m.model,
                     m.is_active as i64,
                     m.context_window as i64,
+                    m.supports_vision as i64,
                     idx as i64,
                 ],
             )?;
@@ -534,27 +556,6 @@ impl Db {
             |row| row.get(0),
         )
         .optional()
-    }
-
-    /// AI 配置页的全局默认上下文窗口：仅用于批量导入预填和旧数据迁移，
-    /// 不覆盖每个模型已保存的 context_window。
-    pub fn get_ai_default_context_window(&self) -> rusqlite::Result<u32> {
-        let conn = self.conn.lock().unwrap();
-        let value: Option<String> = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key='ai_default_context_window'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(value
-            .and_then(|v| v.trim().parse::<u32>().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or_else(crate::models::default_context_window))
-    }
-
-    pub fn set_ai_default_context_window(&self, value: u32) -> rusqlite::Result<()> {
-        self.set_setting("ai_default_context_window", &value.to_string())
     }
 
     /// AI Agent 单条消息内允许的模型往返轮次上限（每批）。
@@ -1156,6 +1157,7 @@ fn row_to_ai_model(row: &Row<'_>) -> rusqlite::Result<AiModel> {
         model: row.get(2)?,
         is_active: row.get::<_, i64>(3)? != 0,
         context_window: row.get::<_, i64>(4)?.max(1) as u32,
+        supports_vision: row.get::<_, i64>(5)? != 0,
     })
 }
 
@@ -1279,9 +1281,6 @@ mod tests {
             std::env::temp_dir().join(format!("buffterm-db-test-{}.sqlite", uuid::Uuid::new_v4()));
         {
             let db = Db::open(&path).unwrap();
-            assert_eq!(db.get_ai_default_context_window().unwrap(), 128_000);
-            db.set_ai_default_context_window(200_000).unwrap();
-
             let provider = AiProvider {
                 id: "provider-1".to_string(),
                 name: "测试平台".to_string(),
@@ -1297,16 +1296,17 @@ mod tests {
                 model: "test-model".to_string(),
                 is_active: true,
                 context_window: 200_000,
+                supports_vision: true,
             }];
             db.save_ai_provider_tx(&provider, &models, false).unwrap();
         }
 
-        // 再次打开：迁移幂等，且 context_window / 全局默认值都能读回。
+        // 再次打开：迁移幂等，context_window / supports_vision 都能读回。
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.get_ai_default_context_window().unwrap(), 200_000);
         let providers = db.list_ai_providers().unwrap();
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].models[0].context_window, 200_000);
+        assert!(providers[0].models[0].supports_vision);
         drop(db);
         let _ = std::fs::remove_file(&path);
     }

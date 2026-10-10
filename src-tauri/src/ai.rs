@@ -15,6 +15,9 @@ pub struct AiModelInput {
     /// 该模型支持的上下文窗口（token）。用户必填；旧前端未传时按 128k 兜底。
     #[serde(default = "crate::models::default_context_window")]
     pub context_window: u32,
+    /// 该模型是否支持图片输入（多模态）。
+    #[serde(default)]
+    pub supports_vision: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +108,7 @@ pub fn save_ai_provider(
                 model: m.model.clone(),
                 is_active,
                 context_window: m.context_window,
+                supports_vision: m.supports_vision,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -125,22 +129,6 @@ pub fn delete_ai_provider(db: State<'_, Arc<Db>>, id: String) -> Result<(), Stri
         .map_err(|e| format!("删除 AI 配置失败: {e}"))?;
     credentials::delete_api_key(&id);
     Ok(())
-}
-
-#[tauri::command]
-pub fn get_ai_default_context_window(db: State<'_, Arc<Db>>) -> Result<u32, String> {
-    db.get_ai_default_context_window()
-        .map_err(|e| format!("读取默认上下文窗口失败: {e}"))
-}
-
-#[tauri::command]
-pub fn save_ai_default_context_window(db: State<'_, Arc<Db>>, value: u32) -> Result<u32, String> {
-    if value == 0 {
-        return Err("默认上下文窗口必须大于 0".to_string());
-    }
-    db.set_ai_default_context_window(value)
-        .map_err(|e| format!("保存默认上下文窗口失败: {e}"))?;
-    Ok(value)
 }
 
 #[tauri::command]

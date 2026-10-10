@@ -46,6 +46,8 @@ export interface AiModel {
   is_active: boolean;
   /** 该模型支持的上下文窗口（token），由用户在 AI 配置中填写 */
   context_window: number;
+  /** 该模型是否支持图片输入（多模态），由用户在 AI 配置中勾选 */
+  supports_vision: boolean;
 }
 
 export interface AiModelInput {
@@ -54,6 +56,8 @@ export interface AiModelInput {
   is_active?: boolean;
   /** 该模型支持的上下文窗口（token），必填 */
   context_window: number;
+  /** 该模型是否支持图片输入（多模态） */
+  supports_vision?: boolean;
 }
 
 export interface AiProviderInput {
@@ -463,6 +467,8 @@ export interface HistoryToolCall {
 export interface HistoryEntry {
   role: string;
   content?: string;
+  /** 多模态 user 消息拆出的图片（data URL），仅 user 角色可能出现 */
+  images?: string[];
   tool_calls?: HistoryToolCall[];
   tool_call_id?: string;
 }

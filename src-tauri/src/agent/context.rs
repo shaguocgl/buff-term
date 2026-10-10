@@ -27,6 +27,9 @@ pub(crate) const ANCHOR_MAX_CHARS: usize = 2_000;
 pub(crate) const HARD_RESET_TOOL_MAX_CHARS: usize = 2_000;
 /// 每条消息的固定结构开销（role/name/分隔符等）。
 const MESSAGE_OVERHEAD_TOKENS: usize = 4;
+/// 单个图片块（image_url）的粗估 token：按各视觉平台 1024~1568px 图的高清档
+/// 约 1.1k~2k tokens 取中值。base64 原文不计入字符估算，否则一张图会估出几十万假 token。
+const IMAGE_PART_TOKENS: usize = 1_500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,8 +66,27 @@ pub(crate) struct ContextView {
 
 /// 粗略估算一条消息的 token 数：字符数 × 1.3 + 固定开销。
 /// `tool_calls` 是数组，必须序列化后计入（含工具名 + arguments）。
+/// 多模态 content（数组）按 text 块计字符、image_url 块计固定估算值。
 pub(crate) fn estimate_message_tokens(msg: &Value) -> usize {
-    let content = msg["content"].as_str().unwrap_or("");
+    let mut image_parts = 0usize;
+    let text = match msg["content"].as_array() {
+        Some(parts) => {
+            let mut buf = String::new();
+            for part in parts {
+                match part["type"].as_str() {
+                    Some("text") => {
+                        if let Some(t) = part["text"].as_str() {
+                            buf.push_str(t);
+                        }
+                    }
+                    Some("image_url") => image_parts += 1,
+                    _ => {}
+                }
+            }
+            buf
+        }
+        None => msg["content"].as_str().unwrap_or("").to_string(),
+    };
     let tool_call_id = msg["tool_call_id"].as_str().unwrap_or("");
     let name = msg["name"].as_str().unwrap_or("");
     let tool_calls = if msg["tool_calls"].is_array() {
@@ -72,11 +94,13 @@ pub(crate) fn estimate_message_tokens(msg: &Value) -> usize {
     } else {
         String::new()
     };
-    let total_chars = content.chars().count()
+    let total_chars = text.chars().count()
         + tool_calls.chars().count()
         + tool_call_id.chars().count()
         + name.chars().count();
-    ((total_chars as f64) * 1.3) as usize + MESSAGE_OVERHEAD_TOKENS
+    ((total_chars as f64) * 1.3) as usize
+        + image_parts * IMAGE_PART_TOKENS
+        + MESSAGE_OVERHEAD_TOKENS
 }
 
 pub(crate) fn estimate_messages_tokens(messages: &[Value]) -> usize {
@@ -95,8 +119,35 @@ fn role(msg: &Value) -> &str {
     msg["role"].as_str().unwrap_or("")
 }
 
-fn content(msg: &Value) -> &str {
-    msg["content"].as_str().unwrap_or("")
+/// 取消息文本用于摘要/截断：字符串 content 借用返回；多模态数组 content
+/// 拼合 text 块，image_url 块折成「[图片]」占位，保证摘要里能看出这轮带过图。
+fn content(msg: &Value) -> std::borrow::Cow<'_, str> {
+    match msg["content"].as_array() {
+        Some(parts) => {
+            let mut buf = String::new();
+            for part in parts {
+                match part["type"].as_str() {
+                    Some("text") => {
+                        if let Some(t) = part["text"].as_str() {
+                            if !buf.is_empty() {
+                                buf.push_str("\n\n");
+                            }
+                            buf.push_str(t);
+                        }
+                    }
+                    Some("image_url") => {
+                        if !buf.is_empty() {
+                            buf.push(' ');
+                        }
+                        buf.push_str("[图片]");
+                    }
+                    _ => {}
+                }
+            }
+            std::borrow::Cow::Owned(buf)
+        }
+        None => std::borrow::Cow::Borrowed(msg["content"].as_str().unwrap_or("")),
+    }
 }
 
 fn clip_head_tail(s: &str, max: usize) -> String {
@@ -104,6 +155,43 @@ fn clip_head_tail(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         truncate_output(s, max)
+    }
+}
+
+/// 截断消息 content 但保留结构：字符串直接截断；多模态数组逐块处理，
+/// text 块截断、image_url 块原样保留（是否保留由图片驻留策略决定，这里不动）。
+fn truncate_content_value(value: &Value, max: usize) -> Value {
+    match value.as_array() {
+        Some(parts) => Value::Array(
+            parts
+                .iter()
+                .map(|p| {
+                    if p["type"].as_str() == Some("text") {
+                        json!({
+                            "type": "text",
+                            "text": truncate_output(p["text"].as_str().unwrap_or(""), max),
+                        })
+                    } else {
+                        p.clone()
+                    }
+                })
+                .collect(),
+        ),
+        None => json!(truncate_output(value.as_str().unwrap_or(""), max)),
+    }
+}
+
+/// 剥离一条消息里的 image_url 块（替换为「[图片]」文本占位）。
+/// 用于任务锚点：它是长期常驻的首条用户消息副本，其图片每轮重发没有收益——
+/// 而留在最近窗口内的带图消息原样发送，保证跨轮提问模型仍能看到图。
+fn strip_image_parts(msg: &mut Value) {
+    let Some(parts) = msg["content"].as_array_mut() else {
+        return;
+    };
+    for part in parts.iter_mut() {
+        if part["type"].as_str() == Some("image_url") {
+            *part = json!({"type": "text", "text": "[图片]"});
+        }
     }
 }
 
@@ -217,11 +305,11 @@ fn round_digest(round: &[Value], index: usize) -> String {
         match role(msg) {
             "user" => parts.push(format!(
                 "[轮次{index}｜用户] {}",
-                clip_head_tail(content(msg), 400)
+                clip_head_tail(&content(msg), 400)
             )),
             "assistant" => {
                 if !content(msg).trim().is_empty() {
-                    parts.push(format!("[助手] {}", clip_head_tail(content(msg), 300)));
+                    parts.push(format!("[助手] {}", clip_head_tail(&content(msg), 300)));
                 }
                 if let Some(calls) = msg["tool_calls"].as_array() {
                     for call in calls {
@@ -232,7 +320,7 @@ fn round_digest(round: &[Value], index: usize) -> String {
                 }
             }
             "tool" => {
-                let (failed, summary) = tool_result_summary(content(msg));
+                let (failed, summary) = tool_result_summary(&content(msg));
                 parts.push(format!(
                     "[结果 {}] {}",
                     if failed { "失败" } else { "成功" },
@@ -255,16 +343,16 @@ fn one_line_digest(round: &[Value], index: usize) -> String {
     let user = round
         .iter()
         .find(|m| role(m) == "user")
-        .map(|m| clip_head_tail(content(m), 120))
+        .map(|m| clip_head_tail(&content(m), 120))
         .unwrap_or_else(|| "（无用户消息）".to_string());
     let outcome = round
         .iter()
         .rev()
         .find(|m| role(m) == "assistant" && !content(m).trim().is_empty())
-        .map(|m| clip_head_tail(content(m), 80))
+        .map(|m| clip_head_tail(&content(m), 80))
         .or_else(|| {
             round.iter().rev().find(|m| role(m) == "tool").map(|m| {
-                let (failed, _) = tool_result_summary(content(m));
+                let (failed, _) = tool_result_summary(&content(m));
                 if failed {
                     "工具失败".to_string()
                 } else {
@@ -342,14 +430,15 @@ fn truncate_round(round: &[Value], tool_max_chars: usize) -> Vec<Value> {
             let mut msg = msg.clone();
             match role(&msg) {
                 "tool" => {
-                    msg["content"] = json!(truncate_output(content(&msg), tool_max_chars));
+                    msg["content"] = json!(truncate_output(&content(&msg), tool_max_chars));
                 }
                 "user" => {
-                    msg["content"] = json!(truncate_output(content(&msg), ANCHOR_MAX_CHARS));
+                    msg["content"] = truncate_content_value(&msg["content"], ANCHOR_MAX_CHARS);
                 }
                 "assistant" => {
                     if content(&msg).chars().count() > ANCHOR_MAX_CHARS {
-                        msg["content"] = json!(truncate_output(content(&msg), ANCHOR_MAX_CHARS));
+                        msg["content"] =
+                            truncate_content_value(&msg["content"], ANCHOR_MAX_CHARS);
                     }
                 }
                 _ => {}
@@ -387,7 +476,8 @@ fn assemble_view(
             .and_then(|round| round.iter().find(|m| role(m) == "user"))
         {
             let mut anchor = anchor.clone();
-            anchor["content"] = json!(truncate_output(content(&anchor), ANCHOR_MAX_CHARS));
+            strip_image_parts(&mut anchor);
+            anchor["content"] = truncate_content_value(&anchor["content"], ANCHOR_MAX_CHARS);
             messages.push(anchor);
         }
     }
@@ -442,7 +532,10 @@ pub(crate) fn build_context_view(
     };
 
     let (system_msg, rounds) = split_system_and_rounds(history);
-    let system = system_msg.as_ref().map(content).unwrap_or("").to_string();
+    let system = system_msg
+        .as_ref()
+        .map(|m| content(m).into_owned())
+        .unwrap_or_default();
     let tools_tokens = estimate_tools_tokens(tools);
     let full_history_tokens = estimate_messages_tokens(history) + tools_tokens;
     let plan_tokens = plan_block.map(estimate_text_tokens).unwrap_or(0);
@@ -790,5 +883,133 @@ mod tests {
         // 系数 4.0：平台实测是粗估的 4 倍，同样的历史应被判为超预算并压缩
         let tight = build_context_view(&h, None, &tools(), 12_000, 1, 4.0).unwrap();
         assert_ne!(tight.usage.strategy, CompressionStrategy::None);
+    }
+
+    fn image_part(url: &str) -> Value {
+        json!({"type": "image_url", "image_url": {"url": url}})
+    }
+
+    #[test]
+    fn multimodal_content_estimates_flat_tokens_not_base64_chars() {
+        // 200KB base64 若按字符估算会产出几十万假 token，应按图片块固定估算
+        let big = "x".repeat(200_000);
+        let msg = json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "看图"},
+                image_part(&format!("data:image/jpeg;base64,{big}")),
+            ],
+        });
+        let est = estimate_message_tokens(&msg);
+        assert!(
+            est < 3_000,
+            "图片应按固定估算而非 base64 字符计数: {est}"
+        );
+        assert!(
+            est >= IMAGE_PART_TOKENS,
+            "至少应包含一张图片的估算: {est}"
+        );
+    }
+
+    /// 最近窗口内的带图消息原样保留（跨轮提问仍能看到图），
+    /// 只有被裁出窗口的任务锚点剥离图片块。
+    #[test]
+    fn view_keeps_images_in_recent_rounds_strips_anchor() {
+        let img = |url: &str| {
+            json!({"role": "user", "content": [
+                {"type": "text", "text": format!("带图 {url}")},
+                image_part(url),
+            ]})
+        };
+        // 10 轮：首轮（会成为任务锚点）与最后一轮各带一张图
+        let mut h = vec![json!({"role": "system", "content": "系统提示"})];
+        h.push(img("data:image/jpeg;base64,ANCHOR"));
+        h.push(json!({"role": "assistant", "content": "收到"}));
+        for i in 1..9 {
+            h.push(json!({"role": "user", "content": format!("任务{i}")}));
+            h.push(json!({"role": "assistant", "content": format!("执行{i}")}));
+        }
+        h.push(img("data:image/jpeg;base64,NEW"));
+        h.push(json!({"role": "assistant", "content": "处理中"}));
+        let view = build_context_view(&h, None, &tools(), 128_000, 1, 1.0).unwrap();
+        let mut seen_new = 0;
+        let mut seen_anchor = 0;
+        let mut placeholders = 0;
+        for m in &view.messages {
+            let Some(parts) = m["content"].as_array() else {
+                continue;
+            };
+            for p in parts {
+                let url = p["image_url"]["url"].as_str().unwrap_or("");
+                if url.contains("NEW") {
+                    seen_new += 1;
+                } else if url.contains("ANCHOR") {
+                    seen_anchor += 1;
+                }
+                if p["type"] == "text" && p["text"] == "[图片]" {
+                    placeholders += 1;
+                }
+            }
+        }
+        assert_eq!(seen_new, 1, "最近窗口内的图片必须保留");
+        assert_eq!(seen_anchor, 0, "锚点里的旧图不应每轮重发");
+        assert_eq!(placeholders, 1, "锚点图片应留下占位符");
+    }
+
+    /// 同一最近窗口内连续多条带图消息全部保留。
+    #[test]
+    fn view_keeps_images_across_multiple_recent_turns() {
+        let img = |url: &str| {
+            json!({"role": "user", "content": [
+                {"type": "text", "text": "看图"},
+                image_part(url),
+            ]})
+        };
+        let h = vec![
+            json!({"role": "system", "content": "系统提示"}),
+            img("data:image/png;base64,A1"),
+            json!({"role": "assistant", "content": "收到1"}),
+            img("data:image/png;base64,A2"),
+            json!({"role": "assistant", "content": "收到2"}),
+            img("data:image/png;base64,A3"),
+            json!({"role": "assistant", "content": "收到3"}),
+        ];
+        let view = build_context_view(&h, None, &tools(), 128_000, 1, 1.0).unwrap();
+        let kept: Vec<&str> = view
+            .messages
+            .iter()
+            .flat_map(|m| m["content"].as_array().into_iter().flatten())
+            .filter_map(|p| p["image_url"]["url"].as_str())
+            .collect();
+        assert_eq!(kept.len(), 3, "最近窗口内所有带图消息都应保留: {kept:?}");
+    }
+
+    #[test]
+    fn truncate_content_value_preserves_image_parts() {
+        let v = json!([
+            {"type": "text", "text": "很长的文本"},
+            image_part("data:image/png;base64,AAA"),
+        ]);
+        let out = truncate_content_value(&v, 1000);
+        let arr = out.as_array().unwrap();
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(
+            arr[1]["image_url"]["url"].as_str().unwrap(),
+            "data:image/png;base64,AAA"
+        );
+    }
+
+    #[test]
+    fn digest_includes_image_marker() {
+        let r = vec![
+            json!({"role": "user", "content": [
+                {"type": "text", "text": "看截图"},
+                image_part("data:image/png;base64,AAA"),
+            ]}),
+            json!({"role": "assistant", "content": "已查看"}),
+        ];
+        let d = round_digest(&r, 1);
+        assert!(d.contains("看截图"), "应保留文本: {d}");
+        assert!(d.contains("[图片]"), "摘要应标记图片: {d}");
     }
 }

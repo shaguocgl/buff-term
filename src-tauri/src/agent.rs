@@ -310,6 +310,8 @@ fn backfill_unanswered(history: &mut Vec<serde_json::Value>, calls: &[ToolCallAc
     }
 }
 
+/// `images`：随消息附带的图片（data URL，如 `data:image/jpeg;base64,...`），前端已压缩。
+/// 仅当当前模型在 AI 配置中勾选「支持图片」时才允许非空。
 #[tauri::command]
 pub async fn agent_chat(
     app: AppHandle,
@@ -319,6 +321,7 @@ pub async fn agent_chat(
     session_id: u32,
     message: String,
     permission_mode: PermissionMode,
+    images: Option<Vec<String>>,
 ) -> Result<(), String> {
     let host = sessions
         .host(session_id)
@@ -334,6 +337,25 @@ pub async fn agent_chat(
     let (provider, model_info) = crate::ai::resolve_active_ai_model(&db)?;
     let model = model_info.model.clone();
     let context_window = model_info.context_window;
+    // 图片附件校验：模型需开启「支持图片」；data URL 形式 + 条数/体积上限，
+    // 防止异常大附件直接把上下文打满或触发平台体积限制。
+    let images = images.unwrap_or_default();
+    if !images.is_empty() {
+        if !model_info.supports_vision {
+            return Err(
+                "当前模型未开启「支持图片」，请在 AI 配置中勾选该模型的图片能力后再试".to_string(),
+            );
+        }
+        if images.len() > MAX_IMAGES_PER_MESSAGE {
+            return Err(format!("一次最多附带 {MAX_IMAGES_PER_MESSAGE} 张图片"));
+        }
+        if images.iter().any(|i| !i.starts_with("data:image/")) {
+            return Err("图片格式无效：仅支持 data:image/* 形式".to_string());
+        }
+        if images.iter().any(|i| i.len() > MAX_IMAGE_DATA_URL_CHARS) {
+            return Err("单张图片过大（超过约 5MB），请压缩后再发送".to_string());
+        }
+    }
     eprintln!(
         "[agent] 使用模型: {}（{}，窗口 {} tokens）",
         model, provider.name, context_window
@@ -385,7 +407,24 @@ pub async fn agent_chat(
             first["content"] = serde_json::json!(system);
         }
     }
-    history.push(serde_json::json!({"role": "user", "content": message}));
+    // 有图片时 user.content 组为 OpenAI 多模态数组（text + image_url 块），
+    // 否则保持纯文本不变，避免对不支持数组 content 的平台引入兼容问题。
+    let user_content = if images.is_empty() {
+        serde_json::json!(message)
+    } else {
+        let mut parts: Vec<serde_json::Value> = Vec::with_capacity(images.len() + 1);
+        if !message.trim().is_empty() {
+            parts.push(serde_json::json!({"type": "text", "text": message}));
+        }
+        for url in &images {
+            parts.push(serde_json::json!({
+                "type": "image_url",
+                "image_url": {"url": url},
+            }));
+        }
+        serde_json::json!(parts)
+    };
+    history.push(serde_json::json!({"role": "user", "content": user_content}));
 
     let loop_ctx = AgentLoopCtx {
         app: &app,
@@ -469,12 +508,46 @@ pub fn agent_reset(
     Ok(())
 }
 
+/// 把多模态数组 content 拆成纯文本 + 图片列表，供前端恢复气泡展示。
+/// 纯字符串 content 原样返回，不额外挂 images 字段。
+fn history_entry_for_display(mut msg: serde_json::Value) -> serde_json::Value {
+    let Some(parts) = msg["content"].as_array() else {
+        return msg;
+    };
+    let mut texts: Vec<String> = Vec::new();
+    let mut images: Vec<serde_json::Value> = Vec::new();
+    for part in parts {
+        match part["type"].as_str() {
+            Some("text") => {
+                if let Some(t) = part["text"].as_str() {
+                    texts.push(t.to_string());
+                }
+            }
+            Some("image_url") => {
+                if let Some(url) = part["image_url"]["url"].as_str() {
+                    images.push(serde_json::json!(url));
+                }
+            }
+            _ => {}
+        }
+    }
+    msg["content"] = serde_json::json!(texts.join("\n\n"));
+    if !images.is_empty() {
+        msg["images"] = serde_json::json!(images);
+    }
+    msg
+}
+
 #[tauri::command]
 pub fn get_history(
     agents: State<'_, AgentManager>,
     host_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
-    Ok(agents.history(&host_id))
+    Ok(agents
+        .history(&host_id)
+        .into_iter()
+        .map(history_entry_for_display)
+        .collect())
 }
 
 #[tauri::command]
@@ -1361,6 +1434,12 @@ const APPROVAL_TIMEOUT_SECS: u64 = 600;
 
 /// 同主机新会话等待上一个 agent 循环释放登记的上限（秒）
 const ACTIVE_WAIT_SECS: u64 = 10;
+
+/// 单条用户消息最多附带的图片数。
+const MAX_IMAGES_PER_MESSAGE: usize = 6;
+
+/// 单张图片 data URL 的最大字符数（约 5MB 二进制 → 6.7MB base64）。
+const MAX_IMAGE_DATA_URL_CHARS: usize = 7_000_000;
 
 #[cfg(test)]
 mod tests {

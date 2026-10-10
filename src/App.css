@@ -3873,6 +3873,81 @@ input::placeholder {
   word-break: break-word;
 }
 
+/* 待发送图片缩略图条（挂在输入框上方，与引用卡片同级） */
+
+.chat-imgs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chat-img-chip {
+  position: relative;
+}
+
+.chat-img-chip img {
+  display: block;
+  height: 56px;
+  max-width: 96px;
+  object-fit: cover;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+}
+
+.chat-img-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--panel-3);
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+}
+
+.chat-img-remove:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.chat-img-notice {
+  position: absolute;
+  left: 12px;
+  top: 7px;
+  font-size: 11.5px;
+  color: var(--amber);
+  pointer-events: none;
+}
+
+/* 气泡内已发送图片 */
+
+.msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.msg-images img {
+  max-width: 220px;
+  max-height: 160px;
+  object-fit: contain;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  cursor: zoom-in;
+}
+
+.msg-images img:hover {
+  border-color: var(--border-strong);
+}
+
 /* ---------- 远端文件选择弹窗 ---------- */
 
 .modal-filepicker {
@@ -4242,14 +4317,18 @@ input::placeholder {
   text-align: center;
 }
 
-.model-picker-item {
+/* 需要双类名升权压过 .ai-form label 的 column 布局，保证一个模型一行 */
+.model-picker .model-picker-item {
   display: flex;
+  flex-direction: row;
   align-items: center;
   gap: 8px;
   padding: 5px 7px;
   border-radius: 6px;
   cursor: pointer;
   font-size: 12.5px;
+  font-weight: normal;
+  color: var(--text);
 }
 
 .model-picker-item:hover {
@@ -4269,8 +4348,10 @@ input::placeholder {
   background: transparent;
 }
 
+/* 全局 input{width:100%} 会把复选框撑成整行宽，这里收窄回原生尺寸 */
 .model-picker-item input[type='checkbox'] {
   flex: none;
+  width: auto;
   margin: 0;
   accent-color: var(--accent);
 }
@@ -4359,6 +4440,33 @@ input::placeholder {
   color: var(--success);
   border-color: rgba(52, 211, 153, 0.35);
   background: rgba(52, 211, 153, 0.1);
+}
+
+/* 模型行「图片」能力勾选 */
+
+.model-vision {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border);
+  background: var(--panel-3);
+  color: var(--muted);
+  border-radius: 7px;
+  padding: 6px 8px;
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.model-vision input {
+  display: none;
+}
+
+.model-vision.on {
+  color: var(--accent);
+  border-color: rgba(96, 165, 250, 0.35);
+  background: rgba(96, 165, 250, 0.1);
 }
 
 /* ===== 上下文管理：任务台账 / 用量条 / 模型窗口 ===== */
@@ -4532,32 +4640,6 @@ input::placeholder {
   font-size: 10.5px;
   color: var(--warn);
   white-space: normal;
-}
-
-.model-default-window {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 8px 0;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel-2);
-}
-
-.model-default-window input {
-  width: 110px;
-}
-
-.model-default-window-label {
-  font-size: 12px;
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-.model-default-window-hint {
-  font-size: 10.5px;
-  color: var(--faint);
 }
 
 .model-window {

@@ -102,8 +102,6 @@ pub fn run() {
             ai::list_ai_providers,
             ai::save_ai_provider,
             ai::delete_ai_provider,
-            ai::get_ai_default_context_window,
-            ai::save_ai_default_context_window,
             ai::get_ai_max_tool_rounds,
             ai::save_ai_max_tool_rounds,
             ai::set_active_ai_model,

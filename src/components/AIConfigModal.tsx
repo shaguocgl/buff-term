@@ -4,12 +4,10 @@ import {
   addAiRule,
   deleteAiRule,
   deleteAiProvider,
-  getAiDefaultContextWindow,
   getAiMaxToolRounds,
   listAiProviders,
   listAiRules,
   listRemoteAiModels,
-  saveAiDefaultContextWindow,
   saveAiMaxToolRounds,
   saveAiProvider,
   testAiProvider,
@@ -57,6 +55,30 @@ interface FormModel {
   model: string;
   is_active: boolean;
   context_window: number;
+  /** 该模型是否支持图片输入（多模态） */
+  supports_vision: boolean;
+}
+
+/** 新增/导入模型时预填的上下文窗口；保存后仍可在模型行单独修改 */
+const DEFAULT_CONTEXT_WINDOW = 128_000;
+
+/** 按模型 ID 粗判是否可能是视觉模型，用于拉取导入时预填勾选；用户可随时改 */
+function guessVisionModel(modelId: string): boolean {
+  const id = modelId.toLowerCase();
+  return /vl|vision|4o|4\.1|4\.5|gemini|claude|glm-4v|pixtral|llava|o3|o4|grok-4|qwen-vl|doubao-vision|step-.*v|hunyuan-vision|minicpm-v|internvl|ernie-.*v|kimi-latest|sensechat-vision|abab.*v/.test(
+    id,
+  );
+}
+
+/** 编辑已有配置时按 base_url 反查平台预设：
+ *  归一化尾部「/」，并容忍保存值比预设多一个 /v1 后缀（如 DeepSeek） */
+function presetOf(baseUrl: string): string {
+  const norm = (u: string) => u.trim().replace(/\/+$/, '');
+  const target = norm(baseUrl);
+  const hit = PRESETS.find(
+    (p) => norm(p.base_url) === target || `${norm(p.base_url)}/v1` === target,
+  );
+  return hit?.name ?? '自定义';
 }
 
 interface FormState {
@@ -83,8 +105,6 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
   const [providers, setProviders] = useState<AiProvider[]>([]);
   const [rules, setRules] = useState<AiRule[]>([]);
   const [ruleInput, setRuleInput] = useState('');
-  const [defaultContextWindow, setDefaultContextWindow] = useState(128000);
-  const [defaultSaving, setDefaultSaving] = useState(false);
   const [maxToolRounds, setMaxToolRounds] = useState(100);
   const [roundsSaving, setRoundsSaving] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -103,13 +123,11 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
   const [pickerSelected, setPickerSelected] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
-    const [list, defaultWindow, rounds] = await Promise.all([
+    const [list, rounds] = await Promise.all([
       listAiProviders(),
-      getAiDefaultContextWindow(),
       getAiMaxToolRounds(),
     ]);
     setProviders(list);
-    setDefaultContextWindow(defaultWindow);
     setMaxToolRounds(rounds);
   }, []);
 
@@ -138,24 +156,6 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
       setRules((prev) => prev.filter((r) => r.id !== id));
     } catch (err) {
       setError(fmtError(err));
-    }
-  };
-
-  const saveDefaultWindow = async () => {
-    const value = Number(defaultContextWindow) || 0;
-    if (value <= 0) {
-      setError('默认上下文窗口必须大于 0');
-      return;
-    }
-    setDefaultSaving(true);
-    try {
-      await saveAiDefaultContextWindow(value);
-      setError(null);
-      showToast('success', '批量导入默认窗口已保存');
-    } catch (err) {
-      setError(fmtError(err));
-    } finally {
-      setDefaultSaving(false);
     }
   };
 
@@ -192,7 +192,7 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
   const openEdit = (p: AiProvider) => {
     setEditing(p);
     setForm({
-      preset: '自定义',
+      preset: presetOf(p.base_url),
       name: p.name,
       base_url: p.base_url,
       protocol: p.protocol,
@@ -202,6 +202,7 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
         model: m.model,
         is_active: m.is_active,
         context_window: m.context_window,
+        supports_vision: m.supports_vision,
       })),
       apiKey: '',
     });
@@ -258,7 +259,8 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
           label: '',
           model: '',
           is_active: prev.models.length === 0,
-          context_window: defaultContextWindow,
+          context_window: DEFAULT_CONTEXT_WINDOW,
+          supports_vision: false,
         },
       ],
     }));
@@ -290,6 +292,7 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
           (form.models.filter((x) => x.label.trim() && x.model.trim()).length === 1) ||
           (idx === 0 && !form.models.some((x) => x.is_active)),
         context_window: Number(m.context_window) || 0,
+        supports_vision: m.supports_vision,
       }));
     if (!form.name.trim() || !form.base_url.trim()) {
       setError('名称、Base URL 不能为空');
@@ -412,7 +415,8 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
         label: m.id,
         model: m.id,
         is_active: wasEmpty && idx === 0,
-        context_window: defaultContextWindow,
+        context_window: DEFAULT_CONTEXT_WINDOW,
+        supports_vision: guessVisionModel(m.id),
       }));
       return { ...prev, models: [...prev.models, ...newModels] };
     });
@@ -447,6 +451,7 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
             model: m.model,
             is_active: m.is_active,
             context_window: m.context_window,
+            supports_vision: m.supports_vision,
           })),
         },
         p.id,
@@ -677,29 +682,6 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                 </div>
               </div>
 
-              <div className="model-default-window">
-                <span className="model-default-window-label">批量导入默认窗口</span>
-                <input
-                  type="number"
-                  min={1}
-                  value={defaultContextWindow}
-                  onChange={(e) =>
-                    setDefaultContextWindow(Number(e.target.value) || 0)
-                  }
-                />
-                <button
-                  type="button"
-                  className="btn ghost small"
-                  onClick={saveDefaultWindow}
-                  disabled={defaultSaving}
-                >
-                  {defaultSaving ? '保存中…' : '保存'}
-                </button>
-                <span className="model-default-window-hint">
-                  仅用于拉取模型时预填，不覆盖已保存的模型值
-                </span>
-              </div>
-
               {showPicker && (
                 <div className="model-picker">
                   <div className="model-picker-bar">
@@ -823,6 +805,19 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                       ))}
                     </div>
                   </div>
+                  <label
+                    className={`model-vision${m.supports_vision ? ' on' : ''}`}
+                    title="该模型支持图片输入（多模态），勾选后聊天面板可粘贴/附加图片"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={m.supports_vision}
+                      onChange={(e) =>
+                        updateModel(idx, { supports_vision: e.target.checked })
+                      }
+                    />
+                    图片
+                  </label>
                   <button
                     type="button"
                     className={`model-default${m.is_active ? ' on' : ''}`}

@@ -33,6 +33,7 @@ import Select, { type SelectOption } from './Select';
 import RemoteFilePicker from './RemoteFilePicker';
 import {
   FileIcon,
+  ImageIcon,
   PlusIcon,
   RefreshIcon,
   SendIcon,
@@ -74,6 +75,8 @@ interface ChatMsg {
   id: number;
   role: 'user' | 'assistant';
   content: string;
+  /** 用户消息附带的图片（data URL），气泡里渲染缩略图 */
+  images?: string[];
   tools: ToolView[];
   error?: string;
 }
@@ -125,6 +128,55 @@ const RING_C = 2 * Math.PI * RING_R;
 function refPreview(text: string): string {
   const line = text.split('\n').find((l) => l.trim());
   return (line ?? text).trim();
+}
+
+// ---- 图片附件 ----
+/** 单条消息最多附带的图片数（与后端 MAX_IMAGES_PER_MESSAGE 一致） */
+const MAX_IMAGES = 6;
+/** 长边超过该值时经 canvas 压缩；与 Claude/OpenAI 高清档推荐分辨率一致 */
+const IMAGE_MAX_EDGE = 1568;
+/** 原图小于该体积且尺寸达标时跳过压缩，直发原始 data URL（≈500KB） */
+const IMAGE_SKIP_COMPRESS_BYTES = 512 * 1024;
+
+function readAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(file);
+  });
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('图片解析失败'));
+    img.src = src;
+  });
+}
+
+/**
+ * 图片 → 发送用 data URL：尺寸与体积都达标时原样直发；
+ * 否则 canvas 缩到长边 1568、JPEG 0.85 重编码（截图场景体积可降一个量级）。
+ */
+async function imageToDataUrl(file: File): Promise<string> {
+  const src = await readAsDataUrl(file);
+  const img = await loadImage(src);
+  const longest = Math.max(img.width, img.height);
+  if (file.size <= IMAGE_SKIP_COMPRESS_BYTES && longest <= IMAGE_MAX_EDGE) {
+    return src;
+  }
+  const scale = Math.min(1, IMAGE_MAX_EDGE / longest);
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return src;
+  ctx.drawImage(img, 0, 0, w, h);
+  return canvas.toDataURL('image/jpeg', 0.85);
 }
 
 function refLineCount(text: string): number {
@@ -257,7 +309,13 @@ function historyToMessages(history: HistoryEntry[], nextId: () => number): ChatM
     if (entry.role === 'system') continue;
     if (entry.role === 'user') {
       currentAssistant = null;
-      result.push({ id: nextId(), role: 'user', content: entry.content ?? '', tools: [] });
+      result.push({
+        id: nextId(),
+        role: 'user',
+        content: entry.content ?? '',
+        images: entry.images,
+        tools: [],
+      });
     } else if (entry.role === 'assistant') {
       if (!currentAssistant) {
         currentAssistant = { id: nextId(), role: 'assistant', content: '', tools: [] };
@@ -327,6 +385,10 @@ function ChatPanel({
   >([]);
   const refSeqRef = useRef(0);
   const [pickerOpen, setPickerOpen] = useState(false);
+  // 待发送的图片附件（data URL，已经过压缩管线），仅视觉模型显示入口
+  const [images, setImages] = useState<string[]>([]);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const [imgNotice, setImgNotice] = useState<string | null>(null);
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -363,6 +425,33 @@ function ChatPanel({
     : windowPct >= 50
     ? ' warn'
     : '';
+
+  // 图片入口按当前模型的 supports_vision 开关显示；粘贴时未开启则给出提示
+  const supportsVision = currentModel?.supports_vision === true;
+  const imgNoticeTimer = useRef<number | undefined>(undefined);
+  const flashImgNotice = useCallback((text: string) => {
+    setImgNotice(text);
+    window.clearTimeout(imgNoticeTimer.current);
+    imgNoticeTimer.current = window.setTimeout(() => setImgNotice(null), 3000);
+  }, []);
+
+  const addImageFiles = useCallback(
+    async (files: File[]) => {
+      const imgs = files.filter((f) => f.type.startsWith('image/'));
+      if (imgs.length === 0) return;
+      for (const f of imgs) {
+        try {
+          const url = await imageToDataUrl(f);
+          setImages((prev) =>
+            prev.length >= MAX_IMAGES ? prev : [...prev, url],
+          );
+        } catch {
+          flashImgNotice('图片读取失败，已跳过');
+        }
+      }
+    },
+    [flashImgNotice],
+  );
 
   const handleModelChange = async (modelId: string) => {
     if (!providerId || !modelId) return;
@@ -616,7 +705,13 @@ function ChatPanel({
   const handleSend = () => {
     const text = input.trim();
     const refs = references;
-    if ((!text && refs.length === 0) || busy || !providerConfigured) return;
+    const imgs = images;
+    if (
+      (!text && refs.length === 0 && imgs.length === 0) ||
+      busy ||
+      !providerConfigured
+    )
+      return;
     // 引用统一放在问题之后：文件引用给出路径（交由模型用 read_file 读取），
     // 终端引用用代码块包裹
     const refBlock = refs.length
@@ -637,6 +732,7 @@ function ChatPanel({
       id: nextChatMessageId(),
       role: 'user',
       content: payload,
+      images: imgs.length > 0 ? imgs : undefined,
       tools: [],
     };
     const assistantMsg: ChatMsg = {
@@ -650,9 +746,10 @@ function ChatPanel({
     setMessages((prev) => [...prev, userMsg, assistantMsg]);
     setInput('');
     setReferences([]);
+    setImages([]);
     setRoundsPrompt(null);
     setBusy(true);
-    agentChat(sessionId, payload, permissionMode).catch((err) => {
+    agentChat(sessionId, payload, permissionMode, imgs).catch((err) => {
       updateLastAssistant((m) => ({ ...m, error: fmtError(err) }));
       setBusy(false);
     });
@@ -855,6 +952,13 @@ function ChatPanel({
             <div key={msg.id} className={`msg msg-${msg.role}`}>
               <div className="msg-bubble">
                 {msg.tools.map(renderTool)}
+                {msg.images && msg.images.length > 0 && (
+                  <div className="msg-images">
+                    {msg.images.map((src, i) => (
+                      <img key={i} src={src} alt={`图片 ${i + 1}`} />
+                    ))}
+                  </div>
+                )}
                 {msg.content && (
                   <div className="md-content">
                     <ReactMarkdown
@@ -974,12 +1078,46 @@ function ChatPanel({
             ))}
           </div>
         )}
+        {images.length > 0 && (
+          <div className="chat-imgs">
+            {images.map((src, i) => (
+              <div className="chat-img-chip" key={i}>
+                <img src={src} alt={`待发送图片 ${i + 1}`} />
+                <button
+                  type="button"
+                  className="chat-img-remove"
+                  title="移除图片"
+                  onClick={() =>
+                    setImages((prev) => prev.filter((_, x) => x !== i))
+                  }
+                >
+                  <XIcon size={11} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="chat-input-row">
           <div className="chat-input-box">
             <textarea
               ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onPaste={(e) => {
+                const items = e.clipboardData?.items;
+                if (!items) return;
+                const files = [...items]
+                  .filter((it) => it.kind === 'file' && it.type.startsWith('image/'))
+                  .map((it) => it.getAsFile())
+                  .filter((f): f is File => f !== null);
+                if (files.length === 0) return;
+                e.preventDefault();
+                if (!supportsVision) {
+                  flashImgNotice('当前模型未开启「支持图片」，请到 AI 配置勾选');
+                  return;
+                }
+                void addImageFiles(files);
+              }}
               onKeyDown={(e) => {
                 if (e.key !== 'Enter' || e.shiftKey) return;
                 // 输入法组合中（候选词列表还开着）的回车只用于确认候选词，不能发送。
@@ -1016,6 +1154,7 @@ function ChatPanel({
                 Enter 发送 · Shift+Enter 换行
               </span>
             )}
+            {imgNotice && <span className="chat-img-notice">{imgNotice}</span>}
             {busy ? (
               <button
                 className="icon-btn stop"
@@ -1034,7 +1173,9 @@ function ChatPanel({
                 onClick={handleSend}
                 disabled={
                   !providerConfigured ||
-                  (!input.trim() && references.length === 0)
+                  (!input.trim() &&
+                    references.length === 0 &&
+                    images.length === 0)
                 }
               >
                 <SendIcon size={16} />
@@ -1053,6 +1194,31 @@ function ChatPanel({
             >
               <PlusIcon size={16} />
             </button>
+            {supportsVision && (
+              <>
+                <input
+                  ref={imageInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  hidden
+                  onChange={(e) => {
+                    const files = [...(e.target.files ?? [])];
+                    e.target.value = '';
+                    void addImageFiles(files);
+                  }}
+                />
+                <button
+                  type="button"
+                  className="icon-btn chat-attach-btn"
+                  title="附加图片（或直接粘贴截图）"
+                  onClick={() => imageInputRef.current?.click()}
+                  disabled={!providerConfigured}
+                >
+                  <ImageIcon size={16} />
+                </button>
+              </>
+            )}
             <div
               className={`chat-control chat-control-permission permission-${permissionMode}`}
               title={`安全级别（当前：${

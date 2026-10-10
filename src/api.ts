@@ -70,10 +70,6 @@ export const setActiveAiModel = (providerId: string, modelId: string) =>
   invoke<void>('set_active_ai_model', { providerId, modelId });
 export const setActiveAiProvider = (providerId: string) =>
   invoke<void>('set_active_ai_provider', { providerId });
-export const getAiDefaultContextWindow = () =>
-  invoke<number>('get_ai_default_context_window');
-export const saveAiDefaultContextWindow = (value: number) =>
-  invoke<number>('save_ai_default_context_window', { value });
 export const getAiMaxToolRounds = () => invoke<number>('get_ai_max_tool_rounds');
 export const saveAiMaxToolRounds = (value: number) =>
   invoke<number>('save_ai_max_tool_rounds', { value });
@@ -318,11 +314,14 @@ export const agentChat = (
   sessionId: number,
   message: string,
   permissionMode: 'all' | 'smart' | 'none',
+  /** 随消息附带的图片（data URL），仅视觉模型可用 */
+  images: string[] = [],
 ) =>
   invoke<void>('agent_chat', {
     sessionId,
     message,
     permissionMode,
+    images,
   });
 export const agentApprove = (sessionId: number, toolCallId: string, allow: boolean) =>
   invoke<void>('agent_approve', { sessionId, toolCallId, allow });

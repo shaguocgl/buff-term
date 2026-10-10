@@ -119,6 +119,9 @@ pub struct AiModel {
     /// 该模型支持的上下文窗口（token）。由用户在 AI 配置中显式填写。
     #[serde(default = "default_context_window")]
     pub context_window: u32,
+    /// 该模型是否支持图片输入（多模态）。开启后聊天面板允许粘贴/附加图片。
+    #[serde(default)]
+    pub supports_vision: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
