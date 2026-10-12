@@ -20,6 +20,7 @@ import type {
   McpService,
   McpServiceInput,
   MonitorSnapshot,
+  MonitorState,
   HostInfo,
   HostMetricPoint,
   LaunchState,
@@ -146,6 +147,9 @@ export const monitorSnapshot = (hostId: string) =>
   invoke<MonitorSnapshot>('monitor_snapshot', { hostId });
 export const monitorHistory = (hostId: string, windowSecs = 1800) =>
   invoke<HostMetricPoint[]>('monitor_history', { hostId, windowSecs });
+/** 主机监控实时状态（后台采集的最新快照 + 连接以来的历史点），面板打开时调用 */
+export const monitorState = (hostId: string) =>
+  invoke<MonitorState>('monitor_state', { hostId });
 /** 一次性采集服务器静态信息（公网 IP / 国家 / 系统 / CPU / 内存），面板打开时调用 */
 export const monitorHostInfo = (hostId: string) =>
   invoke<HostInfo>('monitor_host_info', { hostId });

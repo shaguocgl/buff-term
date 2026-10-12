@@ -1,12 +1,17 @@
 use crate::db::Db;
 use crate::models::{Host, HostMetric, MetricDisk, MetricTop};
-use crate::russh::RusshManager;
+use crate::russh::{ClientHandler, RusshManager};
 use crate::util::now;
+use russh::client::Handle;
 use serde::Serialize;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Manager, State};
+use tokio_util::sync::CancellationToken;
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct DiskInfo {
     pub mount: String,
     pub fs: String,
@@ -21,14 +26,14 @@ pub struct DiskInfo {
     pub percent: f64,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct MemInfo {
     pub total_mb: u64,
     pub used_mb: u64,
     pub percent: f64,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct TopProc {
     pub user: String,
     pub cpu: String,
@@ -37,7 +42,7 @@ pub struct TopProc {
 }
 
 /// 单块网卡的累计收发字节数（自系统启动起，单位 Byte）。
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct NetIface {
     pub name: String,
     pub rx_bytes: u64,
@@ -46,14 +51,14 @@ pub struct NetIface {
 
 /// 网络流量：rx_bytes/tx_bytes 为所有「物理」网卡累计值之和；
 /// ifaces 保留过滤后的逐网卡明细，供后续按网卡展示使用。
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct NetInfo {
     pub rx_bytes: u64,
     pub tx_bytes: u64,
     pub ifaces: Vec<NetIface>,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct MonitorSnapshot {
     pub ts: u64,
     pub host_label: String,
@@ -88,25 +93,35 @@ pub struct HostInfo {
     pub location: String,
 }
 
-/// 采集 Linux 服务器的资源快照（CPU / 内存 / 磁盘 / 负载 / TOP 进程）
+/// 采集 Linux 服务器的资源快照（CPU / 内存 / 磁盘 / 负载 / TOP 进程）。
 /// 复用 russh 连接池，避免每次采集都新建系统 ssh 进程。
+/// 后台采集任务（终端会话建立后启动）已有新鲜结果时直接复用；
 /// 采集成功后自动写入 host_metrics 表，作为历史趋势数据。
 #[tauri::command]
 pub async fn monitor_snapshot(
     app: AppHandle,
     russh: State<'_, RusshManager>,
     db: State<'_, std::sync::Arc<Db>>,
+    monitor: State<'_, MonitorManager>,
     host_id: String,
 ) -> Result<MonitorSnapshot, String> {
+    // 面板正在轮询：标记活跃，采集任务据此切到 5 秒节奏
+    monitor.touch_poll(&host_id);
+    // 会话连接中后台采集在跑：面板轮询直接命中缓存，不再重复跑远端脚本
+    if let Some(snap) = monitor.snapshot_if_fresh(&host_id, SNAPSHOT_FRESH_SECS) {
+        return Ok(snap);
+    }
     let host = crate::hosts::load_host(&db, &host_id)?;
     let snap = collect_russh(&host, &russh).await?;
+    monitor.push(&host.id, &snap);
     if let Some(db) = app.try_state::<std::sync::Arc<Db>>() {
         let _ = save_metric(&db, &host.id, &snap, "manual");
     }
     Ok(snap)
 }
 
-/// 通过 russh 连接池采集（复用 AI / MCP 同一 SSH 通道）
+/// 通过 russh 连接池采集（复用 AI / MCP 同一 SSH 通道）。
+/// 用于面板实时采集兜底（无后台采集任务或结果过期时）与巡检 / AI 的一次性采集。
 pub async fn collect_russh(
     host: &Host,
     russh: &RusshManager,
@@ -114,6 +129,18 @@ pub async fn collect_russh(
     let out = russh
         .exec(host, MONITOR_SCRIPT, Duration::from_secs(25))
         .await?;
+    parse(&out.text, host)
+}
+
+/// 在终端会话自身的 SSH 连接上采集（后台采集专用）。
+/// channel 级执行：失败只关闭本次通道，不影响交互会话；
+/// 取消（会话关闭）时向远端脚本发 SIGTERM 并立即返回。
+pub async fn collect_on_handle(
+    handle: &Handle<ClientHandler>,
+    host: &Host,
+    cancel: &CancellationToken,
+) -> Result<MonitorSnapshot, String> {
+    let out = crate::russh::exec_on(handle, MONITOR_SCRIPT, Duration::from_secs(25), cancel).await?;
     parse(&out.text, host)
 }
 
@@ -217,6 +244,329 @@ pub fn monitor_history(
     let since = now().saturating_sub(window);
     db.list_metrics(&host_id, since, 5000)
         .map_err(|e| format!("读取历史指标失败: {e}"))
+}
+
+/// 采集节拍：采集循环每 5 秒醒来一次判断是否到采集时机（醒来本身无远端开销）。
+const MONITOR_TICK: Duration = Duration::from_secs(5);
+/// 面板打开时的采集间隔：与面板 5 秒轮询同频。
+const MONITOR_INTERVAL: Duration = Duration::from_secs(5);
+/// 面板未打开（后台静默）时的采集间隔：只保留趋势所需粒度，
+/// 远端 CPU / 流量开销降约 6 倍；面板一打开，下一个节拍即恢复 5 秒。
+const MONITOR_IDLE_INTERVAL: Duration = Duration::from_secs(30);
+/// 面板活跃判定窗口（秒）：该窗口内面板调用过监控接口即视为「面板打开中」。
+const ACTIVE_WINDOW_SECS: u64 = 15;
+/// 首次采集延迟：等终端会话建立稳定后再采集，避免与交互初始化争抢连接。
+const MONITOR_FIRST_DELAY: Duration = Duration::from_secs(1);
+/// 采集连续失败时的退避起始值（此后翻倍）。
+const MONITOR_FAIL_MIN_INTERVAL: Duration = Duration::from_secs(2);
+/// 采集连续失败时的退避上限：2s → 4s → 8s → 16s → 30s 封顶，
+/// 避免主机不可达时频繁重试。
+const MONITOR_FAIL_MAX_INTERVAL: Duration = Duration::from_secs(30);
+/// 内存历史点保留窗口（秒）：与面板趋势图窗口一致（最近 30 分钟）。
+const POINT_WINDOW_SECS: u64 = 1800;
+/// 快照新鲜阈值（秒）：monitor_snapshot 命中该阈值内的后台采集结果时直接复用，
+/// 避免面板轮询与后台采集任务对同一主机重复跑远端脚本。
+const SNAPSHOT_FRESH_SECS: u64 = 30;
+
+/// 内存历史点：面板打开时 5 秒 / 后台静默时 30 秒粒度，
+/// 供面板打开时回填「连接以来」的趋势。
+#[derive(Serialize, Default, Clone)]
+pub struct MonitorPoint {
+    /// Unix 秒级时间戳
+    pub ts: u64,
+    /// CPU 使用率（%）
+    pub cpu: f64,
+    /// 内存使用率（%）
+    pub mem: f64,
+    /// 物理网卡累计接收字节数（与相邻点差分得到实时速率）
+    pub rx: u64,
+    /// 物理网卡累计发送字节数（与相邻点差分得到实时速率）
+    pub tx: u64,
+}
+
+/// 主机监控实时状态：面板打开时一次性读取，立即拿到最近快照与连接以来的历史点。
+#[derive(Serialize, Default)]
+pub struct MonitorState {
+    /// 最近一次成功采集的快照（后台采集尚未完成或全部失败时为空）
+    pub latest: Option<MonitorSnapshot>,
+    /// 连接以来的历史点（最近 30 分钟）
+    pub points: Vec<MonitorPoint>,
+    /// 最近一次采集错误（成功后自动清除），供面板在无快照时提示原因
+    pub error: Option<String>,
+}
+
+/// 一台主机的后台采集任务句柄。
+struct CollectorHandle {
+    /// 取消令牌：该主机最后一个会话关闭时触发，采集循环退出
+    cancel: CancellationToken,
+    /// 正在使用该主机的会话 id 集合（多标签打开同一主机时共用同一采集任务）
+    sessions: HashSet<u32>,
+}
+
+#[derive(Default)]
+struct MonitorInner {
+    /// host_id → 后台采集任务
+    collectors: HashMap<String, CollectorHandle>,
+    /// host_id → 最近一次成功快照
+    latest: HashMap<String, MonitorSnapshot>,
+    /// host_id → 最近一次采集错误
+    errors: HashMap<String, String>,
+    /// host_id → 历史点（面板打开 5 秒 / 后台静默 30 秒粒度，最多保留最近 30 分钟）
+    points: HashMap<String, VecDeque<MonitorPoint>>,
+    /// host_id → 面板最近一次调用监控接口的时间（采集频率自适应的依据）
+    last_poll: HashMap<String, u64>,
+}
+
+/// 后台监控采集管理器：终端会话建立后即开始采集（而非等面板打开），
+/// 采集频率自适应（面板打开 5 秒 / 后台静默 30 秒），且复用会话自身的 SSH 连接；
+/// 该主机所有会话关闭时停止；采集结果常驻内存，面板打开秒回显、
+/// 多主机切换不丢数据（切走再切回直接读该主机的内存历史）。
+#[derive(Default)]
+pub struct MonitorManager {
+    inner: Mutex<MonitorInner>,
+}
+
+impl MonitorManager {
+    /// 会话建立后注册后台采集：该主机已有采集任务时仅登记会话（多标签共用），
+    /// 没有任务时新建任务并立即开始采集。
+    pub fn attach(&self, app: &AppHandle, host: &Host, session_id: u32) {
+        if let Some(cancel) = self.register_session(&host.id, session_id) {
+            spawn_collector(app.clone(), host.clone(), cancel);
+        }
+    }
+
+    /// 会话关闭后注销：该主机最后一个会话关闭时停止采集任务。
+    /// 已采集的数据保留在内存中，重连 / 切回时仍可直接回显。
+    pub fn detach(&self, host_id: &str, session_id: u32) {
+        if let Some(cancel) = self.unregister_session(host_id, session_id) {
+            cancel.cancel();
+        }
+    }
+
+    /// 采集成功后更新内存状态：刷新最近快照、追加历史点（按时间戳去重、
+    /// 只保留最近 30 分钟），并清除上一次的采集错误。
+    pub fn push(&self, host_id: &str, snap: &MonitorSnapshot) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.errors.remove(host_id);
+        // 快照回退（采集任务与面板兜底采集交错返回）时保留更新的那份
+        let newer = inner
+            .latest
+            .get(host_id)
+            .map_or(true, |prev| snap.ts >= prev.ts);
+        if newer {
+            inner.latest.insert(host_id.to_string(), snap.clone());
+        }
+        let point = MonitorPoint {
+            ts: snap.ts,
+            cpu: snap.cpu_percent,
+            mem: snap.mem.percent,
+            rx: snap.net.rx_bytes,
+            tx: snap.net.tx_bytes,
+        };
+        let cutoff = snap.ts.saturating_sub(POINT_WINDOW_SECS);
+        let deque = inner.points.entry(host_id.to_string()).or_default();
+        if deque.back().map_or(true, |last| point.ts > last.ts) {
+            deque.push_back(point);
+        }
+        while deque.front().is_some_and(|p| p.ts < cutoff) {
+            deque.pop_front();
+        }
+    }
+
+    /// 记录最近一次采集错误（下一次成功后由 push 自动清除）。
+    pub fn set_error(&self, host_id: &str, error: String) {
+        self.inner
+            .lock()
+            .unwrap()
+            .errors
+            .insert(host_id.to_string(), error);
+    }
+
+    /// 记录面板最近一次调用监控接口的时间（monitor_state / monitor_snapshot）。
+    /// 采集任务据此在「面板打开 5 秒 / 后台静默 30 秒」之间自适应。
+    pub fn touch_poll(&self, host_id: &str) {
+        self.inner
+            .lock()
+            .unwrap()
+            .last_poll
+            .insert(host_id.to_string(), now());
+    }
+
+    /// 面板是否处于活跃窗口内（监控面板正打开着）。
+    fn panel_active(&self, host_id: &str, window_secs: u64) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .last_poll
+            .get(host_id)
+            .is_some_and(|ts| now().saturating_sub(*ts) <= window_secs)
+    }
+
+    /// 命中新鲜阈值的最近快照：供 monitor_snapshot 复用后台采集结果，
+    /// 面板轮询不再重复跑远端脚本。仅在「该主机有会话连接（采集任务在跑）
+    /// 且结果新鲜」时复用；无任务 / 结果过期时返回 None，由调用方实时采集兜底。
+    pub fn snapshot_if_fresh(&self, host_id: &str, max_age_secs: u64) -> Option<MonitorSnapshot> {
+        let inner = self.inner.lock().unwrap();
+        if !inner.collectors.contains_key(host_id) {
+            return None;
+        }
+        inner
+            .latest
+            .get(host_id)
+            .filter(|snap| now().saturating_sub(snap.ts) <= max_age_secs)
+            .cloned()
+    }
+
+    /// 读取主机监控状态：最近快照 + 最近 30 分钟的历史点 + 最近错误。
+    /// 读取时顺带清理过期点，避免长时间运行后内存缓慢增长。
+    pub fn state(&self, host_id: &str) -> MonitorState {
+        let mut inner = self.inner.lock().unwrap();
+        let cutoff = now().saturating_sub(POINT_WINDOW_SECS);
+        let points = inner
+            .points
+            .get_mut(host_id)
+            .map(|deque| {
+                while deque.front().is_some_and(|p| p.ts < cutoff) {
+                    deque.pop_front();
+                }
+                deque.iter().cloned().collect()
+            })
+            .unwrap_or_default();
+        MonitorState {
+            latest: inner.latest.get(host_id).cloned(),
+            points,
+            error: inner.errors.get(host_id).cloned(),
+        }
+    }
+
+    /// 登记会话：返回新建采集任务的取消令牌（该主机此前无任务时）。
+    fn register_session(&self, host_id: &str, session_id: u32) -> Option<CancellationToken> {
+        let mut inner = self.inner.lock().unwrap();
+        match inner.collectors.entry(host_id.to_string()) {
+            Entry::Occupied(mut e) => {
+                e.get_mut().sessions.insert(session_id);
+                None
+            }
+            Entry::Vacant(e) => {
+                let cancel = CancellationToken::new();
+                e.insert(CollectorHandle {
+                    cancel: cancel.clone(),
+                    sessions: HashSet::from([session_id]),
+                });
+                Some(cancel)
+            }
+        }
+    }
+
+    /// 注销会话：返回需要停止的采集任务取消令牌（该主机已无会话时）。
+    fn unregister_session(&self, host_id: &str, session_id: u32) -> Option<CancellationToken> {
+        let mut inner = self.inner.lock().unwrap();
+        let Entry::Occupied(mut e) = inner.collectors.entry(host_id.to_string()) else {
+            return None;
+        };
+        let handle = e.get_mut();
+        handle.sessions.remove(&session_id);
+        if !handle.sessions.is_empty() {
+            return None;
+        }
+        let cancel = handle.cancel.clone();
+        e.remove();
+        Some(cancel)
+    }
+}
+
+/// 后台采集循环：会话建立后先延迟 1 秒采集一次，此后按节拍醒来判断是否到采集时机。
+/// 采集频率自适应：面板打开中每 5 秒一次，面板关闭（后台静默）降为每 30 秒一次，
+/// 面板一打开下一个节拍即恢复 5 秒；采集在终端会话自身的 SSH 连接上执行
+/// （不占用连接池，也不受池容量上限影响）；会话关闭（取消令牌触发）时中断远端脚本并退出。
+fn spawn_collector(app: AppHandle, host: Host, cancel: CancellationToken) {
+    tauri::async_runtime::spawn(async move {
+        // 首次采集前的等待（同时响应取消）
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(MONITOR_FIRST_DELAY) => {}
+        }
+        let mut last_collect: Option<std::time::Instant> = None;
+        let mut fail_backoff = Duration::ZERO;
+        loop {
+            let active = app
+                .try_state::<MonitorManager>()
+                .is_some_and(|m| m.panel_active(&host.id, ACTIVE_WINDOW_SECS));
+            let interval = if !fail_backoff.is_zero() {
+                fail_backoff
+            } else if active {
+                MONITOR_INTERVAL
+            } else {
+                MONITOR_IDLE_INTERVAL
+            };
+            if last_collect.map_or(true, |t| t.elapsed() >= interval) {
+                collect_round(&app, &host, &cancel, &mut fail_backoff).await;
+                last_collect = Some(std::time::Instant::now());
+                if cancel.is_cancelled() {
+                    break;
+                }
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tokio::time::sleep(MONITOR_TICK) => {}
+            }
+        }
+    });
+}
+
+/// 执行一轮后台采集：复用该主机存活会话的 SSH 连接执行只读脚本，
+/// 成功则更新内存状态并落库，失败记录错误并退避；会话关闭触发的取消静默退出。
+async fn collect_round(
+    app: &AppHandle,
+    host: &Host,
+    cancel: &CancellationToken,
+    fail_backoff: &mut Duration,
+) {
+    // 终端会话自身的连接：同一主机多标签时取任意一条存活连接即可
+    let handle = app
+        .try_state::<crate::session::SessionManager>()
+        .and_then(|sessions| sessions.handle_for_host(&host.id));
+    let Some(handle) = handle else {
+        // 无存活会话（会话刚关闭的竞态窗口）：本轮跳过，等取消令牌或下一拍
+        return;
+    };
+    match collect_on_handle(&handle, host, cancel).await {
+        Ok(snap) => {
+            if let Some(manager) = app.try_state::<MonitorManager>() {
+                manager.push(&host.id, &snap);
+            }
+            // 落库供趋势分析（DB 内部按主机 60 秒节流，不会写得太密）
+            if let Some(db) = app.try_state::<std::sync::Arc<Db>>() {
+                let _ = save_metric(&db, &host.id, &snap, "auto");
+            }
+            *fail_backoff = Duration::ZERO;
+        }
+        Err(e) => {
+            // 会话关闭触发的取消不算采集失败，不写入错误状态
+            if cancel.is_cancelled() {
+                return;
+            }
+            if let Some(manager) = app.try_state::<MonitorManager>() {
+                manager.set_error(&host.id, e);
+            }
+            *fail_backoff = if fail_backoff.is_zero() {
+                MONITOR_FAIL_MIN_INTERVAL
+            } else {
+                (*fail_backoff * 2).min(MONITOR_FAIL_MAX_INTERVAL)
+            };
+        }
+    }
+}
+
+/// 读取主机监控实时状态：最近快照 + 连接以来的历史点（面板打开 5 秒 /
+/// 后台静默 30 秒粒度，内存，最多 30 分钟）+ 最近错误。
+/// 面板打开 / 切换主机时调用一次即可回填「连接以来」的趋势，
+/// 而不是等面板轮询重新积累数据。
+#[tauri::command]
+pub fn monitor_state(monitor: State<'_, MonitorManager>, host_id: String) -> MonitorState {
+    // 面板打开 / 切换主机即视为活跃：采集任务下一个节拍切到 5 秒节奏
+    monitor.touch_poll(&host_id);
+    monitor.state(&host_id)
 }
 
 const MONITOR_SCRIPT: &str = r#"
@@ -857,6 +1207,106 @@ END
         assert_eq!(snap.top_cpu[0].cmd, "/usr/bin/x");
         assert_eq!(snap.top_mem.len(), 1);
         assert_eq!(snap.top_mem[0].cmd, "/usr/sbin/mysqld");
+    }
+
+    #[test]
+    fn monitor_points_dedupe_and_prune() {
+        let manager = MonitorManager::default();
+        let t = now();
+        let snap = |ts: u64, cpu: f64| MonitorSnapshot {
+            ts,
+            cpu_percent: cpu,
+            ..Default::default()
+        };
+        manager.push("h1", &snap(t, 10.0));
+        // 同一时间戳重复推送（面板轮询与后台采集命中同一快照）只保留一个点
+        manager.push("h1", &snap(t, 10.0));
+        let st = manager.state("h1");
+        assert_eq!(st.points.len(), 1);
+        assert_eq!(st.points[0].cpu, 10.0);
+        assert_eq!(st.latest.unwrap().ts, t);
+
+        // 超过 30 分钟的旧点被清理
+        manager.push("h1", &snap(t + POINT_WINDOW_SECS + 1, 20.0));
+        let st = manager.state("h1");
+        assert_eq!(st.points.len(), 1);
+        assert_eq!(st.points[0].ts, t + POINT_WINDOW_SECS + 1);
+        assert_eq!(st.points[0].cpu, 20.0);
+    }
+
+    #[test]
+    fn monitor_snapshot_reuses_only_fresh_result() {
+        let manager = MonitorManager::default();
+        let t = now();
+        // 无会话连接（没有后台采集任务）：不复用缓存，交回调用方实时采集
+        manager.push("h1", &MonitorSnapshot { ts: t, ..Default::default() });
+        assert!(manager.snapshot_if_fresh("h1", SNAPSHOT_FRESH_SECS).is_none());
+
+        // 会话连接中：新鲜快照直接复用
+        manager.register_session("h1", 1);
+        assert!(manager.snapshot_if_fresh("h1", SNAPSHOT_FRESH_SECS).is_some());
+        // 任务刚建立、尚未采集出结果的主机不复用
+        manager.register_session("h2", 2);
+        assert!(manager.snapshot_if_fresh("h2", SNAPSHOT_FRESH_SECS).is_none());
+
+        // 过期快照不再复用（交回调用方实时采集兜底）
+        let stale = MonitorManager::default();
+        stale.register_session("h1", 1);
+        stale.push(
+            "h1",
+            &MonitorSnapshot {
+                ts: t - SNAPSHOT_FRESH_SECS - 5,
+                ..Default::default()
+            },
+        );
+        assert!(stale.snapshot_if_fresh("h1", SNAPSHOT_FRESH_SECS).is_none());
+
+        // 会话全部关闭（任务停止）后同样不复用，保持面板实时采集
+        manager.unregister_session("h1", 1);
+        assert!(manager.snapshot_if_fresh("h1", SNAPSHOT_FRESH_SECS).is_none());
+    }
+
+    #[test]
+    fn monitor_error_cleared_on_success() {
+        let manager = MonitorManager::default();
+        manager.set_error("h1", "连接失败".to_string());
+        let st = manager.state("h1");
+        assert_eq!(st.error.as_deref(), Some("连接失败"));
+        assert!(st.latest.is_none());
+        manager.push("h1", &MonitorSnapshot { ts: now(), ..Default::default() });
+        assert!(manager.state("h1").error.is_none());
+    }
+
+    #[test]
+    fn monitor_panel_activity_window() {
+        let manager = MonitorManager::default();
+        // 未调用过监控接口的主机不算面板活跃（后台静默 → 低频采集）
+        assert!(!manager.panel_active("h1", ACTIVE_WINDOW_SECS));
+        // 面板调用过监控接口后进入活跃窗口（5 秒采集节奏）
+        manager.touch_poll("h1");
+        assert!(manager.panel_active("h1", ACTIVE_WINDOW_SECS));
+        // 只影响对应主机
+        assert!(!manager.panel_active("h2", ACTIVE_WINDOW_SECS));
+    }
+
+    #[test]
+    fn monitor_collector_lifecycle_per_host() {
+        let manager = MonitorManager::default();
+        // 首个会话创建采集任务
+        assert!(manager.register_session("h1", 1).is_some());
+        // 同一主机第二个会话复用同一任务
+        assert!(manager.register_session("h1", 2).is_none());
+        // 其它主机独立建任务
+        assert!(manager.register_session("h2", 3).is_some());
+        // 该主机仍有会话时任务继续
+        assert!(manager.unregister_session("h1", 1).is_none());
+        // 最后一个会话关闭：返回取消令牌，任务停止
+        let cancel = manager.unregister_session("h1", 2).expect("应返回取消令牌");
+        cancel.cancel();
+        assert!(cancel.is_cancelled());
+        // 重新连接会新建任务；注销未知会话是安全空操作
+        assert!(manager.register_session("h1", 4).is_some());
+        assert!(manager.unregister_session("h3", 9).is_none());
     }
 
     fn test_host() -> Host {

@@ -97,6 +97,7 @@ pub fn run() {
         })
         .manage(SessionManager::default())
         .manage(RusshManager::new())
+        .manage(monitor::MonitorManager::default())
         .manage(AgentManager::default())
         .invoke_handler(tauri::generate_handler![
             ai::list_ai_providers,
@@ -133,6 +134,7 @@ pub fn run() {
             sftp::sftp_write_file,
             monitor::monitor_snapshot,
             monitor::monitor_history,
+            monitor::monitor_state,
             monitor::monitor_host_info,
             inspection::start_inspection,
             inspection::get_inspection_report,

@@ -875,7 +875,9 @@ const MAX_EXEC_OUTPUT: usize = 8 * 1024 * 1024;
 /// 通道打开 / 命令提交的超时：异常网络下避免 exec 无限期挂住。
 pub(crate) const CHANNEL_OP_TIMEOUT: Duration = Duration::from_secs(15);
 
-async fn exec_on(
+/// 在指定连接上执行一条命令（channel 级操作，失败只关闭本次通道，不影响连接本身）。
+/// 供连接池 exec 与后台监控采集（复用终端会话自身连接）共用。
+pub(crate) async fn exec_on(
     handle: &Handle<ClientHandler>,
     command: &str,
     timeout: Duration,

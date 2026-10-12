@@ -245,6 +245,30 @@ export interface HostMetricPoint {
   mem_percent: number;
 }
 
+/** 后台采集的内存历史点（面板打开 5 秒 / 后台静默 30 秒粒度，连接后持续累积，最多保留最近 30 分钟） */
+export interface MonitorPoint {
+  /** Unix 秒级时间戳 */
+  ts: number;
+  /** CPU 使用率（%） */
+  cpu: number;
+  /** 内存使用率（%） */
+  mem: number;
+  /** 物理网卡累计接收字节数（与相邻点差分得到实时速率） */
+  rx: number;
+  /** 物理网卡累计发送字节数（与相邻点差分得到实时速率） */
+  tx: number;
+}
+
+/** 主机监控实时状态：面板打开时一次性读取，立即回显最近快照与连接以来的趋势 */
+export interface MonitorState {
+  /** 最近一次成功采集的快照（后台采集尚未完成或全部失败时为空） */
+  latest: MonitorSnapshot | null;
+  /** 连接以来的历史点（最近 30 分钟） */
+  points: MonitorPoint[];
+  /** 最近一次采集错误（成功后自动清除），无快照时用于提示原因 */
+  error: string | null;
+}
+
 export interface AlertSettings {
   smtp_host?: string | null;
   smtp_port?: number | null;

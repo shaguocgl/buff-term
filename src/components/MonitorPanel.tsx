@@ -11,8 +11,9 @@ import {
   monitorHistory,
   monitorHostInfo,
   monitorSnapshot,
+  monitorState,
 } from '../api';
-import type { Host, HostInfo, MonitorSnapshot } from '../types';
+import type { Host, HostInfo, MonitorPoint, MonitorSnapshot } from '../types';
 import { fmtError } from '../utils/errors';
 import { formatBytes } from '../utils/remote';
 import {
@@ -26,7 +27,8 @@ import {
 
 interface Props {
   host: Host;
-  /** 面板隐藏时保持挂载但暂停 5s 轮询（避免后台无效采集） */
+  /** 面板隐藏时保持挂载但暂停 5s 轮询（后台采集由会话建立后启动的采集任务持续进行，
+   *  重新打开时通过 monitor_state 回填关闭期间的历史） */
   hidden?: boolean;
   onClose: () => void;
 }
@@ -47,9 +49,9 @@ interface NetPoint {
 /** 静态信息按 host.id 缓存：面板重开 / 来回切主机时秒回显，不重复跑远端脚本 */
 const infoCache = new Map<string, HostInfo>();
 
-/** 面板运行时缓存：切走再切回时直接回显上次快照与趋势，跳过「加载中」空窗 */
+/** 面板运行时缓存：切走再切回时先回显上次数据，随后由 monitor_state 补齐完整历史 */
 interface PanelCache {
-  snap: MonitorSnapshot;
+  snap: MonitorSnapshot | null;
   history: HistoryPoint[];
   netHistory: NetPoint[];
   prevNet: { ts: number; rx: number; tx: number } | null;
@@ -58,6 +60,36 @@ const panelCache = new Map<string, PanelCache>();
 
 /** 网卡速率差分允许的最大间隔：超过则视为计数器断档，不产出一个被稀释的假速率 */
 const NET_DIFF_MAX_GAP = 60;
+
+/** 由后台采集的累计计数器历史点差分出实时速率；断档（无数据 / 间隔过长）不产出假速率 */
+function netFromPoints(points: MonitorPoint[]): {
+  history: NetPoint[];
+  prev: { ts: number; rx: number; tx: number } | null;
+} {
+  const history: NetPoint[] = [];
+  for (let i = 1; i < points.length; i += 1) {
+    const before = points[i - 1];
+    const cur = points[i];
+    const dt = cur.ts - before.ts;
+    if (dt <= 0 || dt > NET_DIFF_MAX_GAP) continue;
+    history.push({
+      ts: cur.ts,
+      rx: cur.rx >= before.rx ? (cur.rx - before.rx) / dt : 0,
+      tx: cur.tx >= before.tx ? (cur.tx - before.tx) / dt : 0,
+    });
+  }
+  const last = points[points.length - 1];
+  return { history, prev: last ? { ts: last.ts, rx: last.rx, tx: last.tx } : null };
+}
+
+/** 合并两段历史点：按 ts 去重升序（同 ts 保留后台回填点），
+ *  避免「回填响应晚于轮询响应」时把更新的点冲掉 */
+function mergeHistory(base: HistoryPoint[], extra: HistoryPoint[]): HistoryPoint[] {
+  const byTs = new Map<number, HistoryPoint>();
+  for (const p of extra) byTs.set(p.ts, p);
+  for (const p of base) byTs.set(p.ts, p);
+  return [...byTs.values()].sort((a, b) => a.ts - b.ts);
+}
 
 function Gauge({
   label,
@@ -538,6 +570,9 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
   // 趋势数据的 ref 镜像：load 里需要基于上一次的值计算新数组并回写缓存
   const historyRef = useRef(history);
   const netRef = useRef(netHistory);
+  // 最近快照的 ref 镜像：回填与轮询响应乱序返回时，避免用较旧的一份覆盖新快照
+  const snapRef = useRef<MonitorSnapshot | null>(snap);
+  snapRef.current = snap;
   // 记录当前 host.id：静态信息异步返回时校验，防止切主机后旧结果覆盖新面板
   const hostIdRef = useRef(host.id);
   hostIdRef.current = host.id;
@@ -567,13 +602,14 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
     [host.id],
   );
 
-  // 切换主机时恢复该主机的面板缓存（上次离开时的快照与趋势）；
-  // 无缓存才清空并从 host_metrics 回填最近 30 分钟（快照每次采集都会写库）。
+  // 切换主机时恢复该主机的面板缓存（上次离开时的快照与趋势），
+  // 连接以来的完整历史由下面的 monitor_state 回填。
   // 静态信息走模块缓存，未命中才跑远端脚本（含公网查询，最多 ~20s）
   useEffect(() => {
     setInfo(infoCache.get(host.id) ?? null);
     const cached = panelCache.get(host.id);
     setSnap(cached?.snap ?? null);
+    snapRef.current = cached?.snap ?? null;
     historyRef.current = cached?.history ?? [];
     netRef.current = cached?.netHistory ?? [];
     prevNet.current = cached?.prevNet ?? null;
@@ -581,22 +617,65 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
     setNetHistory(netRef.current);
     setLoading(!cached);
     fetchInfo();
-    if (cached) return;
-    monitorHistory(host.id, 1800)
-      .then((rows) => {
+  }, [fetchInfo, host.id]);
+
+  // 面板打开 / 切换主机时读取后台采集状态：后台采集在会话建立后就已启动，
+  // 这里一次性拿到连接以来的完整历史（面板打开 5s / 后台 30s 粒度，含面板关闭期间
+  // 的数据）并与面板已积累的点合并，避免趋势图断档；后端无内存数据（如应用刚重启）
+  // 时回退到数据库历史（1 分钟粒度）
+  useEffect(() => {
+    if (hidden) return;
+    const hostId = host.id;
+    monitorState(hostId)
+      .then((st) => {
         // 响应可能晚到（用户已切走）：只回写到仍是当前主机时
-        if (hostIdRef.current === host.id && rows.length > 0) {
-          const points = rows.map((r) => ({
-            ts: r.ts,
-            cpu: r.cpu_percent,
-            mem: r.mem_percent,
-          }));
-          historyRef.current = points;
-          setHistory(points);
+        if (hostIdRef.current !== hostId) return;
+        if (st.latest) {
+          // 轮询响应可能先于本回填返回且带回更新的快照，避免旧数据覆盖新数据
+          if (!snapRef.current || st.latest.ts > snapRef.current.ts) {
+            setSnap(st.latest);
+            snapRef.current = st.latest;
+          }
+          setLoading(false);
+        } else if (st.error) {
+          setError(st.error);
+          setLoading(false);
         }
+        if (st.points.length > 0) {
+          // 与面板已积累的点合并（按时间戳去重），回填只补历史、不丢更新
+          const points = mergeHistory(
+            st.points.map((p) => ({ ts: p.ts, cpu: p.cpu, mem: p.mem })),
+            historyRef.current,
+          );
+          const net = netFromPoints(st.points);
+          historyRef.current = points;
+          netRef.current = net.history;
+          prevNet.current = net.prev;
+          setHistory(points);
+          setNetHistory(net.history);
+          panelCache.set(hostId, {
+            snap: snapRef.current ?? st.latest,
+            history: points,
+            netHistory: net.history,
+            prevNet: net.prev,
+          });
+          return;
+        }
+        monitorHistory(hostId, 1800)
+          .then((rows) => {
+            if (hostIdRef.current !== hostId || rows.length === 0) return;
+            const points = rows.map((r) => ({
+              ts: r.ts,
+              cpu: r.cpu_percent,
+              mem: r.mem_percent,
+            }));
+            historyRef.current = points;
+            setHistory(points);
+          })
+          .catch(() => {});
       })
       .catch(() => {});
-  }, [fetchInfo, host.id]);
+  }, [hidden, host.id]);
 
   const load = useCallback(() => {
     if (inFlightRef.current) return inFlightRef.current;
@@ -605,13 +684,18 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
       try {
         const s = await monitorSnapshot(host.id);
         setSnap(s);
-        const now = Date.now() / 1000;
-        const nextHist = [
-          ...historyRef.current,
-          { ts: now, cpu: s.cpu_percent, mem: s.mem.percent },
-        ].filter((p) => p.ts >= now - 1800); // 只保留最近 30 分钟
-        historyRef.current = nextHist;
-        setHistory(nextHist);
+        snapRef.current = s;
+        // 后台采集与面板轮询可能返回同一快照（缓存复用），按时间戳去重，
+        // 避免趋势图出现重复点
+        const last = historyRef.current[historyRef.current.length - 1];
+        if (!last || last.ts < s.ts) {
+          const nextHist = [
+            ...historyRef.current,
+            { ts: s.ts, cpu: s.cpu_percent, mem: s.mem.percent },
+          ].filter((p) => p.ts >= s.ts - 1800); // 只保留最近 30 分钟
+          historyRef.current = nextHist;
+          setHistory(nextHist);
+        }
         // 与上一快照差分网卡计数器 → B/s 速率；计数器回退（网卡重建等）取 0；
         // 间隔过长（面板切走暂停轮询后回来）说明计数器断档，不产出被稀释的假速率
         const prev = prevNet.current;
@@ -631,7 +715,7 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
         // 回写面板缓存：切走再切回时直接回显本次数据
         panelCache.set(host.id, {
           snap: s,
-          history: nextHist,
+          history: historyRef.current,
           netHistory: netRef.current,
           prevNet: prevNet.current,
         });

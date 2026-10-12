@@ -36,7 +36,9 @@ pub struct Session {
     pub host: Host,
     /// 终端输出通道（二进制帧：首字节 0x00 = 字节流，0x01 = 状态 JSON）
     out: Channel<InvokeResponseBody>,
-    _handle: Handle<ClientHandler>,
+    /// 会话自身的 SSH 连接（Arc 共享：后台监控采集复用这条连接执行只读脚本，
+    /// 不再单独占用连接池连接）
+    handle: Arc<Handle<ClientHandler>>,
     write_half: Arc<ChannelWriteHalf<russh::client::Msg>>,
     resize_tx: mpsc::UnboundedSender<(u16, u16)>,
     /// 发送按键 / 审批结果给该会话的守护消费者
@@ -144,7 +146,7 @@ impl SessionManager {
             Session {
                 host: host.clone(),
                 out: out.clone(),
-                _handle: handle,
+                handle: Arc::new(handle),
                 write_half: write_half.clone(),
                 resize_tx,
                 guard_tx,
@@ -163,6 +165,7 @@ impl SessionManager {
 
         let app_for_io = app.clone();
         let out_io = out.clone();
+        let host_id_io = host.id.clone();
         tokio::spawn(async move {
             // 合帧读循环：连续到达的输出在 4ms 窗口内合并为一条 Channel 消息，
             // 减少 IPC 次数；超过 32 KiB 立即 flush
@@ -216,6 +219,11 @@ impl SessionManager {
             };
             send_status(&out_io, "exited", Some(reason), exit_code);
             let _ = app_for_io.state::<SessionManager>().remove(id);
+            // 会话结束（正常退出 / 连接断开）即注销后台监控采集，
+            // 该主机最后一个会话关闭时采集任务停止
+            if let Some(monitor) = app_for_io.try_state::<crate::monitor::MonitorManager>() {
+                monitor.detach(&host_id_io, id);
+            }
         });
 
         // 守护消费者：按到达顺序串行处理按键 / 回显 / 审批结果，持有 GuardEngine。
@@ -350,6 +358,12 @@ impl SessionManager {
             }
         });
 
+        // 会话建立后立即开启后台监控采集（该主机已有任务时仅登记会话），
+        // 面板无需等打开才开始采集；多主机 / 多标签共用同一采集任务
+        if let Some(monitor) = app.try_state::<crate::monitor::MonitorManager>() {
+            monitor.attach(&app, &host, id);
+        }
+
         Ok(id)
     }
 
@@ -370,13 +384,28 @@ impl SessionManager {
         self.sessions.lock().unwrap().get(&id).map(|s| s.host.clone())
     }
 
-    pub async fn close(&self, _app: &AppHandle, id: u32) -> Result<(), String> {
+    /// 取该主机任一存活会话的 SSH 连接（后台监控采集复用终端会话自身连接，
+    /// 不再为每台主机单独占用一条连接池连接）。同一主机多标签时取任意一条即可。
+    pub fn handle_for_host(&self, host_id: &str) -> Option<Arc<Handle<ClientHandler>>> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .values()
+            .find(|s| s.host.id == host_id)
+            .map(|s| s.handle.clone())
+    }
+
+    pub async fn close(&self, app: &AppHandle, id: u32) -> Result<(), String> {
         let session = self
             .sessions
             .lock()
             .unwrap()
             .remove(&id)
             .ok_or("会话不存在")?;
+        // 主动关闭会话同样注销后台监控采集（与读循环结束时的注销互为兜底，重复注销安全）
+        if let Some(monitor) = app.try_state::<crate::monitor::MonitorManager>() {
+            monitor.detach(&session.host.id, id);
+        }
         let _ = session.write_half.close().await;
         send_status(&session.out, "closed", None, None);
         Ok(())
