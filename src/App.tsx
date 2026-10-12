@@ -125,7 +125,8 @@ type ApprovalQueueItem =
       request: HostKeyConfirmRequest;
     };
 
-const PANEL_STORAGE_KEY = 'buffterm-panel';
+/** 按主机保存的面板选择（host.id → 面板类型）：每台主机独立记忆，互不影响 */
+const PANELS_STORAGE_KEY = 'buffterm-panels';
 const PANEL_WIDTH_STORAGE_KEY = 'buffterm-panel-width';
 
 // 文件编辑器（CodeMirror）体积较大且只有打开文件才用得到，按需加载：
@@ -156,22 +157,31 @@ function isOnHorizontalScrollbar(target: HTMLElement, clientY: number): boolean 
   return clientY >= box.getBoundingClientRect().bottom - barHeight;
 }
 
-function readSavedPanel(): PanelKind {
+/** 面板类型校验：读取本地存储时过滤非法 / 损坏值 */
+function isPanelKind(v: unknown): v is PanelKind {
+  return (
+    v === 'chat' ||
+    v === 'sftp' ||
+    v === 'monitor' ||
+    v === 'inspection' ||
+    v === 'none'
+  );
+}
+
+/** 读取「按主机」保存的面板选择（host.id → 面板类型）；缺失 / 损坏时返回空表 */
+function readSavedPanels(): Record<string, PanelKind> {
   try {
-    const v = localStorage.getItem(PANEL_STORAGE_KEY);
-    if (
-      v === 'chat' ||
-      v === 'sftp' ||
-      v === 'monitor' ||
-      v === 'inspection' ||
-      v === 'none'
-    ) {
-      return v;
+    const raw = localStorage.getItem(PANELS_STORAGE_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    if (!parsed || typeof parsed !== 'object') return {};
+    const out: Record<string, PanelKind> = {};
+    for (const [hostId, panel] of Object.entries(parsed as Record<string, unknown>)) {
+      if (isPanelKind(panel) && panel !== 'none') out[hostId] = panel;
     }
+    return out;
   } catch {
-    /* ignore storage errors */
+    return {};
   }
-  return 'chat';
 }
 
 function App() {
@@ -183,10 +193,11 @@ function App() {
   const [showMcp, setShowMcp] = useState(false);
   const [showTerminalGuard, setShowTerminalGuard] = useState(false);
   const [approvalQueue, setApprovalQueue] = useState<ApprovalQueueItem[]>([]);
-  const [chatOpen, setChatOpen] = useState(true);
-  const [sftpOpen, setSftpOpen] = useState(false);
-  const [monitorOpen, setMonitorOpen] = useState(false);
-  const [inspectionOpen, setInspectionOpen] = useState(false);
+  const [panelByHost, setPanelByHost] =
+    useState<Record<string, PanelKind>>(readSavedPanels);
+  // 当前活动主机（活动标签所属主机）：applyPanel 据此定位写入哪台主机的选择；
+  // 当前主机的面板开关状态在下面按 activeTab 派生（chatOpen / sftpOpen / …）
+  const activeHostIdRef = useRef<string | null>(null);
   const [hostSearch, setHostSearch] = useState('');
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -281,22 +292,27 @@ function App() {
     setAiProviders(await listAiProviders());
   }, []);
 
-  // 打开指定面板并持久化选择；连接主机/重连时按上次选择恢复，不再强制切回 AI 面板
+  // 打开指定面板：按主机记忆选择并持久化；「全部收起」时移除该主机的记录
+  // （没有记录 = 不打开任何面板），各主机之间互不影响
   const applyPanel = useCallback((panel: PanelKind) => {
-    setChatOpen(panel === 'chat');
-    setSftpOpen(panel === 'sftp');
-    setMonitorOpen(panel === 'monitor');
-    setInspectionOpen(panel === 'inspection');
-    try {
-      localStorage.setItem(PANEL_STORAGE_KEY, panel);
-    } catch {
-      /* ignore storage errors */
-    }
+    const hostId = activeHostIdRef.current;
+    if (!hostId) return;
+    setPanelByHost((prev) => {
+      if ((prev[hostId] ?? 'none') === panel) return prev;
+      const next = { ...prev };
+      if (panel === 'none') {
+        delete next[hostId];
+      } else {
+        next[hostId] = panel;
+      }
+      try {
+        localStorage.setItem(PANELS_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        /* ignore storage errors */
+      }
+      return next;
+    });
   }, []);
-
-  const restorePanel = useCallback(() => {
-    applyPanel(readSavedPanel());
-  }, [applyPanel]);
 
   // 终端「问 AI」：把选中文本交给当前标签的 AI 面板，并确保 AI 面板已展开。
   // seq 递增用于区分相同内容的重复插入。
@@ -521,6 +537,17 @@ function App() {
 
   const activeTab = tabs.find((t) => t.key === activeKey) ?? null;
 
+  // 面板选择跟随主机：每台主机独立记住自己打开的功能面板，
+  // 没有记录的主机默认不打开任何面板，切换主机互不干扰
+  const activeHostId = activeTab?.host.id ?? null;
+  activeHostIdRef.current = activeHostId;
+  const activePanel: PanelKind =
+    (activeHostId !== null ? panelByHost[activeHostId] : undefined) ?? 'none';
+  const chatOpen = activePanel === 'chat';
+  const sftpOpen = activePanel === 'sftp';
+  const monitorOpen = activePanel === 'monitor';
+  const inspectionOpen = activePanel === 'inspection';
+
   // 最近一次激活的终端标签：切到文件标签时右侧面板继续挂在它上面，
   // 保持挂载（目录 / 传输 / AI 会话状态不重置），只是被隐藏
   const lastTerminalTabRef = useRef<TerminalTab | null>(null);
@@ -567,7 +594,6 @@ function App() {
     );
     if (existing) {
       setActiveKey(existing.key);
-      restorePanel();
       return;
     }
     const key = ++tabSeq.current;
@@ -584,7 +610,6 @@ function App() {
     ]);
     setActiveKey(key);
     setLoadingHostId(host.id);
-    restorePanel();
   };
 
   // 文件面板点击文件：在中间区打开；同一主机同一路径复用已有标签
@@ -1372,7 +1397,6 @@ function App() {
                           ),
                         );
                         setLoadingHostId(null);
-                        restorePanel();
                       }}
                       onFailed={(key, message) => {
                         setTabs((prev) =>
