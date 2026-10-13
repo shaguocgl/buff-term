@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { useT } from '../i18n';
 import {
   WindowCloseIcon,
   WindowMaximizeIcon,
@@ -73,12 +74,14 @@ interface WindowControlsProps {
 
 /** 无边框窗口自绘的最小化 / 最大化 / 关闭按钮组 */
 export default function WindowControls({ maximized }: WindowControlsProps) {
+  const t = useT();
+  const toggleLabel = maximized ? t('win.restore') : t('win.maximize');
   return (
     <div className="window-controls">
       <button
         className="window-control"
-        title="最小化"
-        aria-label="最小化"
+        title={t('win.minimize')}
+        aria-label={t('win.minimize')}
         onClick={() => {
           getCurrentWindow()
             .minimize()
@@ -89,16 +92,16 @@ export default function WindowControls({ maximized }: WindowControlsProps) {
       </button>
       <button
         className="window-control"
-        title={maximized ? '向下还原' : '最大化'}
-        aria-label={maximized ? '向下还原' : '最大化'}
+        title={toggleLabel}
+        aria-label={toggleLabel}
         onClick={toggleWindowMaximize}
       >
         {maximized ? <WindowRestoreIcon /> : <WindowMaximizeIcon />}
       </button>
       <button
         className="window-control close"
-        title="关闭"
-        aria-label="关闭"
+        title={t('win.close')}
+        aria-label={t('win.close')}
         onClick={() => {
           getCurrentWindow()
             .close()

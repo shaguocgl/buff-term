@@ -1,4 +1,5 @@
 import { useEffect, type ReactNode } from 'react';
+import { useT } from '../i18n';
 import { XIcon } from './Icons';
 
 interface Props {
@@ -10,6 +11,7 @@ interface Props {
 }
 
 export default function Modal({ title, subtitle, className, onClose, children }: Props) {
+  const t = useT();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -31,7 +33,7 @@ export default function Modal({ title, subtitle, className, onClose, children }:
             <h2>{title}</h2>
             {subtitle && <p>{subtitle}</p>}
           </div>
-          <button className="icon-btn" onClick={onClose} aria-label="关闭">
+          <button className="icon-btn" onClick={onClose} aria-label={t('common.close')}>
             <XIcon />
           </button>
         </div>

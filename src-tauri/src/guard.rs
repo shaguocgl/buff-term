@@ -893,7 +893,7 @@ pub struct TerminalGuardApproval {
 #[tauri::command]
 pub fn get_terminal_guard_settings(db: State<'_, Arc<Db>>) -> Result<TerminalGuardSettings, String> {
     db.get_terminal_guard_settings()
-        .map_err(|e| format!("读取终端防护配置失败: {e}"))
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取终端防护配置失败", "Failed to read terminal guard settings")))
 }
 
 #[tauri::command]
@@ -902,7 +902,7 @@ pub fn save_terminal_guard_settings(
     settings: TerminalGuardSettings,
 ) -> Result<TerminalGuardSettings, String> {
     db.save_terminal_guard_settings(&settings)
-        .map_err(|e| format!("保存终端防护配置失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存终端防护配置失败", "Failed to save terminal guard settings")))?;
     bump_rules_version();
     Ok(settings)
 }
@@ -910,14 +910,14 @@ pub fn save_terminal_guard_settings(
 #[tauri::command]
 pub fn list_terminal_rules(db: State<'_, Arc<Db>>) -> Result<Vec<TerminalRule>, String> {
     db.list_terminal_rules()
-        .map_err(|e| format!("读取终端防护规则失败: {e}"))
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取终端防护规则失败", "Failed to read terminal guard rules")))
 }
 
 #[tauri::command]
 pub fn add_terminal_rule(db: State<'_, Arc<Db>>, pattern: String) -> Result<TerminalRule, String> {
     let pattern = pattern.trim().to_string();
     if pattern.is_empty() {
-        return Err("危险命令不能为空".to_string());
+        return Err(crate::i18n::t("危险命令不能为空", "The dangerous command must not be empty").to_string());
     }
     let rule = TerminalRule {
         id: uuid::Uuid::new_v4().to_string(),
@@ -927,7 +927,7 @@ pub fn add_terminal_rule(db: State<'_, Arc<Db>>, pattern: String) -> Result<Term
         created_at: now(),
     };
     db.insert_terminal_rule(&rule)
-        .map_err(|e| format!("保存规则失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存规则失败", "Failed to save the rule")))?;
     bump_rules_version();
     Ok(rule)
 }
@@ -935,7 +935,7 @@ pub fn add_terminal_rule(db: State<'_, Arc<Db>>, pattern: String) -> Result<Term
 #[tauri::command]
 pub fn delete_terminal_rule(db: State<'_, Arc<Db>>, id: String) -> Result<(), String> {
     db.delete_terminal_rule(&id)
-        .map_err(|e| format!("删除规则失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("删除规则失败", "Failed to delete the rule")))?;
     bump_rules_version();
     Ok(())
 }
@@ -944,7 +944,7 @@ pub fn delete_terminal_rule(db: State<'_, Arc<Db>>, id: String) -> Result<(), St
 pub fn reset_terminal_rules(db: State<'_, Arc<Db>>) -> Result<Vec<TerminalRule>, String> {
     let rules = db
         .reset_terminal_rules()
-        .map_err(|e| format!("恢复预置规则失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("恢复预置规则失败", "Failed to restore built-in rules")))?;
     bump_rules_version();
     Ok(rules)
 }

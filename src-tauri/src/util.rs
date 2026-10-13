@@ -34,7 +34,11 @@ pub fn truncate_output(s: &str, max: usize) -> String {
         let head: String = chars[..head_len].iter().collect();
         let tail: String = chars[chars.len() - tail_len..].iter().collect();
         let omitted = chars.len().saturating_sub(max);
-        format!("{head}\n...[输出过长，已省略 {omitted} 字符]...\n{tail}")
+        format!(
+            "{head}\n...[{}{omitted}{}]...\n{tail}",
+            crate::i18n::t("输出过长，已省略 ", "output too long, omitted "),
+            crate::i18n::t(" 字符", " characters")
+        )
     }
 }
 
@@ -49,7 +53,12 @@ pub fn extract_error(text: &str, status: reqwest::StatusCode) -> String {
         .ok()
         .and_then(|v| v["error"]["message"].as_str().map(String::from))
         .unwrap_or_else(|| text.chars().take(200).collect());
-    format!("AI 平台返回 HTTP {}: {}", status.as_u16(), detail)
+    format!(
+        "{} HTTP {}: {}",
+        crate::i18n::t("AI 平台返回", "The AI platform returned"),
+        status.as_u16(),
+        detail
+    )
 }
 
 /// 统一格式化命令输出：stderr 为空时用按到达顺序合并的 text（现有行为）；
@@ -67,14 +76,17 @@ pub fn format_exec_output(out: &ExecResult) -> String {
     if text.chars().count() > MAX {
         let head: String = text.chars().take(8000).collect();
         let tail: String = text.chars().skip(text.chars().count() - 4000).collect();
-        text = format!("{head}\n...[输出过长，已截断]...\n{tail}");
+        text = format!(
+            "{head}\n...[{}]...\n{tail}",
+            crate::i18n::t("输出过长，已截断", "output too long, truncated")
+        );
     }
     if out.timed_out {
-        text.push_str("\n[命令执行超时，输出可能不完整]");
+        text.push_str(crate::i18n::t("\n[命令执行超时，输出可能不完整]", "\n[command timed out; output may be incomplete]"));
     }
     if let Some(code) = out.exit_code {
         if code != 0 {
-            text.push_str(&format!("\n[退出码 {code}]"));
+            text.push_str(&format!("\n[{}{code}]", crate::i18n::t("退出码 ", "exit code ")));
         }
     }
     text

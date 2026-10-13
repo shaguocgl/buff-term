@@ -4,6 +4,7 @@ mod trend;
 
 use crate::credentials;
 use crate::db::Db;
+use crate::i18n::{is_en, t};
 use crate::models::{AuditLog, Host, PermissionMode, TaskPlan};
 use crate::russh::RusshManager;
 use crate::safety::{is_dangerous, is_write_operation, normalize_tool, sanitize};
@@ -325,14 +326,18 @@ pub async fn agent_chat(
 ) -> Result<(), String> {
     let host = sessions
         .host(session_id)
-        .ok_or_else(|| "会话不存在或已断开".to_string())?;
+        .ok_or_else(|| t("会话不存在或已断开", "Session does not exist or is disconnected").to_string())?;
     // 同主机只允许一个 agent 循环：历史按主机共享，两个会话各自读副本→整段写回会互相覆盖。
     // guard 在函数返回（含任何 ? 提前返回）时自动释放登记。
     let _active_guard = agents
         .acquire_active(&host.id, session_id)
         .await
         .ok_or_else(|| {
-            "该主机已有正在进行的 AI 对话（可能在另一个标签页），请等其完成或停止后再发送".to_string()
+            t(
+                "该主机已有正在进行的 AI 对话（可能在另一个标签页），请等其完成或停止后再发送",
+                "This host already has an AI conversation in progress (possibly in another tab); wait for it to finish or stop it before sending",
+            )
+            .to_string()
         })?;
     let (provider, model_info) = crate::ai::resolve_active_ai_model(&db)?;
     let model = model_info.model.clone();
@@ -342,29 +347,52 @@ pub async fn agent_chat(
     let images = images.unwrap_or_default();
     if !images.is_empty() {
         if !model_info.supports_vision {
-            return Err(
-                "当前模型未开启「支持图片」，请在 AI 配置中勾选该模型的图片能力后再试".to_string(),
-            );
+            return Err(t(
+                "当前模型未开启「支持图片」，请在 AI 配置中勾选该模型的图片能力后再试",
+                "Image support is not enabled for the current model; enable it for this model in AI settings and try again",
+            )
+            .to_string());
         }
         if images.len() > MAX_IMAGES_PER_MESSAGE {
-            return Err(format!("一次最多附带 {MAX_IMAGES_PER_MESSAGE} 张图片"));
+            return Err(if is_en() {
+                format!("At most {MAX_IMAGES_PER_MESSAGE} images per message")
+            } else {
+                format!("一次最多附带 {MAX_IMAGES_PER_MESSAGE} 张图片")
+            });
         }
         if images.iter().any(|i| !i.starts_with("data:image/")) {
-            return Err("图片格式无效：仅支持 data:image/* 形式".to_string());
+            return Err(t(
+                "图片格式无效：仅支持 data:image/* 形式",
+                "Invalid image format: only data:image/* is supported",
+            )
+            .to_string());
         }
         if images.iter().any(|i| i.len() > MAX_IMAGE_DATA_URL_CHARS) {
-            return Err("单张图片过大（超过约 5MB），请压缩后再发送".to_string());
+            return Err(t(
+                "单张图片过大（超过约 5MB），请压缩后再发送",
+                "An image is too large (over ~5MB); compress it before sending",
+            )
+            .to_string());
         }
     }
     eprintln!(
-        "[agent] 使用模型: {}（{}，窗口 {} tokens）",
-        model, provider.name, context_window
+        "[agent] {}: {}（{}，{} {} tokens）",
+        t("使用模型", "using model"),
+        model,
+        provider.name,
+        t("窗口", "window"),
+        context_window
     );
     let api_key = credentials::get_api_key(&provider.id)
-        .ok_or_else(|| "API Key 未找到，请在 AI 配置中检查".to_string())?;
+        .ok_or_else(|| t("API Key 未找到，请在 AI 配置中检查", "API Key not found; check your AI settings").to_string())?;
     let danger_rules: Vec<String> = db
         .list_ai_rules()
-        .map_err(|e| format!("读取智能审核规则失败: {e}"))?
+        .map_err(|e| {
+            format!(
+                "{}: {e}",
+                t("读取智能审核规则失败", "Failed to read smart approval rules")
+            )
+        })?
         .into_iter()
         .map(|r| r.pattern)
         .collect();
@@ -385,7 +413,12 @@ pub async fn agent_chat(
         .connect_timeout(Duration::from_secs(15))
         .read_timeout(Duration::from_secs(120))
         .build()
-        .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "{}: {e}",
+                t("HTTP 客户端初始化失败", "Failed to initialize the HTTP client")
+            )
+        })?;
     let url = format!(
         "{}/chat/completions",
         provider.base_url.trim_end_matches('/')
@@ -459,12 +492,12 @@ pub fn agent_approve(
 ) -> Result<(), String> {
     let tx = agents
         .control_sender(session_id)
-        .ok_or_else(|| "当前没有等待审批的工具调用".to_string())?;
+        .ok_or_else(|| t("当前没有等待审批的工具调用", "No tool call is waiting for approval").to_string())?;
     tx.try_send(Control::Approve {
         tool_call_id,
         allow,
     })
-    .map_err(|_| "会话已结束".to_string())
+    .map_err(|_| t("会话已结束", "The session has ended").to_string())
 }
 
 /// 工具轮次达到上限后，用户确认是否继续执行下一批。
@@ -476,9 +509,15 @@ pub fn agent_continue(
 ) -> Result<(), String> {
     let tx = agents
         .control_sender(session_id)
-        .ok_or_else(|| "当前没有等待继续确认的会话".to_string())?;
+        .ok_or_else(|| {
+            t(
+                "当前没有等待继续确认的会话",
+                "No session is waiting for a continue confirmation",
+            )
+            .to_string()
+        })?;
     tx.try_send(Control::Continue { allow })
-        .map_err(|_| "会话已结束".to_string())
+        .map_err(|_| t("会话已结束", "The session has ended").to_string())
 }
 
 #[tauri::command]
@@ -750,10 +789,17 @@ async fn run_agent_loop(
             let mut usage = view.usage;
             if reactive_retried {
                 usage.strategy = CompressionStrategy::ReactiveReduce;
-                usage.warning = Some(format!(
-                    "平台报告上下文超限，已按配置窗口的 50%（{} tokens）重试；若仍失败请调大该模型的 context_window",
-                    effective_window
-                ));
+                usage.warning = Some(if is_en() {
+                    format!(
+                        "The platform reported a context overflow; retried with 50% of the configured window ({} tokens). If it still fails, increase this model's context_window",
+                        effective_window
+                    )
+                } else {
+                    format!(
+                        "平台报告上下文超限，已按配置窗口的 50%（{} tokens）重试；若仍失败请调大该模型的 context_window",
+                        effective_window
+                    )
+                });
             }
             // 平台不返回 usage 时，用该模型的历史校准系数修正本地估算。
             last_raw_estimate = usage.used_tokens;
@@ -795,11 +841,24 @@ async fn run_agent_loop(
             let resp = resp.map_err(|e| {
                     let detail = e.to_string();
                     let msg = if e.is_timeout() {
-                        format!("等待 AI 平台响应超时（120 秒内无数据），模型可能响应过慢或网络不畅: {detail}")
+                        if is_en() {
+                            format!("Timed out waiting for the AI platform (no data within 120s); the model may be slow or the network unstable: {detail}")
+                        } else {
+                            format!("等待 AI 平台响应超时（120 秒内无数据），模型可能响应过慢或网络不畅: {detail}")
+                        }
                     } else if e.is_connect() {
-                        format!("无法连接 AI 平台，请检查网络或 Base URL: {detail}")
+                        format!(
+                            "{}: {detail}",
+                            t(
+                                "无法连接 AI 平台，请检查网络或 Base URL",
+                                "Cannot reach the AI platform; check your network or Base URL"
+                            )
+                        )
                     } else {
-                        format!("请求 AI 平台失败: {detail}")
+                        format!(
+                            "{}: {detail}",
+                            t("请求 AI 平台失败", "Request to the AI platform failed")
+                        )
                     };
                     let _ = app.emit(
                         "ai:error",
@@ -856,7 +915,12 @@ async fn run_agent_loop(
             tokio::select! {
                 chunk = stream.next() => {
                     let Some(chunk) = chunk else { break };
-                    let chunk = chunk.map_err(|e| format!("读取响应流失败: {e}"))?;
+                    let chunk = chunk.map_err(|e| {
+                        format!(
+                            "{}: {e}",
+                            t("读取响应流失败", "Failed to read the response stream")
+                        )
+                    })?;
                     buf.extend_from_slice(&chunk);
                     while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                         let line = String::from_utf8_lossy(&buf[..pos]).trim().to_string();
@@ -960,7 +1024,7 @@ async fn run_agent_loop(
 
         if tool_calls.is_empty() {
             if content.is_empty() {
-                content = "（模型未返回内容）".to_string();
+                content = t("（模型未返回内容）", "(the model returned no content)").to_string();
             }
             history.push(serde_json::json!({"role": "assistant", "content": content}));
             let _ = app.emit("ai:done", AiDone { session_id });
@@ -987,7 +1051,11 @@ async fn run_agent_loop(
         // 因此本循环内的所有提前返回都要先 backfill 剩余调用。
         for (i, acc) in calls.iter().enumerate() {
             if let Ok(Control::Cancel) = rx.try_recv() {
-                backfill_unanswered(history, &calls[i..], "用户已中断，该工具未执行");
+                backfill_unanswered(
+                    history,
+                    &calls[i..],
+                    t("用户已中断，该工具未执行", "Interrupted by the user; this tool was not executed"),
+                );
                 return Ok(());
             }
             let started = Instant::now();
@@ -1003,20 +1071,21 @@ async fn run_agent_loop(
                 let plan = parse_task_plan_patch(&args, existing);
                 agents.set_plan(&host.id, plan.clone());
                 let _ = app.emit("ai:plan", AiPlan { session_id, plan });
+                let plan_note = t("计划已更新", "Task plan updated");
                 emit_tool_state(
                     app,
                     session_id,
                     acc,
                     &args,
                     "result",
-                    Some("计划已更新".to_string()),
+                    Some(plan_note.to_string()),
                     None,
                     None,
                 );
                 history.push(serde_json::json!({
                     "role": "tool",
                     "tool_call_id": acc.id,
-                    "content": "计划已更新",
+                    "content": plan_note,
                 }));
                 continue;
             }
@@ -1025,7 +1094,13 @@ async fn run_agent_loop(
             let mut reason: Option<String> = None;
             let need_approval = match permission_mode {
                 PermissionMode::All => {
-                    reason = Some("全部审核：所有命令执行前都需要批准".to_string());
+                    reason = Some(
+                        t(
+                            "全部审核：所有命令执行前都需要批准",
+                            "Approve all: every command needs approval before running",
+                        )
+                        .to_string(),
+                    );
                     true
                 }
                 PermissionMode::None => false,
@@ -1040,21 +1115,42 @@ async fn run_agent_loop(
                         let command = args.get("command").and_then(|c| c.as_str()).unwrap_or("");
                         let c = command.to_ascii_lowercase();
                         if marked {
-                            reason = Some("模型标记该命令需要审批".to_string());
+                            reason = Some(
+                                t(
+                                    "模型标记该命令需要审批",
+                                    "The model flagged this command as needing approval",
+                                )
+                                .to_string(),
+                            );
                             true
                         } else if is_dangerous(command) {
-                            reason = Some("命中内置危险命令规则".to_string());
+                            reason = Some(
+                                t(
+                                    "命中内置危险命令规则",
+                                    "Matched a built-in dangerous command rule",
+                                )
+                                .to_string(),
+                            );
                             true
                         } else if let Some(p) = danger_rules
                             .iter()
                             .find(|p| !p.trim().is_empty() && c.contains(&p.to_ascii_lowercase()))
                         {
-                            reason = Some(format!("命中自定义规则：{p}"));
+                            reason = Some(format!(
+                                "{}{p}",
+                                t("命中自定义规则：", "Matched custom rule: ")
+                            ));
                             true
                         } else if is_write_operation(command) {
                             // 写操作（修改/删除/安装/网络写入等）同样需要批准，
                             // 与 MCP 只读模式的判定口径一致，避免静默放行文件修改
-                            reason = Some("命令包含写操作，需要批准".to_string());
+                            reason = Some(
+                                t(
+                                    "命令包含写操作，需要批准",
+                                    "The command contains a write operation and needs approval",
+                                )
+                                .to_string(),
+                            );
                             true
                         } else {
                             false
@@ -1098,15 +1194,18 @@ async fn run_agent_loop(
                                 &args,
                                 "denied",
                                 None,
-                                Some("会话已结束".to_string()),
+                                Some(t("会话已结束", "The session has ended").to_string()),
                                 None,
                             );
                             backfill_unanswered(
                                 history,
                                 &calls[i..],
-                                "会话已结束，该工具未执行",
+                                t(
+                                    "会话已结束，该工具未执行",
+                                    "The session ended; this tool was not executed",
+                                ),
                             );
-                            let msg = "会话已结束".to_string();
+                            let msg = t("会话已结束", "The session has ended").to_string();
                             let _ = app.emit(
                                 "ai:error",
                                 AiError {
@@ -1125,13 +1224,16 @@ async fn run_agent_loop(
                                 &args,
                                 "denied",
                                 None,
-                                Some("用户已中断".to_string()),
+                                Some(t("用户已中断", "Interrupted by the user").to_string()),
                                 None,
                             );
                             backfill_unanswered(
                                 history,
                                 &calls[i..],
-                                "用户已中断，该工具未执行",
+                                t(
+                                    "用户已中断，该工具未执行",
+                                    "Interrupted by the user; this tool was not executed",
+                                ),
                             );
                             return Ok(());
                         }
@@ -1149,7 +1251,13 @@ async fn run_agent_loop(
 
                 if !decision {
                     let note = if timed_out {
-                        Some("等待审批超时，已按拒绝处理".to_string())
+                        Some(
+                            t(
+                                "等待审批超时，已按拒绝处理",
+                                "Approval timed out; treated as denied",
+                            )
+                            .to_string(),
+                        )
                     } else {
                         reason.clone()
                     };
@@ -1171,7 +1279,11 @@ async fn run_agent_loop(
                     history.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": acc.id,
-                        "content": if timed_out { "等待审批超时，已按拒绝处理" } else { "用户拒绝执行该操作" },
+                        "content": if timed_out {
+                            t("等待审批超时，已按拒绝处理", "Approval timed out; treated as denied")
+                        } else {
+                            t("用户拒绝执行该操作", "The user denied this operation")
+                        },
                     }));
                     continue;
                 }
@@ -1199,11 +1311,15 @@ async fn run_agent_loop(
                                 acc,
                                 &args,
                                 "error",
-                                Some("已中断".into()),
+                                Some(t("已中断", "Interrupted").into()),
                                 None,
                                 None,
                             );
-                            backfill_unanswered(history, &calls[i..], "用户已中断执行");
+                            backfill_unanswered(
+                                history,
+                                &calls[i..],
+                                t("用户已中断执行", "Interrupted by the user"),
+                            );
                             return Ok(());
                         }
                         Some(Control::Approve { .. }) | Some(Control::Continue { .. }) => {}
@@ -1270,7 +1386,10 @@ async fn run_agent_loop(
                     history.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": acc.id,
-                        "content": truncate_output(&format!("执行失败: {err}"), 8000),
+                        "content": truncate_output(
+                            &format!("{}: {err}", t("执行失败", "Execution failed")),
+                            8000,
+                        ),
                     }));
                 }
             }
@@ -1319,8 +1438,12 @@ fn insert_audit(db: &Db, entry: AuditEntry) -> Result<(), String> {
         result,
         duration_ms: Some(entry.duration_ms),
     };
-    db.insert_audit_log(&log)
-        .map_err(|e| format!("写入操作审计失败: {e}"))
+    db.insert_audit_log(&log).map_err(|e| {
+        format!(
+            "{}: {e}",
+            t("写入操作审计失败", "Failed to write the audit log")
+        )
+    })
 }
 
 /// 解析 `update_task_plan` 的参数。采用“patch”语义：请求里出现的字段覆盖旧值，

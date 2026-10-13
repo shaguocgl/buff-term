@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { useT } from '../i18n';
 import Modal from './Modal';
 
 interface Props {
@@ -19,14 +20,17 @@ interface Props {
 export default function ConfirmModal({
   title,
   body,
-  confirmText = '确认',
-  cancelText = '取消',
+  confirmText,
+  cancelText,
   altText,
   danger = false,
   onConfirm,
   onAlt,
   onCancel,
 }: Props) {
+  const t = useT();
+  const confirmLabel = confirmText ?? t('common.confirm');
+  const cancelLabel = cancelText ?? t('common.cancel');
   // 在捕获阶段拦截 Escape：只关闭本确认框，避免连带关闭底下的父级 Modal
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -48,7 +52,7 @@ export default function ConfirmModal({
             className={`btn ${danger ? 'danger' : 'primary'} small`}
             onClick={onConfirm}
           >
-            {confirmText}
+            {confirmLabel}
           </button>
           {altText && onAlt && (
             <button className="btn ghost small" onClick={onAlt}>
@@ -56,7 +60,7 @@ export default function ConfirmModal({
             </button>
           )}
           <button className="btn ghost small" onClick={onCancel}>
-            {cancelText}
+            {cancelLabel}
           </button>
         </div>
       </div>

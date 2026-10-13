@@ -12,6 +12,7 @@ import {
   saveAiProvider,
   testAiProvider,
 } from '../api';
+import { useT, type DictKey } from '../i18n';
 import type {
   AiModelInput,
   AiProvider,
@@ -34,9 +35,15 @@ interface Props {
 }
 
 interface Preset {
+  /** 预设标识（内部值，用于选中与匹配 base_url，不随界面语言变化） */
   name: string;
   base_url: string;
+  /** 界面展示名（缺省时用 name，如 DeepSeek / OpenAI 等品牌名） */
+  labelKey?: DictKey;
 }
+
+/** 「自定义」预设的内部标识 */
+const CUSTOM_PRESET = '__custom__';
 
 const PRESETS: Preset[] = [
   { name: 'DeepSeek', base_url: 'https://api.deepseek.com' },
@@ -44,10 +51,19 @@ const PRESETS: Preset[] = [
   {
     name: '通义千问',
     base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    labelKey: 'ai.presetQwen',
   },
   { name: 'Kimi', base_url: 'https://api.moonshot.cn/v1' },
-  { name: 'Ollama（本地）', base_url: 'http://localhost:11434/v1' },
+  {
+    name: 'Ollama（本地）',
+    base_url: 'http://localhost:11434/v1',
+    labelKey: 'ai.presetOllama',
+  },
 ];
+
+/** 预设的界面展示名 */
+const presetLabel = (p: Preset, t: (key: DictKey) => string) =>
+  p.labelKey ? t(p.labelKey) : p.name;
 
 interface FormModel {
   id?: string;
@@ -78,7 +94,7 @@ function presetOf(baseUrl: string): string {
   const hit = PRESETS.find(
     (p) => norm(p.base_url) === target || `${norm(p.base_url)}/v1` === target,
   );
-  return hit?.name ?? '自定义';
+  return hit?.name ?? CUSTOM_PRESET;
 }
 
 interface FormState {
@@ -90,10 +106,10 @@ interface FormState {
   apiKey: string;
 }
 
-function formFromPreset(preset: Preset): FormState {
+function formFromPreset(preset: Preset, t: (key: DictKey) => string): FormState {
   return {
     preset: preset.name,
-    name: preset.name,
+    name: presetLabel(preset, t),
     base_url: preset.base_url,
     protocol: 'openai-compatible',
     models: [],
@@ -102,6 +118,7 @@ function formFromPreset(preset: Preset): FormState {
 }
 
 export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
+  const t = useT();
   const [providers, setProviders] = useState<AiProvider[]>([]);
   const [rules, setRules] = useState<AiRule[]>([]);
   const [ruleInput, setRuleInput] = useState('');
@@ -110,7 +127,9 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<AiProvider | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AiProvider | null>(null);
-  const [form, setForm] = useState<FormState>(() => formFromPreset(PRESETS[0]));
+  const [form, setForm] = useState<FormState>(() =>
+    formFromPreset(PRESETS[0], t),
+  );
   const [enabled, setEnabled] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -162,14 +181,14 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
   const saveMaxToolRounds = async () => {
     const value = Number(maxToolRounds) || 0;
     if (value <= 0) {
-      setError('工具轮次上限必须大于 0');
+      setError(t('ai.roundsInvalid'));
       return;
     }
     setRoundsSaving(true);
     try {
       await saveAiMaxToolRounds(value);
       setError(null);
-      showToast('success', `工具轮次上限已保存（${value} 轮）`);
+      showToast('success', t('ai.roundsSaved', { n: value }));
     } catch (err) {
       setError(fmtError(err));
     } finally {
@@ -179,7 +198,7 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
 
   const openCreate = () => {
     setEditing(null);
-    setForm(formFromPreset(PRESETS[0]));
+    setForm(formFromPreset(PRESETS[0], t));
     setEnabled(true);
     setTestResult(null);
     setError(null);
@@ -216,10 +235,10 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
   };
 
   const applyPreset = (name: string) => {
-    if (name === '自定义') {
+    if (name === CUSTOM_PRESET) {
       // 清空下方所有字段，方便从零配置
       setForm({
-        preset: '自定义',
+        preset: CUSTOM_PRESET,
         name: '',
         base_url: '',
         protocol: 'openai-compatible',
@@ -231,7 +250,7 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
     const preset = PRESETS.find((p) => p.name === name);
     if (!preset) return;
     setForm((prev) => ({
-      ...formFromPreset(preset),
+      ...formFromPreset(preset, t),
       apiKey: prev.apiKey,
     }));
   };
@@ -295,16 +314,16 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
         supports_vision: m.supports_vision,
       }));
     if (!form.name.trim() || !form.base_url.trim()) {
-      setError('名称、Base URL 不能为空');
+      setError(t('ai.nameUrlRequired'));
       return;
     }
     if (models.length === 0) {
-      setError('至少需要配置一个模型');
+      setError(t('ai.needModel'));
       return;
     }
     const invalid = models.findIndex((m) => m.context_window <= 0);
     if (invalid >= 0) {
-      setError(`第 ${invalid + 1} 个模型未填写有效的上下文窗口（token）`);
+      setError(t('ai.invalidWindow', { n: invalid + 1 }));
       return;
     }
     setSaving(true);
@@ -324,7 +343,7 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
       setShowForm(false);
       await load();
       onSaved();
-      showToast('success', `AI 配置「${form.name.trim()}」已保存`);
+      showToast('success', t('ai.saved', { name: form.name.trim() }));
     } catch (err) {
       setError(fmtError(err));
     } finally {
@@ -334,14 +353,14 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
 
   const handleTest = async () => {
     if (!form.base_url.trim()) {
-      setError('请先填写 Base URL');
+      setError(t('ai.baseUrlRequired'));
       return;
     }
     const model = activeModel();
     // 表单未填模型时，回退用最近拉取到的第一个模型，省一步
     const modelId = model?.model.trim() || remoteModels[0]?.id;
     if (!modelId) {
-      setError('请先添加模型，或点击"拉取可用模型"获取列表');
+      setError(t('ai.needModelOrFetch'));
       return;
     }
     setTesting(true);
@@ -363,7 +382,7 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
 
   const handleFetchModels = async () => {
     if (!form.base_url.trim()) {
-      setError('请先填写 Base URL');
+      setError(t('ai.baseUrlRequired'));
       return;
     }
     setError(null);
@@ -465,8 +484,8 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
 
   return (
     <Modal
-      title="AI 配置"
-      subtitle="配置大模型平台与多个模型，供 AI Agent 管理服务器使用"
+      title={t('ai.title')}
+      subtitle={t('ai.subtitle')}
       className="modal-wide"
       onClose={onClose}
     >
@@ -475,15 +494,15 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
           <>
             <div className="ai-modal-actions">
               <button className="btn primary block" onClick={openCreate}>
-                <PlusIcon size={16} /> 新建配置
+                <PlusIcon size={16} /> {t('ai.newConfig')}
               </button>
             </div>
 
             {providers.length === 0 ? (
               <div className="ai-empty">
                 <SparklesIcon size={30} />
-                <p>还没有配置模型平台</p>
-                <span>选择 DeepSeek / OpenAI / 通义 / Kimi / 本地 Ollama</span>
+                <p>{t('ai.emptyTitle')}</p>
+                <span>{t('ai.emptyHint')}</span>
               </div>
             ) : (
               <div className="provider-list">
@@ -494,21 +513,21 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                         <span className="provider-name">{p.name}</span>
                         {p.enabled ? (
                           <span className="badge badge-on">
-                            <CheckIcon size={11} /> 已启用
+                            <CheckIcon size={11} /> {t('ai.enabled')}
                           </span>
                         ) : (
-                          <span className="badge badge-off">未启用</span>
+                          <span className="badge badge-off">{t('ai.disabled')}</span>
                         )}
                       </div>
                       <span className="provider-detail">
-                        {p.models.length} 个模型 · {p.base_url}
+                        {t('ai.modelCount', { n: p.models.length, url: p.base_url })}
                       </span>
                       <div className="provider-model-chips">
                         {p.models.map((m) => (
                           <span
                             key={m.id}
                             className={`provider-model-chip${m.is_active ? ' active' : ''}`}
-                            title={m.is_active ? '默认模型' : m.model}
+                            title={m.is_active ? t('ai.defaultModel') : m.model}
                           >
                             {m.label}
                           </span>
@@ -518,15 +537,15 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                     <div className="provider-actions">
                       {!p.enabled && (
                         <button className="btn ghost small" onClick={() => handleEnable(p)}>
-                          启用
+                          {t('ai.enable')}
                         </button>
                       )}
                       <button className="btn ghost small" onClick={() => openEdit(p)}>
-                        编辑
+                        {t('ai.edit')}
                       </button>
                       <button
                         className="icon-btn danger"
-                        title="删除配置"
+                        title={t('ai.deleteConfig')}
                         onClick={() => handleDelete(p)}
                       >
                         <TrashIcon size={15} />
@@ -539,27 +558,32 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
 
             <div className="rules-section">
               <div className="rules-header">
-                <span className="rules-title">智能审核规则</span>
-                <span className="rules-hint">
-                  智能审核模式下，命令命中这些模式即需要你批准（不区分大小写）
-                </span>
+                <span className="rules-title">{t('ai.rulesTitle')}</span>
+                <span className="rules-hint">{t('ai.rulesHint')}</span>
               </div>
               <div className="rules-note">
-                匹配方式：<strong>子串匹配</strong>，命令文本包含该片段即命中，不区分大小写，
-                无需通配符。例如配置 <code>rm -rf</code>，可命中{' '}
-                <code>rm -rf /data</code>、<code>rm -rf /var/log/*</code> 等所有包含
-                “rm -rf”的命令。请直接填写最小片段，不要使用 <code>*</code> 或正则。
+                {t('ai.rulesNoteA')}
+                <strong>{t('ai.rulesNoteB')}</strong>
+                {t('ai.rulesNoteC')}
+                <code>rm -rf</code>
+                {t('ai.rulesNoteD')}
+                <code>rm -rf /data</code>
+                {t('ai.rulesNoteE')}
+                <code>rm -rf /var/log/*</code>
+                {t('ai.rulesNoteF')}
+                <code>*</code>
+                {t('ai.rulesNoteG')}
               </div>
               <div className="rules-list">
                 {rules.length === 0 && (
-                  <span className="rules-empty">暂无自定义规则</span>
+                  <span className="rules-empty">{t('ai.rulesEmpty')}</span>
                 )}
                 {rules.map((r) => (
                   <div className="rule-chip" key={r.id}>
                     <code>{r.pattern}</code>
                     <button
                       className="rule-del"
-                      title="删除规则"
+                      title={t('ai.deleteRule')}
                       onClick={() => handleDeleteRule(r.id)}
                     >
                       ×
@@ -577,26 +601,20 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                       handleAddRule();
                     }
                   }}
-                  placeholder="如：git push --force（无需通配符）"
+                  placeholder={t('ai.rulePlaceholder')}
                 />
                 <button className="btn secondary small" onClick={handleAddRule}>
-                  添加
+                  {t('common.add')}
                 </button>
               </div>
             </div>
 
             <div className="rules-section">
               <div className="rules-header">
-                <span className="rules-title">工具轮次上限</span>
-                <span className="rules-hint">
-                  单条消息内模型最多往返多少轮
-                </span>
+                <span className="rules-title">{t('ai.roundsTitle')}</span>
+                <span className="rules-hint">{t('ai.roundsHint')}</span>
               </div>
-              <div className="rules-note">
-                每次「请求模型 → 执行工具 → 回灌结果」算一轮，一轮内可包含多个工具调用。
-                达到上限时会暂停并询问是否继续下一批，不会直接中断任务；数值越大，单次任务的
-                自动化程度越高，token 消耗也越多。
-              </div>
+              <div className="rules-note">{t('ai.roundsNote')}</div>
               <div className="rule-add">
                 <input
                   type="number"
@@ -609,7 +627,7 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                   onClick={saveMaxToolRounds}
                   disabled={roundsSaving}
                 >
-                  {roundsSaving ? '保存中…' : '保存'}
+                  {roundsSaving ? t('common.saving') : t('common.save')}
                 </button>
               </div>
             </div>
@@ -617,23 +635,26 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
         ) : (
           <form className="ai-form" onSubmit={handleSave}>
             <div className="ai-field">
-              <span className="ai-field-label">平台预设</span>
+              <span className="ai-field-label">{t('ai.preset')}</span>
               <Select
                 value={form.preset}
                 options={[
-                  ...PRESETS.map((p) => ({ value: p.name, label: p.name })),
-                  { value: '自定义', label: '自定义' },
+                  ...PRESETS.map((p) => ({
+                    value: p.name,
+                    label: presetLabel(p, t),
+                  })),
+                  { value: CUSTOM_PRESET, label: t('ai.presetCustom') },
                 ]}
                 onChange={applyPreset}
-                ariaLabel="平台预设"
+                ariaLabel={t('ai.preset')}
               />
             </div>
             <label>
-              名称
+              {t('ai.name')}
               <input
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="我的 DeepSeek"
+                placeholder={t('ai.namePlaceholder')}
               />
             </label>
             <label>
@@ -652,32 +673,32 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                 onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
                 placeholder={
                   editing
-                    ? '已保存，留空保持不变（存系统钥匙串）'
-                    : '保存到系统钥匙串'
+                    ? t('ai.apiKeyPlaceholderEdit')
+                    : t('ai.apiKeyPlaceholderNew')
                 }
               />
             </label>
 
             <div className="model-editor">
               <div className="model-editor-header">
-                <span className="model-editor-label">模型列表</span>
+                <span className="model-editor-label">{t('ai.modelList')}</span>
                 <div className="model-editor-actions">
                   <button
                     type="button"
                     className="btn secondary small"
                     onClick={handleFetchModels}
                     disabled={fetching}
-                    title="从平台拉取可用模型列表"
+                    title={t('ai.fetchModelsTitle')}
                   >
                     <DownloadIcon size={13} />
-                    {fetching ? '拉取中…' : '拉取可用模型'}
+                    {fetching ? t('ai.fetching') : t('ai.fetchModels')}
                   </button>
                   <button
                     type="button"
                     className="btn secondary small add-model"
                     onClick={addModel}
                   >
-                    <PlusIcon size={13} /> 添加模型
+                    <PlusIcon size={13} /> {t('ai.addModel')}
                   </button>
                 </div>
               </div>
@@ -687,7 +708,7 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                   <div className="model-picker-bar">
                     <input
                       className="model-picker-search"
-                      placeholder={`搜索 ${remoteModels.length} 个可用模型…`}
+                      placeholder={t('ai.searchModels', { n: remoteModels.length })}
                       value={pickerQuery}
                       onChange={(e) => setPickerQuery(e.target.value)}
                       autoFocus
@@ -705,13 +726,13 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                     >
                       {pickerSelected.size === filteredRemoteModels.length &&
                       filteredRemoteModels.length > 0
-                        ? '全不选'
-                        : '全选'}
+                        ? t('ai.selectNone')
+                        : t('ai.selectAll')}
                     </button>
                   </div>
                   <div className="model-picker-list">
                     {filteredRemoteModels.length === 0 ? (
-                      <div className="model-picker-empty">没有匹配的模型</div>
+                      <div className="model-picker-empty">{t('ai.noMatchModels')}</div>
                     ) : (
                       filteredRemoteModels.map((m) => {
                         const exists = form.models.some(
@@ -735,7 +756,9 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                             {m.owned_by && (
                               <span className="model-picker-owner">{m.owned_by}</span>
                             )}
-                            {exists && <span className="model-picker-tag">已添加</span>}
+                            {exists && (
+                              <span className="model-picker-tag">{t('ai.added')}</span>
+                            )}
                           </label>
                         );
                       })
@@ -743,7 +766,7 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                   </div>
                   <div className="model-picker-footer">
                     <span className="model-picker-count">
-                      已选 {pickerSelected.size} 个
+                      {t('ai.selectedCount', { n: pickerSelected.size })}
                     </span>
                     <div className="model-picker-footer-actions">
                       <button
@@ -751,7 +774,7 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                         className="btn ghost small"
                         onClick={() => setShowPicker(false)}
                       >
-                        取消
+                        {t('common.cancel')}
                       </button>
                       <button
                         type="button"
@@ -759,7 +782,9 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                         onClick={handleImportModels}
                         disabled={pickerSelected.size === 0}
                       >
-                        导入 {pickerSelected.size > 0 ? pickerSelected.size : ''}
+                        {t('ai.importN', {
+                          n: pickerSelected.size > 0 ? pickerSelected.size : '',
+                        })}
                       </button>
                     </div>
                   </div>
@@ -770,12 +795,12 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                 <div className="model-row" key={m.id ?? `model-${idx}`}>
                   <input
                     value={m.label}
-                    placeholder="显示名称，如 DeepSeek V4 Flash"
+                    placeholder={t('ai.modelLabelPlaceholder')}
                     onChange={(e) => updateModel(idx, { label: e.target.value })}
                   />
                   <input
                     value={m.model}
-                    placeholder="模型 ID，如 deepseek-v4-flash"
+                    placeholder={t('ai.modelIdPlaceholder')}
                     className="model-id-input"
                     onChange={(e) => updateModel(idx, { model: e.target.value })}
                   />
@@ -785,7 +810,7 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                       min={1}
                       className="model-window-input"
                       value={m.context_window || ''}
-                      placeholder="上下文窗口，如 128000"
+                      placeholder={t('ai.contextPlaceholder')}
                       onChange={(e) =>
                         updateModel(idx, {
                           context_window: Number(e.target.value) || 0,
@@ -798,7 +823,7 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                           key={v}
                           type="button"
                           onClick={() => updateModel(idx, { context_window: v })}
-                          title={`填入 ${v.toLocaleString()} tokens`}
+                          title={t('ai.fillTokens', { n: v.toLocaleString() })}
                         >
                           {v >= 1_000_000 ? '1M' : `${v / 1000}k`}
                         </button>
@@ -807,7 +832,7 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                   </div>
                   <label
                     className={`model-vision${m.supports_vision ? ' on' : ''}`}
-                    title="该模型支持图片输入（多模态），勾选后聊天面板可粘贴/附加图片"
+                    title={t('ai.visionTitle')}
                   >
                     <input
                       type="checkbox"
@@ -816,20 +841,20 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                         updateModel(idx, { supports_vision: e.target.checked })
                       }
                     />
-                    图片
+                    {t('ai.vision')}
                   </label>
                   <button
                     type="button"
                     className={`model-default${m.is_active ? ' on' : ''}`}
-                    title="设为默认模型"
+                    title={t('ai.defaultModel')}
                     onClick={() => setActiveModel(idx)}
                   >
-                    {m.is_active ? '默认' : '设默认'}
+                    {m.is_active ? t('common.default') : t('ai.setDefault')}
                   </button>
                   <button
                     type="button"
                     className="icon-btn danger"
-                    title="删除模型"
+                    title={t('ai.deleteModel')}
                     onClick={() => removeModel(idx)}
                   >
                     <TrashIcon size={14} />
@@ -839,12 +864,12 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
             </div>
 
             <div className="form-row-inline">
-              <span className="form-label">设为当前使用的模型平台</span>
+              <span className="form-label">{t('ai.setActive')}</span>
               <button
                 type="button"
                 className={`switch${enabled ? ' on' : ''}`}
                 onClick={() => setEnabled(!enabled)}
-                aria-label="启用开关"
+                aria-label={t('ai.toggleAria')}
               >
                 <span />
               </button>
@@ -863,7 +888,7 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                 className="btn ghost"
                 onClick={() => setShowForm(false)}
               >
-                取消
+                {t('common.cancel')}
               </button>
               <button
                 type="button"
@@ -871,10 +896,10 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
                 onClick={handleTest}
                 disabled={testing}
               >
-                {testing ? '测试中…' : '测试连接'}
+                {testing ? t('common.testing') : t('ai.testConnection')}
               </button>
               <button type="submit" className="btn primary" disabled={saving}>
-                {saving ? '保存中…' : '保存'}
+                {saving ? t('common.saving') : t('common.save')}
               </button>
             </div>
           </form>
@@ -883,9 +908,9 @@ export default function AIConfigModal({ onClose, onSaved, showToast }: Props) {
 
       {deleteTarget && (
         <ConfirmModal
-          title="删除 AI 配置"
-          body={`删除 AI 配置 "${deleteTarget.name}"？`}
-          confirmText="删除"
+          title={t('ai.deleteTitle')}
+          body={t('ai.deleteBody', { name: deleteTarget.name })}
+          confirmText={t('common.delete')}
           danger
           onConfirm={() => doDelete(deleteTarget)}
           onCancel={() => setDeleteTarget(null)}

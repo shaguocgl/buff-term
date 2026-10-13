@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { clearAuditLogs, listAuditLogs } from '../api';
+import { useI18n, type DictKey } from '../i18n';
 import type { AuditLog } from '../types';
 import { fmtError } from '../utils/errors';
 import ConfirmModal from './ConfirmModal';
@@ -16,41 +17,41 @@ interface Props {
 /** 单次拉取的审计条数（后端上限同为 1000） */
 const AUDIT_LIMIT = 1000;
 
-const APPROVAL_LABEL: Record<string, string> = {
-  auto: '自动',
-  approved: '已批准',
-  denied: '已拒绝',
-  timeout: '超时拒绝',
+const APPROVAL_LABEL: Record<string, DictKey> = {
+  auto: 'audit.approval.auto',
+  approved: 'audit.approval.approved',
+  denied: 'audit.approval.denied',
+  timeout: 'audit.approval.timeout',
 };
 
-const STATUS_LABEL: Record<string, string> = {
-  executed: '已执行',
-  denied: '已拒绝',
-  error: '出错',
-  ok: '正常',
+const STATUS_LABEL: Record<string, DictKey> = {
+  executed: 'audit.status.executed',
+  denied: 'audit.status.denied',
+  error: 'audit.status.error',
+  ok: 'audit.status.ok',
 };
 
 /** 操作来源标签：区分 AI Agent / 终端防护 / MCP 服务 / 修复执行 / 文件编辑 */
-const SOURCE_LABEL: Record<string, string> = {
-  agent: 'AI Agent',
-  guard: '终端防护',
-  mcp: 'MCP 服务',
-  remediation: '修复执行',
-  sftp: '文件编辑',
+const SOURCE_LABEL: Record<string, DictKey> = {
+  agent: 'audit.source.agent',
+  guard: 'audit.source.guard',
+  mcp: 'audit.source.mcp',
+  remediation: 'audit.source.remediation',
+  sftp: 'audit.source.sftp',
 };
 
 /** 来源筛选项，value 为空串表示“全部” */
-const SOURCE_FILTERS: { value: string; label: string }[] = [
-  { value: '', label: '全部' },
-  { value: 'agent', label: 'AI Agent' },
-  { value: 'guard', label: '终端防护' },
-  { value: 'mcp', label: 'MCP 服务' },
-  { value: 'remediation', label: '修复执行' },
-  { value: 'sftp', label: '文件编辑' },
+const SOURCE_FILTERS: { value: string; labelKey: DictKey }[] = [
+  { value: '', labelKey: 'common.all' },
+  { value: 'agent', labelKey: 'audit.source.agent' },
+  { value: 'guard', labelKey: 'audit.source.guard' },
+  { value: 'mcp', labelKey: 'audit.source.mcp' },
+  { value: 'remediation', labelKey: 'audit.source.remediation' },
+  { value: 'sftp', labelKey: 'audit.source.sftp' },
 ];
 
-function formatTime(ts: number) {
-  return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false });
+function formatTime(ts: number, locale: string) {
+  return new Date(ts * 1000).toLocaleString(locale, { hour12: false });
 }
 
 function formatDuration(ms: number | null) {
@@ -60,6 +61,11 @@ function formatDuration(ms: number | null) {
 }
 
 export default function AuditLogModal({ onClose, showToast }: Props) {
+  const { t, lang } = useI18n();
+  const locale = lang === 'en' ? 'en-US' : 'zh-CN';
+  /** 取标签文案：未知值原样展示（后端可能新增来源 / 状态） */
+  const labelOf = (map: Record<string, DictKey>, key: string) =>
+    map[key] ? t(map[key]) : key;
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -85,7 +91,7 @@ export default function AuditLogModal({ onClose, showToast }: Props) {
       setLogs([]);
       showToast(
         'success',
-        removed > 0 ? `已清空 ${removed} 条操作审计记录` : '没有可清空的操作审计记录',
+        removed > 0 ? t('audit.cleared', { n: removed }) : t('audit.nothingToClear'),
       );
     } catch (e) {
       showToast('error', fmtError(e));
@@ -101,8 +107,8 @@ export default function AuditLogModal({ onClose, showToast }: Props) {
 
   return (
     <Modal
-      title="操作审计"
-      subtitle="AI Agent / 终端防护 / MCP 服务 / 修复执行 / 文件编辑的操作记录（最近 1000 条）"
+      title={t('audit.title')}
+      subtitle={t('audit.subtitle')}
       className="modal-wide"
       onClose={onClose}
     >
@@ -116,7 +122,7 @@ export default function AuditLogModal({ onClose, showToast }: Props) {
                 className={source === item.value ? 'seg active' : 'seg'}
                 onClick={() => setSource(item.value)}
               >
-                {item.label}
+                {t(item.labelKey)}
               </button>
             ))}
           </div>
@@ -125,16 +131,16 @@ export default function AuditLogModal({ onClose, showToast }: Props) {
             onClick={() => setConfirmClear(true)}
             disabled={clearing || logs.length === 0}
           >
-            {clearing ? '清空中…' : '清空'}
+            {clearing ? t('audit.clearing') : t('audit.clear')}
           </button>
         </div>
-        {loading && <div className="audit-empty">加载中…</div>}
+        {loading && <div className="audit-empty">{t('common.loading')}</div>}
         {!loading && error && <p className="error">{error}</p>}
         {!loading && !error && visible.length === 0 && (
           <div className="audit-empty">
             <ListIcon size={28} />
-            <p>暂无操作审计记录</p>
-            <span>执行 AI 工具、终端防护拦截、MCP 调用或修复操作后，记录会显示在这里</span>
+            <p>{t('audit.emptyTitle')}</p>
+            <span>{t('audit.emptyHint')}</span>
           </div>
         )}
         {!loading && visible.length > 0 && (
@@ -142,17 +148,17 @@ export default function AuditLogModal({ onClose, showToast }: Props) {
             {visible.map((log) => (
               <div key={log.id} className="audit-item">
                 <div className="audit-item-top">
-                  <span className="audit-time">{formatTime(log.ts)}</span>
+                  <span className="audit-time">{formatTime(log.ts, locale)}</span>
                   <span className="audit-host">{log.host_label}</span>
                   <span className={`badge audit-source audit-source-${log.source}`}>
-                    {SOURCE_LABEL[log.source] ?? log.source}
+                    {labelOf(SOURCE_LABEL, log.source)}
                   </span>
                   <span className="audit-tool">{log.tool_name}</span>
                   <span className={`badge audit-approval audit-${log.approval}`}>
-                    {APPROVAL_LABEL[log.approval] ?? log.approval}
+                    {labelOf(APPROVAL_LABEL, log.approval)}
                   </span>
                   <span className={`badge audit-status audit-${log.status}`}>
-                    {STATUS_LABEL[log.status] ?? log.status}
+                    {labelOf(STATUS_LABEL, log.status)}
                   </span>
                   {log.duration_ms !== null && (
                     <span className="audit-duration">{formatDuration(log.duration_ms)}</span>
@@ -168,9 +174,9 @@ export default function AuditLogModal({ onClose, showToast }: Props) {
 
       {confirmClear && (
         <ConfirmModal
-          title="清空操作审计"
-          body="将删除全部操作审计记录（含 AI Agent、终端防护、MCP 服务与修复执行），此操作不可撤销。确定清空吗？"
-          confirmText="清空"
+          title={t('audit.clearTitle')}
+          body={t('audit.clearBody')}
+          confirmText={t('audit.clear')}
           danger
           onConfirm={handleClear}
           onCancel={() => setConfirmClear(false)}

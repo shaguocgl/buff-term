@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useT } from '../i18n';
 import type { HostKeyConfirmRequest } from '../types';
 import { ShieldIcon } from './Icons';
 
@@ -13,6 +14,7 @@ interface Props {
 const CONFIRM_TIMEOUT_SECS = 60;
 
 export default function HostKeyModal({ request, deadline, onResolve }: Props) {
+  const t = useT();
   const [remaining, setRemaining] = useState(() =>
     Math.max(0, Math.ceil((deadline - Date.now()) / 1000)),
   );
@@ -34,9 +36,9 @@ export default function HostKeyModal({ request, deadline, onResolve }: Props) {
               <span className="guard-approval-icon">
                 <ShieldIcon size={15} />
               </span>{' '}
-              主机指纹确认
+              {t('hostKey.title')}
             </h2>
-            <p>首次连接到该服务器，请核对主机密钥指纹</p>
+            <p>{t('hostKey.subtitle')}</p>
           </div>
         </div>
         <div className="mcp-approval-body">
@@ -47,18 +49,15 @@ export default function HostKeyModal({ request, deadline, onResolve }: Props) {
             <span className="hostkey-type">{request.key_type}</span>
             <code>{request.fingerprint}</code>
           </div>
-          <p className="hostkey-tip">
-            请与服务器管理员提供或此前记录的指纹核对。若一致，点「信任并连接」；
-            若不一致，可能存在中间人风险，请选择「取消」。
-          </p>
+          <p className="hostkey-tip">{t('hostKey.tip')}</p>
           <div className="approval-countdown">
             <div className="approval-countdown-bar">
               <span style={{ width: `${pct}%` }} />
             </div>
             <span className="approval-countdown-text">
               {timedOut
-                ? '已超时，连接被拒绝'
-                : `${remaining}s 后未确认将自动拒绝`}
+                ? t('hostKey.timedOut')
+                : t('guardApproval.countdown', { n: remaining })}
             </span>
           </div>
           <div className="tool-actions">
@@ -67,14 +66,14 @@ export default function HostKeyModal({ request, deadline, onResolve }: Props) {
               onClick={() => onResolve(true)}
               disabled={timedOut}
             >
-              信任并连接
+              {t('hostKey.trust')}
             </button>
             <button
               className="btn ghost small"
               onClick={() => onResolve(false)}
               disabled={timedOut}
             >
-              取消
+              {t('common.cancel')}
             </button>
           </div>
         </div>

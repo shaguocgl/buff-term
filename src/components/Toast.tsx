@@ -1,3 +1,5 @@
+import { useT } from '../i18n';
+
 export interface ToastItem {
   id: number;
   kind: 'success' | 'error' | 'info';
@@ -11,6 +13,7 @@ export default function ToastContainer({
   toasts: ToastItem[];
   onDismiss: (id: number) => void;
 }) {
+  const t = useT();
   return (
     <div className="toast-container">
       {toasts.map((toast) => (
@@ -22,7 +25,7 @@ export default function ToastContainer({
           <button
             className="toast-close"
             onClick={() => onDismiss(toast.id)}
-            aria-label="关闭提示"
+            aria-label={t('toast.dismiss')}
           >
             ×
           </button>

@@ -51,12 +51,12 @@ fn key_to_hex(k: &[u8]) -> String {
 
 fn hex_to_key(s: &str) -> Result<[u8; 32], String> {
     if s.len() != 64 {
-        return Err("主密钥长度异常".to_string());
+        return Err(crate::i18n::t("主密钥长度异常", "The master key has an unexpected length").to_string());
     }
     let mut key = [0u8; 32];
     for i in 0..32 {
         key[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
-            .map_err(|_| "主密钥格式异常".to_string())?;
+            .map_err(|_| crate::i18n::t("主密钥格式异常", "The master key has an invalid format").to_string())?;
     }
     Ok(key)
 }
@@ -79,7 +79,7 @@ fn master_key() -> Result<[u8; 32], String> {
 /// 从钥匙串读取或首次生成主密钥（仅在未缓存时调用一次）。
 fn load_or_create_master_key() -> Result<[u8; 32], String> {
     let entry = Entry::new(MASTER_KEY_SERVICE, MASTER_KEY_ACCOUNT)
-        .map_err(|e| format!("初始化钥匙串失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("初始化钥匙串失败", "Failed to initialize the keychain")))?;
     // 已存在 → 直接读取
     if let Ok(existing) = entry.get_password() {
         if let Ok(key) = hex_to_key(&existing) {
@@ -89,12 +89,12 @@ fn load_or_create_master_key() -> Result<[u8; 32], String> {
     // 不存在 → 生成并创建；macOS Keychain 的 set 在条目已存在时会报错，
     // 若并发/重复创建冲突，则读回已存在的密钥，保证所有调用方使用同一把密钥。
     let mut key = [0u8; 32];
-    getrandom::getrandom(&mut key).map_err(|e| format!("生成主密钥失败: {e}"))?;
+    getrandom::getrandom(&mut key).map_err(|e| format!("{}: {e}", crate::i18n::t("生成主密钥失败", "Failed to generate the master key")))?;
     let hex = key_to_hex(&key);
     if entry.set_password(&hex).is_err() {
         let existing = entry
             .get_password()
-            .map_err(|e| format!("保存主密钥到系统钥匙串失败: {e}"))?;
+            .map_err(|e| format!("{}: {e}", crate::i18n::t("保存主密钥到系统钥匙串失败", "Failed to store the master key in the system keychain")))?;
         return hex_to_key(&existing);
     }
     Ok(key)
@@ -105,10 +105,10 @@ fn encrypt_secret(plain: &str) -> Result<String, String> {
     let key = master_key()?;
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
     let mut nonce_bytes = [0u8; 12];
-    getrandom::getrandom(&mut nonce_bytes).map_err(|e| format!("生成随机 nonce 失败: {e}"))?;
+    getrandom::getrandom(&mut nonce_bytes).map_err(|e| format!("{}: {e}", crate::i18n::t("生成随机 nonce 失败", "Failed to generate a random nonce")))?;
     let ct = cipher
         .encrypt(Nonce::from_slice(&nonce_bytes), plain.as_bytes())
-        .map_err(|e| format!("加密失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("加密失败", "Encryption failed")))?;
     let mut blob = Vec::with_capacity(12 + ct.len());
     blob.extend_from_slice(&nonce_bytes);
     blob.extend_from_slice(&ct);
@@ -120,15 +120,15 @@ fn decrypt_secret(enc: &str) -> Result<String, String> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
     let blob = B64
         .decode(enc)
-        .map_err(|e| format!("凭据密文解码失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("凭据密文解码失败", "Failed to decode the credential ciphertext")))?;
     if blob.len() < 12 + 16 {
-        return Err("凭据密文长度异常".to_string());
+        return Err(crate::i18n::t("凭据密文长度异常", "The credential ciphertext has an unexpected length").to_string());
     }
     let (nonce, ct) = blob.split_at(12);
     let plain = cipher
         .decrypt(Nonce::from_slice(nonce), ct)
-        .map_err(|_| "凭据解密失败（主密钥不匹配？）".to_string())?;
-    String::from_utf8(plain).map_err(|_| "凭据解密结果非法".to_string())
+        .map_err(|_| crate::i18n::t("凭据解密失败（主密钥不匹配？）", "Failed to decrypt the credential (master key mismatch?)").to_string())?;
+    String::from_utf8(plain).map_err(|_| crate::i18n::t("凭据解密结果非法", "The decrypted credential is not valid UTF-8").to_string())
 }
 
 fn db() -> Option<&'static std::sync::Arc<crate::db::Db>> {
@@ -138,16 +138,16 @@ fn db() -> Option<&'static std::sync::Arc<crate::db::Db>> {
 // ---------- 主机密码 ----------
 
 pub fn save_password(host_id: &str, password: &str) -> Result<(), String> {
-    let db = db().ok_or_else(|| "数据库未就绪".to_string())?;
+    let db = db().ok_or_else(|| crate::i18n::t("数据库未就绪", "The database is not ready").to_string())?;
     if password.is_empty() {
         cache_remove("password", host_id);
         db.delete_credential(host_id, "password")
-            .map_err(|e| format!("删除凭据失败: {e}"))?;
+            .map_err(|e| format!("{}: {e}", crate::i18n::t("删除凭据失败", "Failed to delete the credential")))?;
         return Ok(());
     }
     let enc = encrypt_secret(password)?;
     db.set_credential(host_id, "password", &enc)
-        .map_err(|e| format!("保存凭据到数据库失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存凭据到数据库失败", "Failed to store the credential in the database")))?;
     cache_set("password", host_id, password.to_string());
     Ok(())
 }
@@ -175,16 +175,16 @@ pub fn delete_password(host_id: &str) {
 /// 私钥口令（kind = passphrase）：与主机密码同样 AES-256-GCM 加密存储，
 /// 仅用于本地解密加密的私钥文件，不会发送到远端。
 pub fn save_key_passphrase(host_id: &str, passphrase: &str) -> Result<(), String> {
-    let db = db().ok_or_else(|| "数据库未就绪".to_string())?;
+    let db = db().ok_or_else(|| crate::i18n::t("数据库未就绪", "The database is not ready").to_string())?;
     if passphrase.is_empty() {
         cache_remove("passphrase", host_id);
         db.delete_credential(host_id, "passphrase")
-            .map_err(|e| format!("删除凭据失败: {e}"))?;
+            .map_err(|e| format!("{}: {e}", crate::i18n::t("删除凭据失败", "Failed to delete the credential")))?;
         return Ok(());
     }
     let enc = encrypt_secret(passphrase)?;
     db.set_credential(host_id, "passphrase", &enc)
-        .map_err(|e| format!("保存凭据到数据库失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存凭据到数据库失败", "Failed to store the credential in the database")))?;
     cache_set("passphrase", host_id, passphrase.to_string());
     Ok(())
 }
@@ -210,16 +210,16 @@ pub fn delete_key_passphrase(host_id: &str) {
 // ---------- AI API Key ----------
 
 pub fn save_api_key(provider_id: &str, key: &str) -> Result<(), String> {
-    let db = db().ok_or_else(|| "数据库未就绪".to_string())?;
+    let db = db().ok_or_else(|| crate::i18n::t("数据库未就绪", "The database is not ready").to_string())?;
     if key.is_empty() {
         cache_remove("apikey", provider_id);
         db.delete_credential(provider_id, "apikey")
-            .map_err(|e| format!("删除 API Key 失败: {e}"))?;
+            .map_err(|e| format!("{}: {e}", crate::i18n::t("删除 API Key 失败", "Failed to delete the API Key")))?;
         return Ok(());
     }
     let enc = encrypt_secret(key)?;
     db.set_credential(provider_id, "apikey", &enc)
-        .map_err(|e| format!("保存 API Key 到数据库失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存 API Key 到数据库失败", "Failed to store the API Key in the database")))?;
     cache_set("apikey", provider_id, key.to_string());
     Ok(())
 }
@@ -247,10 +247,10 @@ pub fn delete_api_key(provider_id: &str) {
 /// MCP 对外服务的认证 token：与主机密码/API Key 一样 AES-256-GCM 加密存储，
 /// 避免数据库文件泄露后直接拿到 token 调用本地 MCP 服务。
 pub fn save_mcp_token(token: &str) -> Result<(), String> {
-    let db = db().ok_or_else(|| "数据库未就绪".to_string())?;
+    let db = db().ok_or_else(|| crate::i18n::t("数据库未就绪", "The database is not ready").to_string())?;
     let enc = encrypt_secret(token)?;
     db.set_credential("mcp:token", "token", &enc)
-        .map_err(|e| format!("保存 MCP token 失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存 MCP token 失败", "Failed to store the MCP token")))?;
     // 同步刷新内存缓存：轮换 token 后 check_auth 立刻使用新值，
     // 否则缓存里残留旧 token 会让新 token 全部 401
     cache_set("mcp-token", "token", token.to_string());
@@ -271,10 +271,10 @@ pub fn get_mcp_token() -> Option<String> {
 // ---------- SMTP 密码 ----------
 
 pub fn save_smtp_password(password: &str) -> Result<(), String> {
-    let db = db().ok_or_else(|| "数据库未就绪".to_string())?;
+    let db = db().ok_or_else(|| crate::i18n::t("数据库未就绪", "The database is not ready").to_string())?;
     let enc = encrypt_secret(password)?;
     db.set_credential("alert:smtp", "password", &enc)
-        .map_err(|e| format!("保存 SMTP 密码失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存 SMTP 密码失败", "Failed to store the SMTP password")))?;
     // 同步刷新内存缓存，避免重新读取时拿到旧密码
     cache_set("smtp-password", "password", password.to_string());
     Ok(())

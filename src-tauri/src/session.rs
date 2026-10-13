@@ -110,28 +110,34 @@ impl SessionManager {
             do_connect(&host, None, None),
         )
         .await
-        .map_err(|_| "SSH 连接超时（60 秒），请检查网络或服务器状态".to_string())??;
+        .map_err(|_| {
+            crate::i18n::t(
+                "SSH 连接超时（60 秒），请检查网络或服务器状态",
+                "SSH connection timed out (60s); check your network or the server",
+            )
+            .to_string()
+        })??;
         let channel: russh::Channel<russh::client::Msg> = tokio::time::timeout(
             crate::russh::CHANNEL_OP_TIMEOUT,
             handle.channel_open_session(),
         )
         .await
-        .map_err(|_| "打开 SSH 会话通道超时".to_string())?
-        .map_err(|e| format!("打开 SSH 会话通道失败: {e}"))?;
+        .map_err(|_| crate::i18n::t("打开 SSH 会话通道超时", "Timed out opening the SSH session channel").to_string())?
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("打开 SSH 会话通道失败", "Failed to open the SSH session channel")))?;
         tokio::time::timeout(
             crate::russh::CHANNEL_OP_TIMEOUT,
             channel.request_pty(false, "xterm-256color", cols as u32, rows as u32, 0, 0, &[]),
         )
         .await
-        .map_err(|_| "请求 PTY 超时".to_string())?
-        .map_err(|e| format!("请求 PTY 失败: {e}"))?;
+        .map_err(|_| crate::i18n::t("请求 PTY 超时", "Timed out requesting a PTY").to_string())?
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("请求 PTY 失败", "Failed to request a PTY")))?;
         tokio::time::timeout(
             crate::russh::CHANNEL_OP_TIMEOUT,
             channel.request_shell(false),
         )
         .await
-        .map_err(|_| "请求 shell 超时".to_string())?
-        .map_err(|e| format!("请求 shell 失败: {e}"))?;
+        .map_err(|_| crate::i18n::t("请求 shell 超时", "Timed out requesting a shell").to_string())?
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("请求 shell 失败", "Failed to request a shell")))?;
 
         let (mut read_half, write_half) = channel.split();
         let write_half = Arc::new(write_half);
@@ -401,7 +407,7 @@ impl SessionManager {
             .lock()
             .unwrap()
             .remove(&id)
-            .ok_or("会话不存在")?;
+            .ok_or(crate::i18n::t("会话不存在", "The session does not exist"))?;
         // 主动关闭会话同样注销后台监控采集（与读循环结束时的注销互为兜底，重复注销安全）
         if let Some(monitor) = app.try_state::<crate::monitor::MonitorManager>() {
             monitor.detach(&session.host.id, id);
@@ -424,7 +430,7 @@ impl SessionManager {
         console_line: Option<&str>,
     ) -> Result<(), String> {
         let sessions = self.sessions.lock().unwrap();
-        let session = sessions.get(&id).ok_or("会话不存在")?;
+        let session = sessions.get(&id).ok_or(crate::i18n::t("会话不存在", "The session does not exist"))?;
         session
             .guard_tx
             .send(GuardMsg::Input {
@@ -433,7 +439,7 @@ impl SessionManager {
                 passthrough,
                 console_line: console_line.map(|s| s.to_string()),
             })
-            .map_err(|_| "会话已关闭".to_string())
+            .map_err(|_| crate::i18n::t("会话已关闭", "The session is closed").to_string())
     }
 
     /// 处理终端命令审批结果（批准放行 Enter / 拒绝发 Ctrl-U）。
@@ -447,7 +453,7 @@ impl SessionManager {
         timed_out: bool,
     ) -> Result<(), String> {
         let sessions = self.sessions.lock().unwrap();
-        let session = sessions.get(&id).ok_or("会话不存在")?;
+        let session = sessions.get(&id).ok_or(crate::i18n::t("会话不存在", "The session does not exist"))?;
         session
             .guard_tx
             .send(GuardMsg::Resolve {
@@ -455,18 +461,18 @@ impl SessionManager {
                 allow,
                 timed_out,
             })
-            .map_err(|_| "会话已关闭".to_string())
+            .map_err(|_| crate::i18n::t("会话已关闭", "The session is closed").to_string())
     }
 
     pub fn resize(&self, id: u32, cols: u16, rows: u16) -> Result<(), String> {
         let cols = cols.clamp(2, 400);
         let rows = rows.clamp(10, 200);
         let sessions = self.sessions.lock().unwrap();
-        let session = sessions.get(&id).ok_or("会话不存在")?;
+        let session = sessions.get(&id).ok_or(crate::i18n::t("会话不存在", "The session does not exist"))?;
         session
             .resize_tx
             .send((cols, rows))
-            .map_err(|_| "会话已关闭".to_string())
+            .map_err(|_| crate::i18n::t("会话已关闭", "The session is closed").to_string())
     }
 }
 
@@ -527,7 +533,10 @@ fn load_guard_config(db: &Db, manager: &SessionManager) -> GuardConfig {
     let config = match (db.get_terminal_guard_settings(), db.list_terminal_rules()) {
         (Ok(settings), Ok(rules)) => GuardConfig::from_settings(&settings, &rules),
         _ => {
-            eprintln!("[guard] 读取防护配置失败，本次输入不拦截");
+            eprintln!(
+            "[guard] {}",
+            crate::i18n::t("读取防护配置失败，本次输入不拦截", "failed to read guard settings; this input is not intercepted")
+        );
             GuardConfig::default()
         }
     };

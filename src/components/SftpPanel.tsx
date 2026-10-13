@@ -12,6 +12,7 @@ import {
   sftpUpload,
 } from '../api';
 import type { SftpProgressPayload } from '../api';
+import { useT, type TFunc } from '../i18n';
 import type { Host, SftpEntry } from '../types';
 import { fmtError } from '../utils/errors';
 import { baseName, formatBytes, formatMtime, joinPath } from '../utils/remote';
@@ -79,27 +80,33 @@ async function mapLimit<T, R>(
 }
 
 /** 覆盖确认弹窗文案：单个冲突保持原有措辞，多个冲突列出清单 */
-function overwriteBody({
-  conflicts,
-  rest,
-}: {
-  conflicts: UploadItem[];
-  rest: UploadItem[];
-}): string {
+function overwriteBody(
+  {
+    conflicts,
+    rest,
+  }: {
+    conflicts: UploadItem[];
+    rest: UploadItem[];
+  },
+  t: TFunc,
+): string {
   if (conflicts.length === 1 && rest.length === 0) {
-    return `远端已存在 "${baseName(conflicts[0].remote)}"，覆盖它吗？`;
+    return t('sftp.overwriteOne', { name: baseName(conflicts[0].remote) });
   }
   const names = conflicts
     .slice(0, CONFLICT_PREVIEW)
     .map((c) => `· ${baseName(c.remote)}`);
   const more = conflicts.length - names.length;
-  const lines = [`以下 ${conflicts.length} 个文件在远端已存在：`, ...names];
-  if (more > 0) lines.push(`· 还有 ${more} 个未列出`);
-  if (rest.length > 0) lines.push('', `其余 ${rest.length} 个文件将直接上传。`);
+  const lines = [t('sftp.overwriteManyHead', { n: conflicts.length }), ...names];
+  if (more > 0) lines.push(t('sftp.overwriteMore', { n: more }));
+  if (rest.length > 0) {
+    lines.push('', t('sftp.overwriteRest', { n: rest.length }));
+  }
   return lines.join('\n');
 }
 
 function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
+  const t = useT();
   const [cwd, setCwd] = useState('/');
   const [entries, setEntries] = useState<SftpEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -191,7 +198,7 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
       if (res.ok) {
         then();
       } else {
-        setError(res.text || '操作失败');
+        setError(res.text || t('sftp.opFailed'));
       }
     } catch (e) {
       setError(fmtError(e));
@@ -218,11 +225,11 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
         kind === 'upload'
           ? await sftpUpload(host.id, local, remote, id)
           : await sftpDownload(host.id, remote, local, id);
-      return res.ok ? null : res.text || '传输失败';
+      return res.ok ? null : res.text || t('sftp.transferFailed');
     } catch (e) {
       const msg = fmtError(e);
-      // 用户主动取消不算错误
-      return msg.includes('取消') ? null : msg;
+      // 用户主动取消不算错误（后端按当前语言返回“已取消 / cancelled”）
+      return /取消|cancel/i.test(msg) ? null : msg;
     } finally {
       setTransfers((prev) => {
         const next = { ...prev };
@@ -241,8 +248,15 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
     await mapLimit(items, UPLOAD_CONCURRENCY, async (item) => {
       const err = await startTransfer('upload', item.local, item.remote);
       if (!err) return;
-      failures.push(`${baseName(item.local)}：${err}`);
-      setError(`上传失败（${failures.length}）：${failures.join('；')}`);
+      failures.push(
+        `${baseName(item.local)}${t('sftp.uploadFailedItemSep')}${err}`,
+      );
+      setError(
+        t('sftp.uploadFailed', {
+          n: failures.length,
+          list: failures.join(t('sftp.uploadFailedListSep')),
+        }),
+      );
     });
     if (cwdRef.current === target) load(target);
   };
@@ -352,21 +366,21 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
           onBlur={() => setPathInput(cwd)}
         />
         <div className="sftp-actions">
-          <button className="icon-btn" title="刷新" onClick={() => load(cwd)} disabled={busy}>
+          <button className="icon-btn" title={t('common.refresh')} onClick={() => load(cwd)} disabled={busy}>
             <RefreshIcon size={14} />
           </button>
           <button
             className="icon-btn"
-            title="上传文件（可多选批量上传）"
+            title={t('sftp.uploadTitle')}
             onClick={handleUpload}
             disabled={busy}
           >
             <UploadIcon size={14} />
           </button>
-          <button className="icon-btn" title="新建文件夹" onClick={handleMkdir} disabled={busy}>
+          <button className="icon-btn" title={t('sftp.newFolder')} onClick={handleMkdir} disabled={busy}>
             <FolderPlusIcon size={14} />
           </button>
-          <button className="icon-btn" title="关闭" onClick={onClose}>
+          <button className="icon-btn" title={t('common.close')} onClick={onClose}>
             <XIcon size={14} />
           </button>
         </div>
@@ -377,7 +391,7 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
           {Object.values(transfers).length > 1 && (
             <div className="sftp-transfers-head">
               <span className="sftp-transfer-meta">
-                {Object.values(transfers).length} 个传输进行中
+                {t('sftp.transfersCount', { n: Object.values(transfers).length })}
               </span>
               <button
                 className="btn ghost small"
@@ -385,30 +399,30 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
                   Object.values(transfers).forEach((t) => cancelTransfer(t.id))
                 }
               >
-                全部取消
+                {t('sftp.cancelAll')}
               </button>
             </div>
           )}
-          {Object.values(transfers).map((t) => {
+          {Object.values(transfers).map((tr) => {
             const pct =
-              t.total > 0
-                ? Math.min(100, Math.round((t.transferred / t.total) * 100))
+              tr.total > 0
+                ? Math.min(100, Math.round((tr.transferred / tr.total) * 100))
                 : 0;
             return (
-              <div className="sftp-transfer" key={t.id}>
+              <div className="sftp-transfer" key={tr.id}>
                 <div className="sftp-transfer-head">
                   <span className="sftp-transfer-name">
-                    {t.kind === 'upload' ? '↑' : '↓'} {t.name}
+                    {tr.kind === 'upload' ? '↑' : '↓'} {tr.name}
                   </span>
                   <span className="sftp-transfer-meta">
-                    {t.total > 0
-                      ? `${pct}% · ${formatBytes(t.transferred)}/${formatBytes(t.total)}`
-                      : formatBytes(t.transferred)}
+                    {tr.total > 0
+                      ? `${pct}% · ${formatBytes(tr.transferred)}/${formatBytes(tr.total)}`
+                      : formatBytes(tr.transferred)}
                   </span>
                   <button
                     className="icon-btn"
-                    title="取消传输"
-                    onClick={() => cancelTransfer(t.id)}
+                    title={t('sftp.cancelTransfer')}
+                    onClick={() => cancelTransfer(tr.id)}
                   >
                     <XIcon size={12} />
                   </button>
@@ -423,7 +437,7 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
       )}
 
       <div className="sftp-body">
-        {loading && <div className="sftp-status">加载中…</div>}
+        {loading && <div className="sftp-status">{t('common.loading')}</div>}
         {!loading && error && <div className="sftp-status err">{error}</div>}
         {!loading && !error && (
           <div className="sftp-list">
@@ -448,7 +462,7 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
                   {entry.is_dir ? <FolderIcon size={15} /> : <FileIcon size={15} />}
                   <span
                     className={`sftp-name${entry.is_dir ? '' : ' plain'}`}
-                    title={entry.is_dir ? '打开目录' : entry.name}
+                    title={entry.is_dir ? t('sftp.openDir') : entry.name}
                     onClick={() => {
                       if (entry.is_dir) load(full);
                     }}
@@ -456,7 +470,7 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
                     {entry.name}
                   </span>
                   {entry.is_symlink && (
-                    <span className="sftp-link-badge" title="符号链接">link</span>
+                    <span className="sftp-link-badge" title={t('sftp.symlink')}>link</span>
                   )}
                   <span className="sftp-size">
                     {entry.is_dir ? '—' : formatBytes(entry.size)}
@@ -466,7 +480,7 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
                     {!entry.is_dir && (
                       <button
                         className="icon-btn"
-                        title="在内置编辑器中打开"
+                        title={t('sftp.openInEditor')}
                         disabled={busy}
                         onClick={() => onOpenFile(full)}
                       >
@@ -476,7 +490,7 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
                     {!entry.is_dir && (
                       <button
                         className="icon-btn"
-                        title="下载"
+                        title={t('sftp.download')}
                         disabled={busy}
                         onClick={() => handleDownload(entry)}
                       >
@@ -485,7 +499,7 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
                     )}
                     <button
                       className="icon-btn"
-                      title="重命名"
+                      title={t('sftp.rename')}
                       disabled={busy}
                       onClick={() => handleRename(entry)}
                     >
@@ -493,7 +507,7 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
                     </button>
                     <button
                       className="icon-btn danger"
-                      title="删除"
+                      title={t('common.delete')}
                       disabled={busy}
                       onClick={() => handleDelete(entry)}
                     >
@@ -503,37 +517,51 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
                 </div>
               );
             })}
-            {entries.length === 0 && <div className="sftp-status">空目录</div>}
+            {entries.length === 0 && <div className="sftp-status">{t('sftp.empty')}</div>}
           </div>
         )}
       </div>
 
       {overwriteBatch && (
         <ConfirmModal
-          title="覆盖远端文件"
-          body={overwriteBody(overwriteBatch)}
-          confirmText={overwriteBatch.conflicts.length > 1 ? '全部覆盖' : '覆盖'}
+          title={t('sftp.overwriteTitle')}
+          body={overwriteBody(overwriteBatch, t)}
+          confirmText={
+            overwriteBatch.conflicts.length > 1
+              ? t('sftp.overwriteAll')
+              : t('sftp.overwrite')
+          }
           // 无冲突文件可传时「跳过冲突项」等同于取消，故不展示该按钮
-          altText={overwriteBatch.rest.length > 0 ? '跳过冲突项' : undefined}
+          altText={
+            overwriteBatch.rest.length > 0 ? t('sftp.skipConflicts') : undefined
+          }
           danger
           onConfirm={() => {
-            const t = overwriteBatch;
+            const batch = overwriteBatch;
             setOverwriteBatch(null);
-            void uploadMany([...t.conflicts, ...t.rest]);
+            void uploadMany([...batch.conflicts, ...batch.rest]);
           }}
           onAlt={() => {
-            const t = overwriteBatch;
+            const batch = overwriteBatch;
             setOverwriteBatch(null);
-            void uploadMany(t.rest);
+            void uploadMany(batch.rest);
           }}
           onCancel={() => setOverwriteBatch(null)}
         />
       )}
       {confirmDelete && (
         <ConfirmModal
-          title={confirmDelete.is_dir ? '删除目录' : '删除文件'}
-          body={`确定删除 ${confirmDelete.is_dir ? '目录' : '文件'} "${confirmDelete.name}" 吗？`}
-          confirmText="删除"
+          title={
+            confirmDelete.is_dir
+              ? t('sftp.deleteDirTitle')
+              : t('sftp.deleteFileTitle')
+          }
+          body={
+            confirmDelete.is_dir
+              ? t('sftp.deleteDirBody', { name: confirmDelete.name })
+              : t('sftp.deleteFileBody', { name: confirmDelete.name })
+          }
+          confirmText={t('common.delete')}
           danger
           onConfirm={() => doDelete(confirmDelete)}
           onCancel={() => setConfirmDelete(null)}
@@ -543,10 +571,18 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
         <PromptModal
           // key 按 kind 区分：新建/重命名切换时强制重建，避免输入框残留上一次的值
           key={promptState.kind === 'rename' ? `rename-${promptState.entry.name}` : 'mkdir'}
-          title={promptState.kind === 'mkdir' ? '新建文件夹' : '重命名'}
-          label={promptState.kind === 'mkdir' ? '文件夹名称' : '新名称'}
+          title={
+            promptState.kind === 'mkdir' ? t('sftp.newFolder') : t('sftp.rename')
+          }
+          label={
+            promptState.kind === 'mkdir'
+              ? t('sftp.newFolderLabel')
+              : t('sftp.newNameLabel')
+          }
           initialValue={promptState.kind === 'rename' ? promptState.entry.name : ''}
-          placeholder={promptState.kind === 'mkdir' ? '例如 logs' : undefined}
+          placeholder={
+            promptState.kind === 'mkdir' ? t('sftp.newFolderPlaceholder') : undefined
+          }
           onOk={submitPrompt}
           onCancel={() => setPromptState(null)}
         />

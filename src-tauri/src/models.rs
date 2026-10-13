@@ -179,40 +179,58 @@ impl TaskPlan {
     }
 
     /// 渲染成注入系统提示的固定文本块。内容保持确定性，便于 prompt 缓存。
+    /// 文案跟随界面语言：英文界面下注入英文台账，避免中英混排干扰模型。
     pub fn render_block(&self) -> String {
         if self.is_empty() {
             return String::new();
         }
-        let mut out = String::from("[任务台账｜必须遵守，禁止忽略]\n");
+        let en = crate::i18n::is_en();
+        let mut out = String::from(if en {
+            "[Task plan | must be followed, never ignored]\n"
+        } else {
+            "[任务台账｜必须遵守，禁止忽略]\n"
+        });
         if !self.goal.trim().is_empty() {
-            out.push_str(&format!("目标：{}\n", self.goal.trim()));
+            out.push_str(&format!(
+                "{}{}\n",
+                if en { "Goal: " } else { "目标：" },
+                self.goal.trim()
+            ));
         }
         if !self.constraints.is_empty() {
-            out.push_str("约束：\n");
+            out.push_str(if en { "Constraints:\n" } else { "约束：\n" });
             for item in &self.constraints {
                 out.push_str(&format!("- {}\n", item.trim()));
             }
         }
         if !self.completed.is_empty() {
-            out.push_str("已完成：\n");
+            out.push_str(if en { "Completed:\n" } else { "已完成：\n" });
             for item in &self.completed {
                 out.push_str(&format!("- {}\n", item.trim()));
             }
         }
         if !self.pending.is_empty() {
-            out.push_str("待办：\n");
+            out.push_str(if en { "Pending:\n" } else { "待办：\n" });
             for item in &self.pending {
                 out.push_str(&format!("- {}\n", item.trim()));
             }
         }
         if !self.failed.is_empty() {
-            out.push_str("失败尝试（不要在没有新依据时重复）：\n");
+            out.push_str(if en {
+                "Failed attempts (do not repeat without new evidence):\n"
+            } else {
+                "失败尝试（不要在没有新依据时重复）：\n"
+            });
             for item in &self.failed {
                 out.push_str(&format!("- {}\n", item.trim()));
             }
         }
         if !self.current_step.trim().is_empty() {
-            out.push_str(&format!("当前步骤：{}\n", self.current_step.trim()));
+            out.push_str(&format!(
+                "{}{}\n",
+                if en { "Current step: " } else { "当前步骤：" },
+                self.current_step.trim()
+            ));
         }
         out
     }

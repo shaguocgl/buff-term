@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { createHost, deleteHost, saveHostKeyPassphrase, saveHostPassword, testHostConnection, updateHost } from '../api';
+import { useT } from '../i18n';
 import type { Host, HostInput, TestResult } from '../types';
 import { fmtError } from '../utils/errors';
 import Modal from './Modal';
@@ -13,6 +14,7 @@ interface Props {
 }
 
 export default function HostForm({ initial, onSaved, onCancel }: Props) {
+  const t = useT();
   const [name, setName] = useState(initial?.name ?? '');
   const [address, setAddress] = useState(initial?.address ?? '');
   const [port, setPort] = useState(initial?.port.toString() ?? '22');
@@ -35,12 +37,12 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
     setError(null);
     setTestResult(null);
     if (!address.trim() || !username.trim()) {
-      setError('请先填写地址和用户名');
+      setError(t('hostForm.needAddressUser'));
       return;
     }
     const portNum = Number.parseInt(port, 10);
     if (Number.isNaN(portNum) || portNum < 1 || portNum > 65535) {
-      setError('端口无效');
+      setError(t('hostForm.badPort'));
       return;
     }
     const hostLike: Host = {
@@ -73,12 +75,12 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
     e.preventDefault();
     setError(null);
     if (!name.trim() || !address.trim() || !username.trim()) {
-      setError('名称、地址、用户名不能为空');
+      setError(t('hostForm.needFields'));
       return;
     }
     const portNum = Number.parseInt(port, 10);
     if (Number.isNaN(portNum) || portNum < 1 || portNum > 65535) {
-      setError('端口无效');
+      setError(t('hostForm.badPort'));
       return;
     }
     const input: HostInput = {
@@ -115,7 +117,9 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
             await saveHostPassword(host.id, password);
           } catch (e) {
             await deleteHost(host.id).catch(() => {});
-            setError(`主机信息已保存但密码写入失败，已撤销本次新建：${fmtError(e)}`);
+            setError(
+              t('hostForm.passwordSaveFailedNew', { err: fmtError(e) }),
+            );
             setSaving(false);
             return;
           }
@@ -125,7 +129,9 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
             await saveHostKeyPassphrase(host.id, passphrase);
           } catch (e) {
             await deleteHost(host.id).catch(() => {});
-            setError(`主机信息已保存但私钥口令写入失败，已撤销本次新建：${fmtError(e)}`);
+            setError(
+              t('hostForm.passphraseSaveFailedNew', { err: fmtError(e) }),
+            );
             setSaving(false);
             return;
           }
@@ -136,7 +142,9 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
           await saveHostPassword(initial.id, password);
         } catch (e) {
           // 编辑场景：主机信息已更新（幂等），仅密码未保存，停留表单便于重试
-          setError(`主机已保存，但密码写入系统钥匙串失败：${fmtError(e)}`);
+          setError(
+            t('hostForm.passwordSaveFailedEdit', { err: fmtError(e) }),
+          );
           setSaving(false);
           return;
         }
@@ -145,7 +153,9 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
         try {
           await saveHostKeyPassphrase(initial.id, passphrase);
         } catch (e) {
-          setError(`主机已保存，但私钥口令写入失败：${fmtError(e)}`);
+          setError(
+            t('hostForm.passphraseSaveFailedEdit', { err: fmtError(e) }),
+          );
           setSaving(false);
           return;
         }
@@ -159,24 +169,24 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
 
   return (
     <Modal
-      title={initial ? '编辑主机' : '新建主机'}
-      subtitle="支持密钥认证与密码认证（密码保存到系统钥匙串）"
+      title={initial ? t('hostForm.titleEdit') : t('hostForm.titleNew')}
+      subtitle={t('hostForm.subtitle')}
       onClose={onCancel}
     >
       <form className="host-form" onSubmit={handleSubmit}>
         <label>
-          名称
+          {t('hostForm.name')}
           <input
             autoFocus
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="生产服务器"
+            placeholder={t('hostForm.namePlaceholder')}
           />
         </label>
 
         <div className="form-grid">
           <label>
-            地址
+            {t('hostForm.address')}
             <input
               value={address}
               onChange={(e) => setAddress(e.target.value)}
@@ -184,7 +194,7 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
             />
           </label>
           <label>
-            端口
+            {t('hostForm.port')}
             <input
               value={port}
               onChange={(e) => setPort(e.target.value)}
@@ -195,7 +205,7 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
         </div>
 
         <label>
-          用户名
+          {t('hostForm.username')}
           <input
             value={username}
             onChange={(e) => setUsername(e.target.value)}
@@ -204,21 +214,21 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
         </label>
 
         <label>
-          认证方式
+          {t('hostForm.auth')}
           <div className="segmented">
             <button
               type="button"
               className={authType === 'key' ? 'seg active' : 'seg'}
               onClick={() => setAuthType('key')}
             >
-              <KeyIcon size={14} /> 密钥
+              <KeyIcon size={14} /> {t('hostForm.authKey')}
             </button>
             <button
               type="button"
               className={authType === 'password' ? 'seg active' : 'seg'}
               onClick={() => setAuthType('password')}
             >
-              <ShieldIcon size={14} /> 密码
+              <ShieldIcon size={14} /> {t('hostForm.authPassword')}
             </button>
           </div>
         </label>
@@ -226,15 +236,15 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
         {authType === 'key' ? (
           <>
             <label>
-              私钥路径
+              {t('hostForm.keyPath')}
               <input
                 value={keyPath}
                 onChange={(e) => setKeyPath(e.target.value)}
-                placeholder="~/.ssh/id_ed25519（留空使用默认）"
+                placeholder={t('hostForm.keyPathPlaceholder')}
               />
             </label>
             <label>
-              私钥口令
+              {t('hostForm.passphrase')}
               <div className="password-input-wrap">
                 <input
                   type={showPassphrase ? 'text' : 'password'}
@@ -242,14 +252,18 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
                   onChange={(e) => setPassphrase(e.target.value)}
                   placeholder={
                     initial
-                      ? '留空保持不变；私钥无口令则无需填写'
-                      : '私钥有口令时填写，否则留空'
+                      ? t('hostForm.passphrasePlaceholderEdit')
+                      : t('hostForm.passphrasePlaceholderNew')
                   }
                 />
                 <button
                   type="button"
                   className="password-eye"
-                  title={showPassphrase ? '隐藏口令' : '显示口令'}
+                  title={
+                    showPassphrase
+                      ? t('hostForm.hidePassphrase')
+                      : t('hostForm.showPassphrase')
+                  }
                   onClick={() => setShowPassphrase((v) => !v)}
                 >
                   {showPassphrase ? <EyeOffIcon size={16} /> : <EyeIcon size={16} />}
@@ -259,7 +273,7 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
           </>
         ) : (
           <label>
-            密码
+            {t('hostForm.authPassword')}
             <div className="password-input-wrap">
               <input
                 type={showPassword ? 'text' : 'password'}
@@ -267,14 +281,18 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder={
                   initial
-                    ? '留空保持原密码不变；若从未保存过，留空则连接时需手动输入'
-                    : '留空则连接时手动输入'
+                    ? t('hostForm.passwordPlaceholderEdit')
+                    : t('hostForm.passwordPlaceholderNew')
                 }
               />
               <button
                 type="button"
                 className="password-eye"
-                title={showPassword ? '隐藏密码' : '显示密码'}
+                title={
+                  showPassword
+                    ? t('hostForm.hidePassword')
+                    : t('hostForm.showPassword')
+                }
                 onClick={() => setShowPassword((v) => !v)}
               >
                 {showPassword ? <EyeOffIcon size={16} /> : <EyeIcon size={16} />}
@@ -284,11 +302,11 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
         )}
 
         <label>
-          备注
+          {t('hostForm.notes')}
           <input
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
-            placeholder="可选"
+            placeholder={t('hostForm.notesPlaceholder')}
           />
         </label>
 
@@ -306,13 +324,13 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
             onClick={handleTest}
             disabled={testing || saving}
           >
-            {testing ? '测试中…' : '测试连接'}
+            {testing ? t('common.testing') : t('hostForm.test')}
           </button>
           <button type="button" className="btn ghost" onClick={onCancel}>
-            取消
+            {t('common.cancel')}
           </button>
           <button type="submit" className="btn primary" disabled={saving}>
-            {saving ? '保存中…' : '保存'}
+            {saving ? t('common.saving') : t('common.save')}
           </button>
         </div>
       </form>

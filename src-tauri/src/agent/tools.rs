@@ -3,6 +3,7 @@
 
 use super::trend::format_metric_trend;
 use crate::db::Db;
+use crate::i18n::{is_en, t};
 use crate::models::{AiProvider, Host};
 use crate::russh::RusshManager;
 use crate::safety::{normalize_tool, sanitize};
@@ -17,22 +18,92 @@ pub(crate) fn system_prompt(
 ) -> String {
     // 审批规则的说明必须与后端实际判定一致，避免误导模型：
     // - all：全部需要批准；smart：只读自动执行，写/危险命令需批准；none：直接执行
-    let approval_rule = match permission_mode {
-        crate::models::PermissionMode::All => {
+    // 提示词语言跟随界面语言：中文界面用中文提示词，英文界面用英文提示词
+    let approval_rule = match (permission_mode, is_en()) {
+        (crate::models::PermissionMode::All, false) => {
             "所有 exec_command 都会经过用户批准，获批后才执行，请先说明意图。".to_string()
         }
-        crate::models::PermissionMode::Smart => {
+        (crate::models::PermissionMode::All, true) => {
+            "Every exec_command goes through user approval and only runs once approved; state your intent first."
+                .to_string()
+        }
+        (crate::models::PermissionMode::Smart, false) => {
             "exec_command 中只读命令会自动执行；写操作（修改、删除、安装、下载等）、\
              命中危险规则或你标记 requires_approval 的命令会经过用户批准，获批后才执行，\
              请先说明意图。"
                 .to_string()
         }
-        crate::models::PermissionMode::None => {
+        (crate::models::PermissionMode::Smart, true) => {
+            "Read-only exec_command calls run automatically; write operations (modifying, deleting, \
+             installing, downloading, …), commands matching dangerous rules, and commands you mark \
+             with requires_approval go through user approval and only run once approved; state your \
+             intent first."
+                .to_string()
+        }
+        (crate::models::PermissionMode::None, false) => {
             "exec_command 会直接执行、不再逐条审批；但破坏性操作（删除、格式化、改权限、\
              停服务等）仍应明确提示风险并给出命令原文。"
                 .to_string()
         }
+        (crate::models::PermissionMode::None, true) => {
+            "exec_command runs directly without per-command approval; for destructive operations \
+             (deleting, formatting, changing permissions, stopping services, …) still call out the \
+             risk explicitly and show the exact command."
+                .to_string()
+        }
     };
+    if is_en() {
+        return format!(
+            "You are buffTerm, running inside the user's local SSH management tool, helping the user \
+             manage remote servers.\n\
+             Capabilities are currently provided by the {} platform, and the configured underlying \
+             model is {}.\n\
+             Currently connected server: {} ({}@{}:{})\n\
+             Available tools: exec_command (run a command), read_file (read a file), list_dir (list a \
+             directory), resource_usage (resource usage), query_history (query historical metric \
+             trends), update_task_plan (update the task plan).\n\
+             Rules:\n\
+             1. {}\n\
+             2. Command output may be truncated; answer only from the information you have and never \
+                make things up.\n\
+             3. For destructive operations (deleting, formatting, changing permissions, stopping \
+                services, …) call out the risk explicitly and show the exact command.\n\
+             4. Answer in English, concisely, professionally and in a well-structured way.\n\
+             5. Identity: when the user asks which model you are or who develops you, answer truthfully \
+                that you are driven by {} with the configured model {}, and that you are buffTerm; do \
+                not claim to be any other AI assistant (such as ChatGPT, Claude, Gemini, …) and do not \
+                invent version numbers or vendor information.\n\
+             6. Tool call conventions: the tool name must be one of exec_command, read_file, list_dir, \
+                resource_usage, query_history, update_task_plan; every tool call must include a \
+                non-empty name field, never invent new tool names, and put parameters in arguments (a \
+                JSON object).\n\
+             7. When the user asks about changes — \"how has it been lately\", \"is anything wrong\", \
+                \"has it slowed down\" — prefer query_history to look at trends instead of only calling \
+                resource_usage for the current value. Trends are more diagnostic than absolute values: \
+                a disk that grew from 30% to 78% is more urgent than one sitting steady at 78%. \
+                query_history returns historical series, slopes and extrapolated predictions (e.g. \
+                \"at the current rate, X will reach 90% in N days\"), which a single snapshot cannot \
+                provide. Choose granularity and window_hours to match your goal: minute + a small window \
+                for detail over the last hours; hour + a 24–48 hour window for today's trend; day + a \
+                larger window (up to 90 days) for long-term trends and capacity planning. If unsure, \
+                omit granularity and it will be chosen from window_hours.\n\
+             8. For multi-step tasks (installing, deploying, migrating, troubleshooting, bulk edits) \
+                call update_task_plan first to establish a plan; update the plan after every completed \
+                or failed step, and record failed attempts in `failed` with the reason. Never repeat an \
+                approach that already failed without new evidence; the plan is injected every round and \
+                is not lost when history is compressed. update_task_plan only updates the local task \
+                plan, does not touch servers and needs no approval.",
+            provider.name,
+            model,
+            host.name,
+            host.username,
+            host.address,
+            host.port,
+            approval_rule,
+            provider.name,
+            model
+        );
+    }
     format!(
         "你是 buffTerm，运行在用户本地的 SSH 管理工具中，帮助用户管理远程服务器。\n\
          当前由 {} 平台提供能力，当前配置的底层模型是 {}。\n\
@@ -76,13 +147,19 @@ pub(crate) fn tools_schema() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "exec_command",
-                "description": "在远程服务器上执行一条 shell 命令并返回输出。默认超时 30 秒。",
+                "description": t(
+                    "在远程服务器上执行一条 shell 命令并返回输出。默认超时 30 秒。",
+                    "Run a shell command on the remote server and return its output. Default timeout 30s."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "要执行的 shell 命令" },
-                        "timeout_secs": { "type": "number", "description": "超时秒数，默认 30" },
-                        "requires_approval": { "type": "boolean", "description": "如果你认为该命令有危险（删除、格式化、修改系统状态、影响服务等），设为 true，便于用户安全策略处理" }
+                        "command": { "type": "string", "description": t("要执行的 shell 命令", "Shell command to run") },
+                        "timeout_secs": { "type": "number", "description": t("超时秒数，默认 30", "Timeout in seconds, default 30") },
+                        "requires_approval": { "type": "boolean", "description": t(
+                            "如果你认为该命令有危险（删除、格式化、修改系统状态、影响服务等），设为 true，便于用户安全策略处理",
+                            "Set to true if you consider the command dangerous (deleting, formatting, changing system state, affecting services, …) so the user's safety policy can handle it"
+                        ) }
                     },
                     "required": ["command"]
                 }
@@ -92,11 +169,11 @@ pub(crate) fn tools_schema() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "读取远程服务器上的文件内容",
+                "description": t("读取远程服务器上的文件内容", "Read the contents of a file on the remote server"),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "远程文件路径" }
+                        "path": { "type": "string", "description": t("远程文件路径", "Remote file path") }
                     },
                     "required": ["path"]
                 }
@@ -106,11 +183,11 @@ pub(crate) fn tools_schema() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "list_dir",
-                "description": "列出远程服务器上的目录内容",
+                "description": t("列出远程服务器上的目录内容", "List the contents of a directory on the remote server"),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "目录路径，默认当前目录" }
+                        "path": { "type": "string", "description": t("目录路径，默认当前目录", "Directory path, defaults to the current directory") }
                     }
                 }
             }
@@ -119,7 +196,10 @@ pub(crate) fn tools_schema() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "resource_usage",
-                "description": "查看服务器磁盘、内存、负载和 CPU/内存占用最高的进程",
+                "description": t(
+                    "查看服务器磁盘、内存、负载和 CPU/内存占用最高的进程",
+                    "Show server disk, memory, load and the processes using the most CPU/memory"
+                ),
                 "parameters": { "type": "object", "properties": {} }
             }
         },
@@ -127,23 +207,35 @@ pub(crate) fn tools_schema() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "query_history",
-                "description": "查询当前服务器的历史指标趋势。用于判断资源使用是否在持续增长、是否有周期性波动、是否接近告警阈值。当用户问'最近怎么样'、'有没有问题'、'变慢了吗'时优先调用此工具，而不是只看当下快照。",
+                "description": t(
+                    "查询当前服务器的历史指标趋势。用于判断资源使用是否在持续增长、是否有周期性波动、是否接近告警阈值。当用户问'最近怎么样'、'有没有问题'、'变慢了吗'时优先调用此工具，而不是只看当下快照。",
+                    "Query historical metric trends for the current server. Use it to tell whether resource usage keeps growing, fluctuates periodically, or is approaching a warning threshold. When the user asks 'how has it been lately', 'is anything wrong' or 'has it slowed down', prefer this tool over a single current snapshot."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "metric": {
                             "type": "string",
                             "enum": ["cpu", "mem", "load", "disk"],
-                            "description": "要查询的指标：cpu=CPU使用率, mem=内存使用率, load=系统负载, disk=磁盘使用率"
+                            "description": t(
+                                "要查询的指标：cpu=CPU使用率, mem=内存使用率, load=系统负载, disk=磁盘使用率",
+                                "Metric to query: cpu=CPU usage, mem=memory usage, load=system load, disk=disk usage"
+                            )
                         },
                         "window_hours": {
                             "type": "number",
-                            "description": "回溯多少小时，默认 168（7 天），最大 2160（90 天）"
+                            "description": t(
+                                "回溯多少小时，默认 168（7 天），最大 2160（90 天）",
+                                "How many hours to look back; default 168 (7 days), maximum 2160 (90 days)"
+                            )
                         },
                         "granularity": {
                             "type": "string",
                             "enum": ["minute", "hour", "day"],
-                            "description": "数据聚合粒度：minute=原始采样点（适合看最近几小时的细节波动），hour=按小时取均值（适合看当天走势），day=按天取均值（适合看多天/长周期趋势）。不填时按 window_hours 自动选择：≤6 小时用 minute，≤48 小时用 hour，否则用 day。"
+                            "description": t(
+                                "数据聚合粒度：minute=原始采样点（适合看最近几小时的细节波动），hour=按小时取均值（适合看当天走势），day=按天取均值（适合看多天/长周期趋势）。不填时按 window_hours 自动选择：≤6 小时用 minute，≤48 小时用 hour，否则用 day。",
+                                "Data aggregation granularity: minute=raw samples (good for detail over the last hours), hour=hourly averages (good for today's trend), day=daily averages (good for multi-day/long-term trends). When omitted it is chosen from window_hours: minute for ≤6h, hour for ≤48h, otherwise day."
+                            )
                         }
                     },
                     "required": ["metric"]
@@ -154,32 +246,41 @@ pub(crate) fn tools_schema() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "update_task_plan",
-                "description": "创建或更新当前任务的结构化计划。多步任务（安装、部署、迁移、排障）开始前必须先调用一次，并在每完成或失败一步后更新。该工具只更新本地任务台账，不访问服务器、不需要审批。",
+                "description": t(
+                    "创建或更新当前任务的结构化计划。多步任务（安装、部署、迁移、排障）开始前必须先调用一次，并在每完成或失败一步后更新。该工具只更新本地任务台账，不访问服务器、不需要审批。",
+                    "Create or update the structured plan for the current task. Call it once before starting a multi-step task (installing, deploying, migrating, troubleshooting) and update it after every completed or failed step. It only updates the local task plan, does not touch servers and needs no approval."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "goal": { "type": "string", "description": "一句话目标" },
+                        "goal": { "type": "string", "description": t("一句话目标", "One-sentence goal") },
                         "constraints": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "必须遵守的约束，如端口、版本、不能重启的服务等"
+                            "description": t(
+                                "必须遵守的约束，如端口、版本、不能重启的服务等",
+                                "Constraints that must be respected, e.g. ports, versions, services that must not be restarted"
+                            )
                         },
                         "completed": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "已完成的步骤"
+                            "description": t("已完成的步骤", "Completed steps")
                         },
                         "pending": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "待办步骤"
+                            "description": t("待办步骤", "Pending steps")
                         },
                         "failed": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "失败尝试及原因，避免重复同一做法"
+                            "description": t(
+                                "失败尝试及原因，避免重复同一做法",
+                                "Failed attempts and why they failed, to avoid repeating the same approach"
+                            )
                         },
-                        "current_step": { "type": "string", "description": "当前正在执行的步骤" }
+                        "current_step": { "type": "string", "description": t("当前正在执行的步骤", "Step currently being executed") }
                     },
                     "required": ["goal"]
                 }
@@ -241,7 +342,7 @@ pub(crate) async fn execute_tool(
             let command = args
                 .get("command")
                 .and_then(|c| c.as_str())
-                .ok_or_else(|| "缺少 command 参数".to_string())?;
+                .ok_or_else(|| t("缺少 command 参数", "Missing command parameter").to_string())?;
             let timeout = args
                 .get("timeout_secs")
                 .and_then(|t| t.as_u64())
@@ -256,7 +357,7 @@ pub(crate) async fn execute_tool(
             let path = args
                 .get("path")
                 .and_then(|p| p.as_str())
-                .ok_or_else(|| "缺少 path 参数".to_string())?;
+                .ok_or_else(|| t("缺少 path 参数", "Missing path parameter").to_string())?;
             let out = russh
                 .exec_cancellable(
                     host,
@@ -280,7 +381,11 @@ pub(crate) async fn execute_tool(
             Ok(sanitize(&format_exec_output(&out)))
         }
         "resource_usage" => {
-            let script = "echo '-- 磁盘 --'; df -h; echo; echo '-- 内存 --'; (free -h 2>/dev/null || vm_stat); echo; echo '-- 负载 --'; uptime; echo; echo '-- TOP 进程 --'; (ps aux --sort=-%mem 2>/dev/null || ps aux) | head -8";
+            let script = if is_en() {
+                "echo '-- Disk --'; df -h; echo; echo '-- Memory --'; (free -h 2>/dev/null || vm_stat); echo; echo '-- Load --'; uptime; echo; echo '-- TOP processes --'; (ps aux --sort=-%mem 2>/dev/null || ps aux) | head -8"
+            } else {
+                "echo '-- 磁盘 --'; df -h; echo; echo '-- 内存 --'; (free -h 2>/dev/null || vm_stat); echo; echo '-- 负载 --'; uptime; echo; echo '-- TOP 进程 --'; (ps aux --sort=-%mem 2>/dev/null || ps aux) | head -8"
+            };
             let out = russh
                 .exec_cancellable(host, script, std::time::Duration::from_secs(25), cancel)
                 .await?;
@@ -312,7 +417,12 @@ pub(crate) async fn execute_tool(
                 (((window_h * 3600.0 / 60.0) as u64).saturating_add(500)).min(50_000) as u32;
             let rows = db
                 .list_metrics(&host.id, since, limit)
-                .map_err(|e| format!("查询历史指标失败: {e}"))?;
+                .map_err(|e| {
+                    format!(
+                        "{}: {e}",
+                        t("查询历史指标失败", "Failed to query historical metrics")
+                    )
+                })?;
             Ok(format_metric_trend(metric, &rows, window_h, granularity))
         }
         _ => {
@@ -321,11 +431,18 @@ pub(crate) async fn execute_tool(
             if normalized != name {
                 return Box::pin(execute_tool(db, russh, host, normalized, args, cancel)).await;
             }
-            eprintln!("[agent] 未知工具调用: {name}，参数: {args}");
+            eprintln!("[agent] {}: {name}, args: {args}", t("未知工具调用", "Unknown tool call"));
             Err(format!(
-                "未知工具: {name}。可用工具：exec_command（执行命令）、read_file（读文件）、\
-                 list_dir（列目录）、resource_usage（资源占用）、query_history（查询历史指标趋势）。\
-                 请改用这些工具重试。"
+                "{}: {name}。{}",
+                t("未知工具", "Unknown tool"),
+                t(
+                    "可用工具：exec_command（执行命令）、read_file（读文件）、\
+                     list_dir（列目录）、resource_usage（资源占用）、query_history（查询历史指标趋势）。\
+                     请改用这些工具重试。",
+                    "Available tools: exec_command (run a command), read_file (read a file), \
+                     list_dir (list a directory), resource_usage (resource usage), \
+                     query_history (query historical metric trends). Please retry with these tools."
+                )
             ))
         }
     }

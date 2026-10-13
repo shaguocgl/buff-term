@@ -7,6 +7,7 @@ import {
   resetTerminalRules,
   saveTerminalGuardSettings,
 } from '../api';
+import { useT } from '../i18n';
 import type { TerminalGuardSettings, TerminalRule } from '../types';
 import { fmtError } from '../utils/errors';
 import ConfirmModal from './ConfirmModal';
@@ -18,6 +19,7 @@ interface Props {
 }
 
 export default function TerminalGuardModal({ onClose }: Props) {
+  const t = useT();
   const [settings, setSettings] = useState<TerminalGuardSettings | null>(null);
   const [rules, setRules] = useState<TerminalRule[]>([]);
   const [ruleInput, setRuleInput] = useState('');
@@ -55,7 +57,7 @@ export default function TerminalGuardModal({ onClose }: Props) {
   const handleTimeout = async () => {
     const secs = Number(timeoutInput);
     if (!Number.isFinite(secs) || secs < 10) {
-      setError('超时秒数需为 ≥10 的数字');
+      setError(t('guard.timeoutInvalid'));
       return;
     }
     setError(null);
@@ -105,8 +107,8 @@ export default function TerminalGuardModal({ onClose }: Props) {
 
   return (
     <Modal
-      title="终端防护"
-      subtitle="交互终端输入高危命令时，回车前拦截并弹窗确认"
+      title={t('guard.title')}
+      subtitle={t('guard.subtitle')}
       className="modal-wide"
       onClose={onClose}
     >
@@ -114,24 +116,24 @@ export default function TerminalGuardModal({ onClose }: Props) {
         <div className="mcp-section">
           <div className="mcp-section-title">
             <strong>
-              <ShieldIcon size={14} /> 危险命令拦截
+              <ShieldIcon size={14} /> {t('guard.sectionTitle')}
             </strong>
-            <span>命中规则的命令需确认后才真正执行</span>
+            <span>{t('guard.sectionHint')}</span>
           </div>
           <div className="form-row-inline guard-toggle-row">
             <span className="form-label">
-              {settings?.enabled ? '已启用' : '未启用'}
+              {settings?.enabled ? t('guard.enabled') : t('guard.disabled')}
             </span>
             <button
               className={`switch${settings?.enabled ? ' on' : ''}`}
               onClick={() => updateSettings({ enabled: !settings?.enabled })}
-              aria-label="启用终端危险命令拦截"
+              aria-label={t('guard.toggleAria')}
             >
               <span />
             </button>
           </div>
           <div className="form-row-inline guard-timeout-row">
-            <span className="form-label">审批超时（秒）</span>
+            <span className="form-label">{t('guard.timeoutLabel')}</span>
             <div className="guard-timeout-input">
               <input
                 type="number"
@@ -147,16 +149,13 @@ export default function TerminalGuardModal({ onClose }: Props) {
               />
             </div>
           </div>
-          <p className="mcp-hint">
-            拦截只防误操作，不构成安全边界；vim/htop 等全屏应用内的命令、方向键历史回放
-            无法可靠识别（默认放行）。
-          </p>
+          <p className="mcp-hint">{t('guard.timeoutHint')}</p>
         </div>
 
         <div className="mcp-section">
           <div className="mcp-section-title">
-            <strong>自定义危险命令</strong>
-            <span>子串匹配，无需通配符，如 rm -rf</span>
+            <strong>{t('guard.customTitle')}</strong>
+            <span>{t('guard.customHint')}</span>
           </div>
           <div className="rule-add">
             <input
@@ -168,14 +167,14 @@ export default function TerminalGuardModal({ onClose }: Props) {
                   handleAddRule();
                 }
               }}
-              placeholder="如 rm -rf，子串匹配，大小写不敏感"
+              placeholder={t('guard.addPlaceholder')}
             />
             <button
               className="btn secondary small"
               onClick={handleAddRule}
               disabled={!ruleInput.trim()}
             >
-              添加
+              {t('common.add')}
             </button>
           </div>
           {customs.length > 0 ? (
@@ -185,7 +184,7 @@ export default function TerminalGuardModal({ onClose }: Props) {
                   <code>{rule.pattern}</code>
                   <button
                     className="rule-del"
-                    title="删除"
+                    title={t('common.delete')}
                     onClick={() => handleDeleteRule(rule.id)}
                   >
                     ×
@@ -194,21 +193,21 @@ export default function TerminalGuardModal({ onClose }: Props) {
               ))}
             </div>
           ) : (
-            <p className="mcp-hint">还没有自定义规则。</p>
+            <p className="mcp-hint">{t('guard.noCustom')}</p>
           )}
         </div>
 
         <div className="mcp-section">
           <div className="mcp-section-title">
-            <strong>预置危险命令</strong>
+            <strong>{t('guard.builtinTitle')}</strong>
             <span>
-              {builtins.length} 条 · 可单独删除
+              {t('guard.builtinCount', { n: builtins.length })}
               <button
                 className="btn ghost small guard-reset-btn"
                 onClick={handleReset}
-                title="恢复预置规则"
+                title={t('guard.restoreTitle')}
               >
-                <RefreshIcon size={13} /> 恢复预置
+                <RefreshIcon size={13} /> {t('guard.restore')}
               </button>
             </span>
           </div>
@@ -219,7 +218,7 @@ export default function TerminalGuardModal({ onClose }: Props) {
                   <code>{rule.pattern}</code>
                   <button
                     className="rule-del"
-                    title="删除"
+                    title={t('common.delete')}
                     onClick={() => handleDeleteRule(rule.id)}
                   >
                     ×
@@ -228,7 +227,7 @@ export default function TerminalGuardModal({ onClose }: Props) {
               ))}
             </div>
           ) : (
-            <p className="mcp-hint">预置规则已被删除，可点「恢复预置」还原。</p>
+            <p className="mcp-hint">{t('guard.builtinEmpty')}</p>
           )}
         </div>
 
@@ -237,9 +236,9 @@ export default function TerminalGuardModal({ onClose }: Props) {
 
       {showResetConfirm && (
         <ConfirmModal
-          title="恢复预置规则"
-          body="将删除所有预置规则并恢复为默认清单，自定义规则保留。确定吗？"
-          confirmText="恢复预置"
+          title={t('guard.restoreTitle')}
+          body={t('guard.resetBody')}
+          confirmText={t('guard.restore')}
           danger
           onConfirm={doReset}
           onCancel={() => setShowResetConfirm(false)}

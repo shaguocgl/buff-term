@@ -85,7 +85,12 @@ pub async fn start_inspection(
         duration_ms: None,
     };
     db.insert_inspection_report(&report)
-        .map_err(|e| format!("创建巡检任务失败: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "{}: {e}",
+                crate::i18n::t("创建巡检任务失败", "Failed to create the inspection task")
+            )
+        })?;
 
     let report_id = report.id.clone();
     let flag = state.register(report_id.clone());
@@ -104,7 +109,12 @@ pub fn get_inspection_report(
     id: String,
 ) -> Result<Option<InspectionReport>, String> {
     db.get_inspection_report(&id)
-        .map_err(|e| format!("读取巡检报告失败: {e}"))
+        .map_err(|e| {
+            format!(
+                "{}: {e}",
+                crate::i18n::t("读取巡检报告失败", "Failed to read the inspection report")
+            )
+        })
 }
 
 #[tauri::command]
@@ -114,13 +124,23 @@ pub fn list_inspection_reports(
     limit: Option<u32>,
 ) -> Result<Vec<InspectionReport>, String> {
     db.list_inspection_reports(host_id.as_deref(), limit.unwrap_or(30))
-        .map_err(|e| format!("读取巡检报告列表失败: {e}"))
+        .map_err(|e| {
+            format!(
+                "{}: {e}",
+                crate::i18n::t("读取巡检报告列表失败", "Failed to list inspection reports")
+            )
+        })
 }
 
 #[tauri::command]
 pub fn delete_inspection_report(db: State<'_, Arc<Db>>, id: String) -> Result<(), String> {
     db.delete_inspection_report(&id)
-        .map_err(|e| format!("删除巡检报告失败: {e}"))
+        .map_err(|e| {
+            format!(
+                "{}: {e}",
+                crate::i18n::t("删除巡检报告失败", "Failed to delete the inspection report")
+            )
+        })
 }
 
 #[tauri::command]
@@ -131,7 +151,11 @@ pub fn cancel_inspection(
     if state.cancel(&id) {
         Ok(())
     } else {
-        Err("巡检任务不存在或已完成".to_string())
+        Err(crate::i18n::t(
+        "巡检任务不存在或已完成",
+        "The inspection task does not exist or has already finished",
+    )
+    .to_string())
     }
 }
 
@@ -194,11 +218,16 @@ async fn run_inspection_inner(
 ) -> Result<(), String> {
     if cancelled(flag) {
         report.status = "cancelled".to_string();
-        report.error = Some("用户取消".to_string());
+        report.error = Some(crate::i18n::t("用户取消", "Cancelled by the user").to_string());
         return Ok(());
     }
 
-    emit_progress(app, &report.id, "collect", "开始采集服务器基线数据");
+    emit_progress(
+        app,
+        &report.id,
+        "collect",
+        crate::i18n::t("开始采集服务器基线数据", "Collecting server baseline data"),
+    );
     let russh = app.state::<RusshManager>();
     // 巡检开始时先采集一份轻量快照写入历史指标，与巡检报告互补。
     if let Ok(snap) = crate::monitor::collect_russh(host, &russh).await {
@@ -215,31 +244,58 @@ async fn run_inspection_inner(
     let trend_7d = build_trend_summary(&db, &host.id, now_ts, 168);
     let trend_30d = build_trend_summary(&db, &host.id, now_ts, 720);
     if !trend_7d.is_empty() || !trend_30d.is_empty() {
-        baseline_text.push_str("\n\n=== 历史趋势 ===\n");
+        baseline_text.push_str(crate::i18n::t(
+            "\n\n=== 历史趋势 ===\n",
+            "\n\n=== Historical trends ===\n",
+        ));
         if !trend_7d.is_empty() {
-            baseline_text.push_str(&format!("【最近 7 天】\n{}\n", trend_7d));
+            baseline_text.push_str(&format!(
+                "{}{}\n",
+                crate::i18n::t("【最近 7 天】\n", "[last 7 days]\n"),
+                trend_7d
+            ));
         }
         if !trend_30d.is_empty() {
-            baseline_text.push_str(&format!("【最近 30 天】\n{}\n", trend_30d));
+            baseline_text.push_str(&format!(
+                "{}{}\n",
+                crate::i18n::t("【最近 30 天】\n", "[last 30 days]\n"),
+                trend_30d
+            ));
         }
     }
 
     if cancelled(flag) {
         report.status = "cancelled".to_string();
-        report.error = Some("用户取消".to_string());
+        report.error = Some(crate::i18n::t("用户取消", "Cancelled by the user").to_string());
         return Ok(());
     }
 
     let api_key = crate::credentials::get_api_key(&report.provider_id)
-        .ok_or_else(|| "API Key 未找到，请在 AI 配置中检查".to_string())?;
+        .ok_or_else(|| {
+            crate::i18n::t(
+                "API Key 未找到，请在 AI 配置中检查",
+                "API Key not found; check your AI settings",
+            )
+            .to_string()
+        })?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(180))
         .connect_timeout(Duration::from_secs(15))
         .build()
-        .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "{}: {e}",
+                crate::i18n::t("HTTP 客户端初始化失败", "Failed to initialize the HTTP client")
+            )
+        })?;
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
-    emit_progress(app, &report.id, "analyze", "AI 正在分析服务器状态");
+    emit_progress(
+        app,
+        &report.id,
+        "analyze",
+        crate::i18n::t("AI 正在分析服务器状态", "The AI is analyzing the server state"),
+    );
     let inspection_ctx = AiInspectionCtx {
         app,
         client: &client,
@@ -253,7 +309,7 @@ async fn run_inspection_inner(
     let markdown = run_ai_inspection(&inspection_ctx, &baseline_text).await?;
     if cancelled(flag) {
         report.status = "cancelled".to_string();
-        report.error = Some("用户取消".to_string());
+        report.error = Some(crate::i18n::t("用户取消", "Cancelled by the user").to_string());
         return Ok(());
     }
 
@@ -262,18 +318,38 @@ async fn run_inspection_inner(
     report.summary = summary_from_markdown(&clean_markdown);
     report.markdown = clean_markdown.clone();
 
-    emit_progress(app, &report.id, "render", "正在生成 HTML 报告");
+    emit_progress(
+        app,
+        &report.id,
+        "render",
+        crate::i18n::t("正在生成 HTML 报告", "Generating the HTML report"),
+    );
     let body_html = markdown_to_html(&markdown);
     report.html = wrap_email_html(&report.host_label, &report.risk_level, &body_html);
 
-    emit_progress(app, &report.id, "email", "正在发送巡检邮件");
+    emit_progress(
+        app,
+        &report.id,
+        "email",
+        crate::i18n::t("正在发送巡检邮件", "Sending the inspection email"),
+    );
     let settings: AlertSettings = db
         .get_alert_settings()
-        .map_err(|e| format!("读取邮件设置失败: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "{}: {e}",
+                crate::i18n::t("读取邮件设置失败", "Failed to read email settings")
+            )
+        })?;
     if settings.smtp_host.as_deref().map(|s| !s.trim().is_empty()) == Some(true)
         && settings.smtp_to.as_deref().map(|s| !s.trim().is_empty()) == Some(true)
     {
-        let subject = format!("[buffTerm 巡检] {} - {}", report.host_label, report.risk_level);
+        let subject = format!(
+            "{} {} - {}",
+            crate::i18n::t("[buffTerm 巡检]", "[buffTerm inspection]"),
+            report.host_label,
+            report.risk_level
+        );
         if crate::alert::send_html_email(&settings, &subject, &report.html).await.is_ok() {
             report.email_sent = true;
         }
@@ -304,10 +380,17 @@ async fn run_ai_inspection(ctx: &AiInspectionCtx<'_>, baseline: &str) -> Result<
         serde_json::json!({"role": "system", "content": system}),
         serde_json::json!({
             "role": "user",
-            "content": format!(
-                "以下是服务器只读巡检采集结果，请生成完整的中文 Markdown 巡检报告。\n\n{}",
-                baseline
-            )
+            "content": if crate::i18n::is_en() {
+                format!(
+                    "Below are the read-only inspection results collected from the server. Produce a complete Markdown inspection report in English.\n\n{}",
+                    baseline
+                )
+            } else {
+                format!(
+                    "以下是服务器只读巡检采集结果，请生成完整的中文 Markdown 巡检报告。\n\n{}",
+                    baseline
+                )
+            }
         }),
     ];
 
@@ -331,11 +414,26 @@ async fn run_ai_inspection(ctx: &AiInspectionCtx<'_>, baseline: &str) -> Result<
             .map_err(|e| {
                 let msg = e.to_string();
                 if e.is_timeout() {
-                    format!("请求 AI 平台超时（180s），模型可能响应过慢或网络不畅: {msg}")
+                    format!(
+                        "{}: {msg}",
+                        crate::i18n::t(
+                            "请求 AI 平台超时（180s），模型可能响应过慢或网络不畅",
+                            "Timed out waiting for the AI platform (180s); the model may be slow or the network unstable",
+                        )
+                    )
                 } else if e.is_connect() {
-                    format!("无法连接 AI 平台，请检查网络或 Base URL: {msg}")
+                    format!(
+                        "{}: {msg}",
+                        crate::i18n::t(
+                            "无法连接 AI 平台，请检查网络或 Base URL",
+                            "Cannot reach the AI platform; check your network or Base URL",
+                        )
+                    )
                 } else {
-                    format!("请求 AI 平台失败: {msg}")
+                    format!(
+                        "{}: {msg}",
+                        crate::i18n::t("请求 AI 平台失败", "Request to the AI platform failed")
+                    )
                 }
             })?;
         let status = resp.status();
@@ -346,7 +444,12 @@ async fn run_ai_inspection(ctx: &AiInspectionCtx<'_>, baseline: &str) -> Result<
         let value: serde_json::Value = resp
             .json()
             .await
-            .map_err(|e| format!("解析 AI 响应失败: {e}"))?;
+            .map_err(|e| {
+            format!(
+                "{}: {e}",
+                crate::i18n::t("解析 AI 响应失败", "Failed to parse the AI response")
+            )
+        })?;
         let message = value
             .get("choices")
             .and_then(|c| c.get(0))
@@ -366,7 +469,11 @@ async fn run_ai_inspection(ctx: &AiInspectionCtx<'_>, baseline: &str) -> Result<
         let calls = tool_calls.as_array().cloned().unwrap_or_default();
         if calls.is_empty() {
             if content.trim().is_empty() {
-                return Err("AI 未返回巡检报告".to_string());
+                return Err(crate::i18n::t(
+                    "AI 未返回巡检报告",
+                    "The AI did not return an inspection report",
+                )
+                .to_string());
             }
             return Ok(content);
         }
@@ -401,11 +508,23 @@ async fn run_ai_inspection(ctx: &AiInspectionCtx<'_>, baseline: &str) -> Result<
             let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
 
             if name != "inspect_exec" || command.trim().is_empty() {
-                messages.push(tool_message(&id, "只读检查已拒绝：工具名或命令参数无效"));
+                messages.push(tool_message(
+                    &id,
+                    crate::i18n::t(
+                        "只读检查已拒绝：工具名或命令参数无效",
+                        "Read-only check rejected: invalid tool name or command arguments",
+                    ),
+                ));
                 continue;
             }
             if let Err(reason) = validate_readonly_command(command) {
-                messages.push(tool_message(&id, &format!("只读检查已拒绝: {reason}")));
+                messages.push(tool_message(
+                    &id,
+                    &format!(
+                        "{}: {reason}",
+                        crate::i18n::t("只读检查已拒绝", "Read-only check rejected")
+                    ),
+                ));
                 continue;
             }
 
@@ -416,12 +535,21 @@ async fn run_ai_inspection(ctx: &AiInspectionCtx<'_>, baseline: &str) -> Result<
                 .exec(&host, command, Duration::from_secs(20))
                 .await
                 .map(|o| sanitize(&truncate_output(&o.text, 8000)))
-                .unwrap_or_else(|e| format!("执行失败: {e}"));
+                .unwrap_or_else(|e| {
+                    format!(
+                        "{}: {e}",
+                        crate::i18n::t("执行失败", "Execution failed")
+                    )
+                });
             messages.push(tool_message(&id, &out));
         }
     }
 
-    Err("AI 巡检工具调用次数过多，已停止".to_string())
+    Err(crate::i18n::t(
+        "AI 巡检工具调用次数过多，已停止",
+        "Too many AI inspection tool calls; stopped",
+    )
+    .to_string())
 }
 
 fn emit_progress(app: &AppHandle, report_id: &str, phase: &str, message: &str) {
@@ -444,6 +572,58 @@ fn tool_message(id: &str, content: &str) -> serde_json::Value {
 }
 
 fn inspection_system_prompt(host: &Host) -> String {
+    // 巡检提示词跟随界面语言：英文界面生成英文报告，避免报告与界面语言不一致
+    if crate::i18n::is_en() {
+        return format!(
+            "You are buffTerm's server inspection expert and produce a professional, actionable \
+             inspection report for the currently connected server.\n\
+             Current server: {} ({}@{}:{})\n\
+             You may only call the inspect_exec tool for read-only checks; never perform any write \
+             operation.\n\
+             \n\
+             ## Report structure\n\
+             Cover the following dimensions, highlight anomalies found in the collected data, and keep \
+             healthy modules brief instead of padding them out:\n\
+             1. Trends: if the collected data contains a \"=== Historical trends ===\" section, make \
+             predictions from the rate of change (e.g. \"at the current rate the disk fills up in X \
+             days\"). If metrics are stable, simply state \"no abnormal trend\".\n\
+             2. Resource usage\n\
+             3. Running services\n\
+             4. Security baseline\n\
+             5. Malware and cryptomining risk\n\
+             6. Logins and risk events\n\
+             \n\
+             ## Analysis requirements\n\
+             - Permission awareness: the uid at the beginning of the collected data identifies the \
+             current user. If uid is not 0 (not root), sections such as sshd -T, fail2ban, \
+             /etc/sudoers and /var/log/auth.log may be empty due to insufficient permissions; state \
+             \"the current user cannot read this, inspect as root\" instead of misreading empty data as \
+             \"not configured\".\n\
+             - Correlate findings across modules (e.g. a high-CPU process + abnormal outbound \
+             connections + a suspicious crontab appearing together) instead of describing each module \
+             in isolation.\n\
+             - Order remediation advice by risk and blast radius, prioritising items that may cause \
+             outages or security incidents.\n\
+             - Remediation advice must be strictly based on the actual configuration and values in the \
+             collected data; never guess or apply templates: if a setting already meets the recommended \
+             threshold, state \"already satisfied, no action needed\" and quote the actual value; if \
+             data for a setting was not collected, state \"not collected, manual confirmation \
+             recommended\" and do not invent a current value.\n\
+             - Judge malware and cryptomining only from collected evidence (high-CPU processes, \
+             suspicious executables under /tmp|/dev/shm, abnormal outbound connections, cron/systemd \
+             timers, changes to SSH authorization files, …); report only the suspicious points and \
+             evidence and recommend manual confirmation. Never conclude an infection from a process \
+             name alone.\n\
+             \n\
+             Finally give the overall risk level (low/medium/high) and, on a new line at the very end of \
+             the report, output the marker `[RISK:high]`, `[RISK:medium]` or `[RISK:low]`; the marker is \
+             parsed by the program and never shown to the user.",
+            host.name,
+            host.username,
+            host.address,
+            host.port
+        );
+    }
     format!(
         "你是 buffTerm 的服务器巡检专家，负责对当前连接的服务器生成专业、可执行的中文巡检报告。\n\
          当前服务器：{}（{}@{}:{}）\n\
@@ -488,11 +668,14 @@ fn inspection_tools_schema() -> serde_json::Value {
         "type": "function",
         "function": {
             "name": "inspect_exec",
-            "description": "在服务器上执行一条只读巡检命令，返回文本输出。",
+            "description": crate::i18n::t(
+                "在服务器上执行一条只读巡检命令，返回文本输出。",
+                "Run a read-only inspection command on the server and return its text output."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "只读 shell 命令" }
+                    "command": { "type": "string", "description": crate::i18n::t("只读 shell 命令", "Read-only shell command") }
                 },
                 "required": ["command"]
             }
@@ -519,15 +702,28 @@ fn extract_risk_level(markdown: &str) -> (String, String) {
             return (level.to_string(), clean);
         }
     }
-    // fallback：按行匹配包含"风险等级"的行
+    // fallback：按行匹配包含"风险等级"的行（英文界面下同时支持英文表述）
     for line in markdown.lines() {
         let trimmed = line.trim();
-        if trimmed.contains("风险等级") || trimmed.contains("风险评级") {
+        let lower = trimmed.to_lowercase();
+        if trimmed.contains("风险等级")
+            || trimmed.contains("风险评级")
+            || lower.contains("risk level")
+            || lower.contains("overall risk")
+        {
             if trimmed.contains("高") || trimmed.contains("严重") || trimmed.contains("高危") {
                 return ("high".to_string(), markdown.to_string());
             } else if trimmed.contains("中") || trimmed.contains("中等") {
                 return ("medium".to_string(), markdown.to_string());
             } else if trimmed.contains("低") || trimmed.contains("正常") {
+                return ("low".to_string(), markdown.to_string());
+            } else if lower.contains("high") || lower.contains("critical") || lower.contains("severe")
+            {
+                return ("high".to_string(), markdown.to_string());
+            } else if lower.contains("medium") || lower.contains("moderate") {
+                return ("medium".to_string(), markdown.to_string());
+            } else if lower.contains("low") || lower.contains("normal") || lower.contains("healthy")
+            {
                 return ("low".to_string(), markdown.to_string());
             }
         }
@@ -609,13 +805,18 @@ fn wrap_email_html(host_label: &str, risk: &str, body: &str) -> String {
          <body style=\"margin:0;padding:24px;background:#f4f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2430;\">\
          <div style=\"max-width:900px;margin:0 auto;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,.08);\">\
          <div style=\"padding:24px 28px;background:linear-gradient(135deg,#2f3b52,#4f5d78);color:#ffffff;\">\
-         <div style=\"font-size:13px;opacity:.75;\">buffTerm · AI 巡检报告</div>\
+         <div style=\"font-size:13px;opacity:.75;\">{}</div>\
          <div style=\"font-size:22px;font-weight:700;margin-top:4px;\">{}</div>\
-         <div style=\"margin-top:10px;font-size:13px;\">风险等级：<span style=\"display:inline-block;padding:2px 10px;border-radius:999px;background:{};color:#fff;\">{}</span></div>\
+         <div style=\"margin-top:10px;font-size:13px;\">{}：<span style=\"display:inline-block;padding:2px 10px;border-radius:999px;background:{};color:#fff;\">{}</span></div>\
          </div>\
          <div style=\"padding:24px 28px;line-height:1.65;font-size:14px;\">{}</div>\
          </div></body></html>",
-        host_label, risk_color, risk, body
+        crate::i18n::t("buffTerm · AI 巡检报告", "buffTerm · AI inspection report"),
+        host_label,
+        crate::i18n::t("风险等级", "Risk level"),
+        risk_color,
+        risk,
+        body
     )
 }
 
@@ -684,7 +885,7 @@ done
 if command -v systemctl >/dev/null 2>&1; then
   systemctl list-timers --all --no-pager --no-legend 2>/dev/null | head -n 80
 else
-  echo "(systemd timers 不可用，非 systemd 系统)"
+  echo "(systemd timers unavailable - not a systemd system)"
 fi
 echo "-- tmp-shm-executables --"
 find /tmp /dev/shm /var/tmp -maxdepth 2 -type f \( -perm -u+x -o -perm -g+x -o -perm -o+x \) -ls 2>/dev/null | head -n 80
@@ -719,13 +920,13 @@ fn build_trend_summary(db: &Db, host_id: &str, now_ts: u64, window_h: u64) -> St
 
     // 内存
     let mem_points: Vec<(f64, f64)> = rows.iter().map(|r| (r.ts as f64, r.mem_percent)).collect();
-    if let Some(s) = scalar_summary("内存", "%", &mem_points) {
+    if let Some(s) = scalar_summary(crate::i18n::t("内存", "memory"), "%", &mem_points) {
         out.push_str(&s);
     }
 
     // 负载
     let load_points: Vec<(f64, f64)> = rows.iter().map(|r| (r.ts as f64, r.load1)).collect();
-    if let Some(s) = scalar_summary("负载", "", &load_points) {
+    if let Some(s) = scalar_summary(crate::i18n::t("负载", "load"), "", &load_points) {
         out.push_str(&s);
     }
 
@@ -749,7 +950,15 @@ fn build_trend_summary(db: &Db, host_id: &str, now_ts: u64, window_h: u64) -> St
         if points.len() < 3 {
             continue;
         }
-        if let Some(s) = scalar_summary(&format!("磁盘 {}", mount), "%", &points) {
+        if let Some(s) = scalar_summary(
+            &if crate::i18n::is_en() {
+                format!("disk {mount}")
+            } else {
+                format!("磁盘 {}", mount)
+            },
+            "%",
+            &points,
+        ) {
             out.push_str(&s);
         }
     }
@@ -769,17 +978,29 @@ fn scalar_summary(label: &str, unit: &str, points: &[(f64, f64)]) -> Option<Stri
 
     let mut line = format!("{}: {:.1}{} → {:.1}{}", label, first, unit, latest, unit);
     if slope_per_day.abs() < 0.01 {
-        line.push_str("，平稳");
+        line.push_str(crate::i18n::t("，平稳", ", stable"));
     } else if slope_per_day > 0.0 {
-        line.push_str(&format!("，+{:.2}{}/天", slope_per_day, unit));
-        if latest < 90.0 && label != "负载" {
+        line.push_str(&if crate::i18n::is_en() {
+            format!(", +{slope_per_day:.2}{unit}/day")
+        } else {
+            format!("，+{:.2}{}/天", slope_per_day, unit)
+        });
+        if latest < 90.0 && label != crate::i18n::t("负载", "load") {
             let days = (90.0 - latest) / slope_per_day;
             if days > 0.0 && days < 365.0 {
-                line.push_str(&format!("，预计 {:.1} 天后到 90%⚠", days));
+                line.push_str(&if crate::i18n::is_en() {
+                format!(", reaching 90% in about {days:.1} days⚠")
+            } else {
+                format!("，预计 {:.1} 天后到 90%⚠", days)
+            });
             }
         }
     } else {
-        line.push_str(&format!("，{:.2}{}/天（下降）", slope_per_day, unit));
+        line.push_str(&if crate::i18n::is_en() {
+            format!(", {slope_per_day:.2}{unit}/day (falling)")
+        } else {
+            format!("，{:.2}{}/天（下降）", slope_per_day, unit)
+        });
     }
     Some(format!("{}\n", line))
 }

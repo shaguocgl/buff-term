@@ -6,6 +6,7 @@ mod credentials;
 mod db;
 mod guard;
 mod hosts;
+mod i18n;
 mod inspection;
 mod mcp;
 mod models;
@@ -40,13 +41,27 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
             std::fs::create_dir_all(&dir).map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("无法创建数据目录: {e}"))
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!(
+                        "{}: {e}",
+                        crate::i18n::t("无法创建数据目录", "Failed to create the data directory")
+                    ),
+                )
             })?;
             let db = Db::open(&dir.join("buffterm.db")).map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("打开数据库失败: {e}"))
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!(
+                        "{}: {e}",
+                        crate::i18n::t("打开数据库失败", "Failed to open the database")
+                    ),
+                )
             })?;
             let db = std::sync::Arc::new(db);
             crate::db::init_global(db.clone());
+            // 载入已保存的界面语言：决定后续 AI 提示词与后端错误文案
+            crate::i18n::init(&db);
             crate::russh::init_app_handle(app.handle());
             crate::russh::spawn_idle_reaper(app.handle().clone());
             // 迁移旧版本的明文敏感凭据（MCP token / SMTP 密码）到加密存储
@@ -87,10 +102,16 @@ pub fn run() {
                                     let _ = app.state::<Arc<Db>>().save_mcp_service(&config);
                                 }
                             }
-                            Err(e) => eprintln!("[mcp] 读取 MCP 配置失败: {e}"),
+                            Err(e) => eprintln!(
+                                "[mcp] {}: {e}",
+                                crate::i18n::t("读取 MCP 配置失败", "Failed to read MCP config")
+                            ),
                         }
                     }
-                    Err(e) => eprintln!("[mcp] 启动 MCP 服务失败: {e}"),
+                    Err(e) => eprintln!(
+                        "[mcp] {}: {e}",
+                        crate::i18n::t("启动 MCP 服务失败", "Failed to start MCP service")
+                    ),
                 }
             }
             Ok(())
@@ -100,6 +121,8 @@ pub fn run() {
         .manage(monitor::MonitorManager::default())
         .manage(AgentManager::default())
         .invoke_handler(tauri::generate_handler![
+            i18n::get_app_language,
+            i18n::set_app_language,
             ai::list_ai_providers,
             ai::save_ai_provider,
             ai::delete_ai_provider,

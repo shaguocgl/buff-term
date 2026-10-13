@@ -45,6 +45,14 @@ import type {
   SftpWriteOutcome,
 } from './types';
 
+/** 界面语言：zh = 简体中文，en = English（同步给后端，供 AI 提示词与后端文案使用） */
+export type AppLanguage = 'zh' | 'en';
+
+/** 切换后端语言：持久化到设置表，后续提示词与错误文案按该语言生成 */
+export const setAppLanguage = (lang: AppLanguage) =>
+  invoke<void>('set_app_language', { lang });
+export const getAppLanguage = () => invoke<AppLanguage>('get_app_language');
+
 export const listHosts = () => invoke<Host[]>('list_hosts');
 export const createHost = (input: HostInput) => invoke<Host>('create_host', { input });
 export const updateHost = (host: Host) => invoke<void>('update_host', { host });

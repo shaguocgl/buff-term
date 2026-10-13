@@ -18,6 +18,7 @@ import { nginx } from '@codemirror/legacy-modes/mode/nginx';
 import { properties } from '@codemirror/legacy-modes/mode/properties';
 import { dockerFile } from '@codemirror/legacy-modes/mode/dockerfile';
 import { sftpReadFile, sftpWriteFile } from '../api';
+import { useT } from '../i18n';
 import type { Host } from '../types';
 import { fmtError } from '../utils/errors';
 import { baseName, formatBytes, formatMtime } from '../utils/remote';
@@ -122,6 +123,7 @@ export default function FileEditor({
   onClose,
   onNotify,
 }: Props) {
+  const t = useT();
   const [loading, setLoading] = useState(true);
   /** 加载失败原因（大小超限 / 二进制 / 权限等） */
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -265,7 +267,7 @@ export default function FileEditor({
           return;
         }
         if (!res.ok) {
-          setSaveError(res.text || '保存失败');
+          setSaveError(res.text || t('editor.saveFailed'));
           return;
         }
         baselineRef.current = normalizeEol(content);
@@ -275,7 +277,7 @@ export default function FileEditor({
         dirtyRef.current = false;
         setDirty(false);
         onDirtyChange(tabKey, false);
-        onNotify('success', `${baseName(path)} 已保存`);
+        onNotify('success', t('editor.savedToast', { name: baseName(path) }));
       } catch (e) {
         const message = fmtError(e);
         setSaveError(message);
@@ -284,7 +286,7 @@ export default function FileEditor({
         setSaving(false);
       }
     },
-    [host.id, path, mtime, onDirtyChange, onNotify, tabKey],
+    [host.id, path, mtime, onDirtyChange, onNotify, tabKey, t],
   );
 
   // 编辑器内容按原文件换行符取回；未修改时不触发写入（避免无谓的远端写与审计记录）
@@ -322,8 +324,11 @@ export default function FileEditor({
         <span className="file-editor-path" title={path}>
           {path}
           {sensitive && (
-            <span className="file-editor-badge" title="敏感路径，保存需二次确认">
-              敏感
+            <span
+              className="file-editor-badge"
+              title={t('editor.sensitiveTitle')}
+            >
+              {t('editor.sensitive')}
             </span>
           )}
         </span>
@@ -332,48 +337,52 @@ export default function FileEditor({
             className="btn primary small"
             onClick={() => saveRef.current()}
             disabled={!dirty || saving || doc === null}
-            title="保存到远端（Ctrl/Cmd+S）"
+            title={t('editor.saveTitle')}
           >
             <SaveIcon size={13} />
-            {saving ? '保存中…' : dirty ? '保存' : '已保存'}
+            {saving
+              ? t('common.saving')
+              : dirty
+                ? t('common.save')
+                : t('editor.saved')}
           </button>
           <button
             className="btn ghost small"
             onClick={() => (dirty ? setConfirmReload(true) : reload())}
             disabled={loading || saving}
-            title="丢弃本地改动并从远端重新读取"
+            title={t('editor.reloadTitle')}
           >
-            <RefreshIcon size={13} /> 重新加载
+            <RefreshIcon size={13} /> {t('editor.reload')}
           </button>
           <button
             className={`btn ghost small${sftpOpen ? ' active' : ''}`}
             onClick={onToggleSftp}
-            title={sftpOpen ? '收起文件面板' : '展开文件面板，继续浏览目录'}
+            title={sftpOpen ? t('editor.collapseSftp') : t('editor.expandSftp')}
           >
-            <FolderIcon size={13} /> 文件
+            <FolderIcon size={13} /> {t('editor.files')}
           </button>
-          <button className="icon-btn" title="关闭" onClick={onClose}>
+          <button className="icon-btn" title={t('common.close')} onClick={onClose}>
             <XIcon size={14} />
           </button>
         </div>
       </div>
 
       <div className="file-editor-status">
-        {loading && <span>加载中…</span>}
+        {loading && <span>{t('common.loading')}</span>}
         {!loading && loadError && <span className="err">{loadError}</span>}
         {!loading && !loadError && (
           <>
             <span>{formatBytes(size)}</span>
-            <span>修改于 {formatMtime(mtime)}</span>
-            {dirty && <span className="dirty">未保存</span>}
-            {saving && <span>正在写入远端…</span>}
+            <span>{t('editor.modifiedAt', { time: formatMtime(mtime) })}</span>
+            {dirty && <span className="dirty">{t('editor.unsaved')}</span>}
+            {saving && <span>{t('editor.writing')}</span>}
           </>
         )}
         {saveError && (
           <span className="err file-editor-save-error">
             {saveError}
             <button className="btn ghost small" onClick={reload} disabled={saving}>
-              重新加载
+              {t('editor.reload')}
             </button>
           </span>
         )}
@@ -382,17 +391,17 @@ export default function FileEditor({
       <div className="file-editor-body" ref={containerRef}>
         {!loading && loadError && (
           <div className="file-editor-placeholder">
-            <p>无法在内置编辑器中打开该文件</p>
-            <span>可以改用右侧文件面板的「下载」，在本地编辑器中处理。</span>
+            <p>{t('editor.cannotOpen')}</p>
+            <span>{t('editor.cannotOpenHint')}</span>
           </div>
         )}
       </div>
 
       {pendingContent !== null && (
         <ConfirmModal
-          title="写入敏感路径"
-          body={`${path} 属于敏感路径（可能影响登录凭据或开机自启）。确认写入吗？`}
-          confirmText="确认写入"
+          title={t('editor.sensitiveWriteTitle')}
+          body={t('editor.sensitiveWriteBody', { path })}
+          confirmText={t('editor.confirmWrite')}
           danger
           onConfirm={() => {
             const content = pendingContent;
@@ -405,9 +414,9 @@ export default function FileEditor({
 
       {confirmReload && (
         <ConfirmModal
-          title="重新加载"
-          body="本地未保存的改动将丢失，确定从远端重新读取吗？"
-          confirmText="丢弃并重载"
+          title={t('editor.reload')}
+          body={t('editor.reloadBody')}
+          confirmText={t('editor.discardReload')}
           danger
           onConfirm={reload}
           onCancel={() => setConfirmReload(false)}

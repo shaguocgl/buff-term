@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useT } from '../i18n';
 import Modal from './Modal';
 
 interface Props {
@@ -17,10 +18,12 @@ export default function PromptModal({
   label,
   initialValue = '',
   placeholder,
-  confirmText = '确定',
+  confirmText,
   onOk,
   onCancel,
 }: Props) {
+  const t = useT();
+  const confirmLabel = confirmText ?? t('common.ok');
   const [value, setValue] = useState(initialValue);
 
   // 在捕获阶段拦截 Escape：只关闭本输入框，避免连带关闭底下的父级 Modal
@@ -58,10 +61,10 @@ export default function PromptModal({
         </label>
         <div className="tool-actions">
           <button className="btn primary small" onClick={submit}>
-            {confirmText}
+            {confirmLabel}
           </button>
           <button className="btn ghost small" onClick={onCancel}>
-            取消
+            {t('common.cancel')}
           </button>
         </div>
       </div>

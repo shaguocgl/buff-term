@@ -64,12 +64,29 @@ jobs:
           releaseBody: |
             ## 升级内容
 
-            ### 功能面板选择按主机独立记忆
+            ### 中英文双语界面
 
-            - **切换主机互不干扰**：AI / 文件 / 监控 / 巡检面板的选择改为按主机独立记忆——在 A 主机打开监控、在 B 主机打开文件，来回切换各自保持自己的面板，不再互相覆盖。
-            - **修复：新连接的主机不再自动打开其它主机的面板**：连接新主机时不再继承上一台主机打开的面板，默认不打开任何面板，需要时点一下工具栏按钮即可（该主机会记住你的选择）。
-            - **修复：收起状态同样按主机记住**：在某台主机点 X 收起面板后，切走再切回保持收起，不会被其它主机影响。
-            - 面板选择随应用重启保留（按主机持久化）。
+            - **侧边栏一键切换中 / 英**：语言按钮位于侧边栏顶部（主题切换按钮旁），点击即时生效，无需重启。
+            - **整个软件同步切换**：全部界面文字与提示、弹窗、终端内提示、后端错误文案、邮件通知都按当前语言显示。
+            - **AI 提示词跟随语言**：Agent 系统提示词、工具描述、任务台账、历史摘要、趋势分析输出，以及 AI 巡检报告与一键整改步骤，全部按当前语言生成；切换语言后 AI 的下一句回答即改用新语言，无需重开会话。
+            - 新增**英文版 README**（README.en.md），与中文版互链。
+
+            ### 英文界面排版修复
+
+            - 归属地（国家 / 城市）随界面语言显示，英文界面不再出现中文地名。
+            - 修复英文文案更长导致的排版问题：监控信息卡标签与数值重叠、侧边栏「检查更新」行换行、终端工具栏 Disconnect 溢出按钮、AI 配置 Set default 溢出按钮、聊天底部安全级别文案被截断。
+
+            ### 其他
+
+            - 工具定位更新为「**面向 AI 的 SSH 工具与 MCP 服务器**」，侧边栏副标题改为「AI 加持 · SSH + MCP」。
+            - 监控信息卡改为自适应网格布局，标签列按最长标签自动对齐，数值过长时省略显示。
+
+            ### English highlights
+
+            - **Bilingual UI (Chinese / English)** with a one-click language switch in the sidebar: every label, dialog, terminal message, backend error and email follows the selected language.
+            - **AI prompts follow the language** — agent system prompt, tool descriptions, task plan, history digest, trend output, inspection reports and remediation steps. The agent switches language from its next reply, no need to restart the chat.
+            - Fixed English layout issues caused by longer strings (monitoring info card, sidebar update row, terminal toolbar, AI model row, chat security selector).
+            - Geo location (country / city) now follows the UI language.
 
             ## 安装包
 

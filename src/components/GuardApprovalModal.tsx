@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useT } from '../i18n';
 import type { TerminalGuardApproval } from '../types';
 import { ShieldIcon } from './Icons';
 
@@ -14,6 +15,7 @@ export default function GuardApprovalModal({
   deadline,
   onResolve,
 }: Props) {
+  const t = useT();
   const timeoutSecs = Math.max(10, request.timeout_secs);
   const [remaining, setRemaining] = useState(() =>
     Math.max(0, Math.ceil((deadline - Date.now()) / 1000)),
@@ -37,9 +39,9 @@ export default function GuardApprovalModal({
               <span className="guard-approval-icon">
                 <ShieldIcon size={15} />
               </span>{' '}
-              高危命令确认
+              {t('guardApproval.title')}
             </h2>
-            <p>终端输入的命令命中危险规则，执行前需要你确认</p>
+            <p>{t('guardApproval.subtitle')}</p>
           </div>
         </div>
         <div className="mcp-approval-body">
@@ -47,7 +49,7 @@ export default function GuardApprovalModal({
           <pre className="mcp-approval-command">{request.command}</pre>
           {request.matched_patterns.length > 0 && (
             <p className="guard-approval-matched">
-              命中规则：
+              {t('guardApproval.matched')}
               {request.matched_patterns.map((p) => (
                 <code key={p}>{p}</code>
               ))}
@@ -58,7 +60,9 @@ export default function GuardApprovalModal({
               <span style={{ width: `${pct}%` }} />
             </div>
             <span className="approval-countdown-text">
-              {timedOut ? '已超时，按拒绝处理' : `${remaining}s 后未确认将自动拒绝`}
+              {timedOut
+                ? t('guardApproval.timedOut')
+                : t('guardApproval.countdown', { n: remaining })}
             </span>
           </div>
           <div className="tool-actions">
@@ -67,10 +71,10 @@ export default function GuardApprovalModal({
               onClick={() => onResolve(true)}
               disabled={timedOut}
             >
-              确认执行
+              {t('guardApproval.run')}
             </button>
             <button className="btn ghost small" onClick={() => onResolve(false)}>
-              取消
+              {t('common.cancel')}
             </button>
           </div>
         </div>

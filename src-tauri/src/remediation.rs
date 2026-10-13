@@ -70,15 +70,15 @@ pub fn start_remediation_planning(
     let db = app.state::<Arc<Db>>();
     let report = db
         .get_inspection_report(&report_id)
-        .map_err(|e| format!("读取巡检报告失败: {e}"))?
-        .ok_or_else(|| "巡检报告不存在".to_string())?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取巡检报告失败", "Failed to read the inspection report")))?
+        .ok_or_else(|| crate::i18n::t("巡检报告不存在", "The inspection report does not exist").to_string())?;
     if report.status != "success" {
-        return Err("只有成功的巡检报告才能发起整改".to_string());
+        return Err(crate::i18n::t("只有成功的巡检报告才能发起整改", "Only a successful inspection report can start a remediation").to_string());
     }
     let host = db
         .get_host(&report.host_id)
-        .map_err(|e| format!("读取主机失败: {e}"))?
-        .ok_or_else(|| "巡检报告对应的主机不存在".to_string())?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取主机失败", "Failed to read the host")))?
+        .ok_or_else(|| crate::i18n::t("巡检报告对应的主机不存在", "The host of this inspection report does not exist").to_string())?;
     let (provider, model) = crate::ai::resolve_active_ai(&db)?;
 
     let remediation = Remediation {
@@ -100,7 +100,7 @@ pub fn start_remediation_planning(
         duration_ms: None,
     };
     db.upsert_remediation(&remediation)
-        .map_err(|e| format!("创建整改任务失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("创建整改任务失败", "Failed to create the remediation task")))?;
 
     let remediation_id = remediation.id.clone();
     let flag = state.register(remediation_id.clone());
@@ -130,7 +130,7 @@ pub fn get_remediation(
     report_id: String,
 ) -> Result<Option<Remediation>, String> {
     db.get_remediation_by_report(&report_id)
-        .map_err(|e| format!("读取整改记录失败: {e}"))
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取整改记录失败", "Failed to read the remediation record")))
 }
 
 #[tauri::command]
@@ -143,20 +143,20 @@ pub async fn execute_remediation(
     let db = app.state::<Arc<Db>>();
     let mut remediation = db
         .get_remediation(&remediation_id)
-        .map_err(|e| format!("读取整改记录失败: {e}"))?
-        .ok_or_else(|| "整改记录不存在".to_string())?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取整改记录失败", "Failed to read the remediation record")))?
+        .ok_or_else(|| crate::i18n::t("整改记录不存在", "The remediation record does not exist").to_string())?;
     if remediation.status != "plan_ready" {
-        return Err("当前整改记录不可执行".to_string());
+        return Err(crate::i18n::t("当前整改记录不可执行", "This remediation record cannot be executed").to_string());
     }
 
     let full_steps = normalize_steps(steps)?;
     if full_steps.is_empty() {
-        return Err("没有可执行的整改步骤".to_string());
+        return Err(crate::i18n::t("没有可执行的整改步骤", "There are no runnable remediation steps").to_string());
     }
     let host = db
         .get_host(&remediation.host_id)
-        .map_err(|e| format!("读取主机失败: {e}"))?
-        .ok_or_else(|| "整改记录对应的主机不存在".to_string())?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取主机失败", "Failed to read the host")))?
+        .ok_or_else(|| crate::i18n::t("整改记录对应的主机不存在", "The host of this remediation record does not exist").to_string())?;
 
     remediation.steps = full_steps;
     remediation.status = "executing".to_string();
@@ -165,7 +165,7 @@ pub async fn execute_remediation(
     remediation.finished_at = None;
     remediation.duration_ms = None;
     db.update_remediation(&remediation)
-        .map_err(|e| format!("更新整改记录失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("更新整改记录失败", "Failed to update the remediation record")))?;
 
     let flag = state.register(remediation_id.clone());
     let app_for_task = app.clone();
@@ -184,7 +184,7 @@ pub fn cancel_remediation(
     if state.cancel(&remediation_id) {
         Ok(())
     } else {
-        Err("整改任务不存在或已完成".to_string())
+        Err(crate::i18n::t("整改任务不存在或已完成", "The remediation task does not exist or has already finished").to_string())
     }
 }
 
@@ -197,18 +197,18 @@ pub async fn retry_remediation(
     let db = app.state::<Arc<Db>>();
     let mut remediation = db
         .get_remediation(&remediation_id)
-        .map_err(|e| format!("读取整改记录失败: {e}"))?
-        .ok_or_else(|| "整改记录不存在".to_string())?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取整改记录失败", "Failed to read the remediation record")))?
+        .ok_or_else(|| crate::i18n::t("整改记录不存在", "The remediation record does not exist").to_string())?;
     if remediation.status == "success" {
-        return Err("整改已成功，无需重试".to_string());
+        return Err(crate::i18n::t("整改已成功，无需重试", "The remediation already succeeded; no need to retry").to_string());
     }
     if !matches!(remediation.status.as_str(), "failed" | "cancelled") {
-        return Err("当前整改记录不可重新执行".to_string());
+        return Err(crate::i18n::t("当前整改记录不可重新执行", "This remediation record cannot be re-run").to_string());
     }
     let host = db
         .get_host(&remediation.host_id)
-        .map_err(|e| format!("读取主机失败: {e}"))?
-        .ok_or_else(|| "整改记录对应的主机不存在".to_string())?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取主机失败", "Failed to read the host")))?
+        .ok_or_else(|| crate::i18n::t("整改记录对应的主机不存在", "The host of this remediation record does not exist").to_string())?;
 
     prepare_steps_for_retry(&mut remediation.steps);
     remediation.status = "executing".to_string();
@@ -217,7 +217,7 @@ pub async fn retry_remediation(
     remediation.finished_at = None;
     remediation.duration_ms = None;
     db.update_remediation(&remediation)
-        .map_err(|e| format!("更新整改记录失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("更新整改记录失败", "Failed to update the remediation record")))?;
 
     let flag = state.register(remediation_id.clone());
     let app_for_task = app.clone();
@@ -259,7 +259,7 @@ async fn run_planning(task: PlanningTask, mut remediation: Remediation) {
 
     if cancelled(&flag) {
         remediation.status = "cancelled".to_string();
-        remediation.error = Some("用户取消".to_string());
+        remediation.error = Some(crate::i18n::t("用户取消", "Cancelled by the user").to_string());
         let _ = app.state::<Arc<Db>>().update_remediation(&remediation);
         let _ = app.emit(
             "remediation:done",
@@ -285,7 +285,7 @@ async fn run_planning(task: PlanningTask, mut remediation: Remediation) {
 
     if cancelled(&flag) {
         remediation.status = "cancelled".to_string();
-        remediation.error = Some("用户取消".to_string());
+        remediation.error = Some(crate::i18n::t("用户取消", "Cancelled by the user").to_string());
         let _ = app.state::<Arc<Db>>().update_remediation(&remediation);
         let _ = app.emit(
             "remediation:done",
@@ -336,22 +336,24 @@ async fn plan_remediation(
         app,
         &remediation.id,
         "planning",
-        "AI 正在生成整改步骤",
+        crate::i18n::t("AI 正在生成整改步骤", "The AI is generating remediation steps"),
         None,
         None,
     );
 
     let api_key = credentials::get_api_key(provider_id)
-        .ok_or_else(|| "API Key 未找到，请在 AI 配置中检查".to_string())?;
+        .ok_or_else(|| {
+            crate::i18n::t("API Key 未找到，请在 AI 配置中检查", "API Key not found; check your AI settings").to_string()
+        })?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(180))
         .connect_timeout(Duration::from_secs(15))
         .build()
-        .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("HTTP 客户端初始化失败", "Failed to initialize the HTTP client")))?;
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
     let intervention = if remediation.intervention.trim().is_empty() {
-        "（无）".to_string()
+        crate::i18n::t("（无）", "(none)").to_string()
     } else {
         remediation.intervention.clone()
     };
@@ -359,14 +361,25 @@ async fn plan_remediation(
         serde_json::json!({"role": "system", "content": remediation_system_prompt(host)}),
         serde_json::json!({
             "role": "user",
-            "content": format!(
-                "请基于下面这份巡检报告，结合用户的整改干预意见，生成可执行的整改步骤。\n\n\
-                 巡检报告：\n{}\n\n\
-                 用户整改干预意见：\n{}\n\n\
-                 只输出 JSON。",
-                truncate(report_markdown, 24000),
-                intervention
-            )
+            "content": if crate::i18n::is_en() {
+                format!(
+                    "Based on the inspection report below and the user's remediation guidance, generate executable remediation steps.\n\n\
+                     Inspection report:\n{}\n\n\
+                     User remediation guidance:\n{}\n\n\
+                     Output JSON only.",
+                    truncate(report_markdown, 24000),
+                    intervention
+                )
+            } else {
+                format!(
+                    "请基于下面这份巡检报告，结合用户的整改干预意见，生成可执行的整改步骤。\n\n\
+                     巡检报告：\n{}\n\n\
+                     用户整改干预意见：\n{}\n\n\
+                     只输出 JSON。",
+                    truncate(report_markdown, 24000),
+                    intervention
+                )
+            }
         }),
     ];
 
@@ -387,11 +400,26 @@ async fn plan_remediation(
         .map_err(|e| {
             let msg = e.to_string();
             if e.is_timeout() {
-                format!("请求 AI 平台超时（180s），模型可能响应过慢或网络不畅: {msg}")
+                format!(
+                    "{}: {msg}",
+                    crate::i18n::t(
+                        "请求 AI 平台超时（180s），模型可能响应过慢或网络不畅",
+                        "Timed out waiting for the AI platform (180s); the model may be slow or the network unstable",
+                    )
+                )
             } else if e.is_connect() {
-                format!("无法连接 AI 平台，请检查网络或 Base URL: {msg}")
+                format!(
+                    "{}: {msg}",
+                    crate::i18n::t(
+                        "无法连接 AI 平台，请检查网络或 Base URL",
+                        "Cannot reach the AI platform; check your network or Base URL",
+                    )
+                )
             } else {
-                format!("请求 AI 平台失败: {msg}")
+                format!(
+                    "{}: {msg}",
+                    crate::i18n::t("请求 AI 平台失败", "Request to the AI platform failed")
+                )
             }
         })?;
     let status = resp.status();
@@ -402,7 +430,7 @@ async fn plan_remediation(
     let value: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("解析 AI 响应失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("解析 AI 响应失败", "Failed to parse the AI response")))?;
     let content = value
         .get("choices")
         .and_then(|c| c.get(0))
@@ -412,24 +440,24 @@ async fn plan_remediation(
         .unwrap_or("")
         .to_string();
     if content.trim().is_empty() {
-        return Err("AI 未返回整改步骤".to_string());
+        return Err(crate::i18n::t("AI 未返回整改步骤", "The AI did not return remediation steps").to_string());
     }
 
     let plan = extract_json_object(&content)?;
     let plan: AiPlan = serde_json::from_value(plan)
-        .map_err(|e| format!("整改步骤 JSON 结构无效: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("整改步骤 JSON 结构无效", "The remediation steps JSON is invalid")))?;
     if plan.steps.is_empty() {
-        return Err("AI 未返回任何整改步骤".to_string());
+        return Err(crate::i18n::t("AI 未返回任何整改步骤", "The AI returned no remediation steps").to_string());
     }
 
     let mut steps = Vec::new();
     for step in plan.steps {
         let command = step.command.trim().to_string();
         if command.is_empty() {
-            return Err("整改步骤包含空命令".to_string());
+            return Err(crate::i18n::t("整改步骤包含空命令", "A remediation step contains an empty command").to_string());
         }
         if command.chars().count() > 2000 {
-            return Err("整改步骤命令过长".to_string());
+            return Err(crate::i18n::t("整改步骤命令过长", "A remediation step command is too long").to_string());
         }
         let description = step
             .description
@@ -448,7 +476,7 @@ async fn plan_remediation(
         });
     }
 
-    remediation.plan_markdown = plan.summary.unwrap_or_else(|| "整改步骤".to_string());
+    remediation.plan_markdown = plan.summary.unwrap_or_else(|| crate::i18n::t("整改步骤", "Remediation steps").to_string());
     remediation.steps = steps;
     Ok(())
 }
@@ -468,7 +496,7 @@ async fn run_execution(
     for index in pending_step_indexes(&remediation.steps) {
         if cancelled(&flag) {
             remediation.status = "cancelled".to_string();
-            remediation.error = Some("用户取消".to_string());
+            remediation.error = Some(crate::i18n::t("用户取消", "Cancelled by the user").to_string());
             remediation.finished_at = Some(now());
             remediation.duration_ms = Some(started.elapsed().as_millis() as u64);
             let _ = db.update_remediation(&remediation);
@@ -491,7 +519,11 @@ async fn run_execution(
             &app,
             &remediation_id,
             "step_start",
-            &format!("执行步骤 {}：{}", index + 1, description),
+            &if crate::i18n::is_en() {
+                format!("Step {}: {description}", index + 1)
+            } else {
+                format!("执行步骤 {}：{description}", index + 1)
+            },
             Some(index),
             Some(total),
         );
@@ -508,11 +540,14 @@ async fn run_execution(
             Ok(out) => {
                 let mut text = truncate_output(&sanitize(&out.text), 8000);
                 if out.timed_out {
-                    text.push_str("\n[命令执行超时，输出可能不完整]");
+                    text.push_str(crate::i18n::t("\n[命令执行超时，输出可能不完整]", "\n[command timed out; output may be incomplete]"));
                 }
                 if let Some(code) = out.exit_code {
                     if code != 0 {
-                        text.push_str(&format!("\n[退出码 {code}]"));
+                        text.push_str(&format!(
+                        "\n[{}{code}]",
+                        crate::i18n::t("退出码 ", "exit code ")
+                    ));
                     }
                 }
                 let success =
@@ -533,7 +568,12 @@ async fn run_execution(
                         &app,
                         &remediation_id,
                         "step_success",
-                        &format!("步骤 {} 完成", index + 1),
+                        &format!(
+                            "{}{}{}",
+                            crate::i18n::t("步骤 ", "Step "),
+                            index + 1,
+                            crate::i18n::t(" 完成", " completed")
+                        ),
                         Some(index),
                         Some(total),
                     );
@@ -548,7 +588,12 @@ async fn run_execution(
                         Some(text.clone()),
                         duration_ms,
                     );
-                    let message = format!("步骤 {} 执行失败", index + 1);
+                    let message = format!(
+                        "{}{}{}",
+                        crate::i18n::t("步骤 ", "Step "),
+                        index + 1,
+                        crate::i18n::t(" 执行失败", " failed")
+                    );
                     remediation.status = "failed".to_string();
                     remediation.error = Some(message.clone());
                     remediation.finished_at = Some(now());
@@ -586,7 +631,12 @@ async fn run_execution(
                     Some(err.clone()),
                     duration_ms,
                 );
-                let message = format!("步骤 {} 执行失败: {}", index + 1, err);
+                let message = format!(
+                    "{}{}{}: {err}",
+                    crate::i18n::t("步骤 ", "Step "),
+                    index + 1,
+                    crate::i18n::t(" 执行失败", " failed")
+                );
                 remediation.status = "failed".to_string();
                 remediation.error = Some(message.clone());
                 remediation.finished_at = Some(now());
@@ -669,7 +719,8 @@ async fn notify_remediation_result(app: &AppHandle, remediation: &Remediation) {
     }
     let status_label = remediation_status_label(&remediation.status);
     let subject = format!(
-        "[buffTerm 整改] {} - {}",
+        "{} {} - {}",
+            crate::i18n::t("[buffTerm 整改]", "[buffTerm remediation]"),
         remediation.host_label, status_label
     );
     let html = build_remediation_email_html(remediation, status_label);
@@ -678,13 +729,13 @@ async fn notify_remediation_result(app: &AppHandle, remediation: &Remediation) {
 
 fn remediation_status_label(status: &str) -> &str {
     match status {
-        "success" => "整改完成",
-        "failed" => "整改失败",
-        "cancelled" => "已取消",
-        "executing" => "执行中",
-        "plan_ready" => "待执行",
-        "planning" => "生成中",
-        _ => "未知状态",
+        "success" => crate::i18n::t("整改完成", "Remediation complete"),
+        "failed" => crate::i18n::t("整改失败", "Remediation failed"),
+        "cancelled" => crate::i18n::t("已取消", "Cancelled"),
+        "executing" => crate::i18n::t("执行中", "Running"),
+        "plan_ready" => crate::i18n::t("待执行", "Ready to run"),
+        "planning" => crate::i18n::t("生成中", "Generating"),
+        _ => crate::i18n::t("未知状态", "Unknown status"),
     }
 }
 
@@ -698,10 +749,10 @@ fn build_remediation_email_html(remediation: &Remediation, status_label: &str) -
     let mut steps_html = String::new();
     for (index, step) in remediation.steps.iter().enumerate() {
         let step_status = match step.status.as_str() {
-            "success" => "已完成",
-            "error" => "失败",
-            "running" => "执行中",
-            _ => "待执行",
+            "success" => crate::i18n::t("已完成", "Done"),
+            "error" => crate::i18n::t("失败", "Failed"),
+            "running" => crate::i18n::t("执行中", "Running"),
+            _ => crate::i18n::t("待执行", "Pending"),
         };
         let output = step
             .output
@@ -710,10 +761,12 @@ fn build_remediation_email_html(remediation: &Remediation, status_label: &str) -
             .unwrap_or_default();
         steps_html.push_str(&format!(
             "<div style=\"border:1px solid #e5e7eb;border-radius:10px;padding:12px 14px;margin-top:12px;\">\
-             <div style=\"font-weight:650;margin-bottom:4px;\">步骤 {}：{}</div>\
+             <div style=\"font-weight:650;margin-bottom:4px;\">{}{} {}: {}</div>\
              <div style=\"color:#6b7280;font-size:13px;margin-bottom:8px;\">{}</div>\
              <code style=\"font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;background:#f1f3f5;padding:3px 7px;border-radius:5px;word-break:break-all;\">{}</code>\
              {}</div>",
+            crate::i18n::t("步骤", "Step"),
+            if crate::i18n::is_en() { " " } else { "" },
             index + 1,
             step_status,
             esc_html(&step.description),
@@ -726,13 +779,15 @@ fn build_remediation_email_html(remediation: &Remediation, status_label: &str) -
          <body style=\"margin:0;padding:24px;background:#f4f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2430;\">\
          <div style=\"max-width:900px;margin:0 auto;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,.08);\">\
          <div style=\"padding:24px 28px;background:linear-gradient(135deg,#2f3b52,#4f5d78);color:#ffffff;\">\
-         <div style=\"font-size:13px;opacity:.75;\">buffTerm · 一键整改结果</div>\
+         <div style=\"font-size:13px;opacity:.75;\">{}</div>\
          <div style=\"font-size:22px;font-weight:700;margin-top:4px;\">{}</div>\
-         <div style=\"margin-top:10px;font-size:13px;\">执行结果：<span style=\"display:inline-block;padding:2px 10px;border-radius:999px;background:{};color:#fff;\">{}</span></div>\
+         <div style=\"margin-top:10px;font-size:13px;\">{}：<span style=\"display:inline-block;padding:2px 10px;border-radius:999px;background:{};color:#fff;\">{}</span></div>\
          </div>\
          <div style=\"padding:24px 28px;line-height:1.65;font-size:14px;\">{}{}</div>\
          </div></body></html>",
+        crate::i18n::t("buffTerm · 一键整改结果", "buffTerm · remediation result"),
         esc_html(&remediation.host_label),
+        crate::i18n::t("执行结果", "Result"),
         status_color,
         status_label,
         if remediation.plan_markdown.trim().is_empty() {
@@ -795,6 +850,25 @@ fn pending_step_indexes(steps: &[RemediationStep]) -> Vec<usize> {
 }
 
 fn remediation_system_prompt(host: &Host) -> String {
+    // 提示词跟随界面语言，与巡检报告语言保持一致
+    if crate::i18n::is_en() {
+        return format!(
+            "You are buffTerm's server remediation expert.\n\
+             Current server: {} ({}@{}:{})\n\
+             You only generate executable remediation steps from the inspection report and the user's \
+             guidance; you never run any command.\n\
+             Output JSON only, in the shape {{\"summary\":\"remediation summary\",\"steps\":[{{\"description\":\"step description\",\"command\":\"shell command to run\",\"timeout_secs\":60}}]}}.\n\
+             Steps must be concrete, safe and ordered by dependency; avoid destructive operations \
+             unless the report or the user explicitly requires them.\n\
+             Only generate steps for real gaps explicitly identified in the inspection report and the \
+             user's guidance; if a setting already meets the target, do not generate redundant or \
+             ineffective steps.",
+            host.name,
+            host.username,
+            host.address,
+            host.port
+        );
+    }
     format!(
         "你是 buffTerm 的服务器整改执行专家。\n\
          当前服务器：{}（{}@{}:{}）\n\
@@ -818,12 +892,12 @@ fn extract_json_object(text: &str) -> Result<serde_json::Value, String> {
     cleaned = cleaned.trim_end_matches("```").trim();
     let start = cleaned
         .find('{')
-        .ok_or_else(|| "AI 未返回 JSON 对象".to_string())?;
+        .ok_or_else(|| crate::i18n::t("AI 未返回 JSON 对象", "The AI did not return a JSON object").to_string())?;
     let end = cleaned
         .rfind('}')
-        .ok_or_else(|| "AI 未返回完整的 JSON 对象".to_string())?;
+        .ok_or_else(|| crate::i18n::t("AI 未返回完整的 JSON 对象", "The AI did not return a complete JSON object").to_string())?;
     serde_json::from_str(&cleaned[start..=end])
-        .map_err(|e| format!("解析整改步骤 JSON 失败: {e}"))
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("解析整改步骤 JSON 失败", "Failed to parse the remediation steps JSON")))
 }
 
 fn normalize_steps(input: Vec<RemediationStepInput>) -> Result<Vec<RemediationStep>, String> {
@@ -834,7 +908,7 @@ fn normalize_steps(input: Vec<RemediationStepInput>) -> Result<Vec<RemediationSt
             continue;
         }
         if command.chars().count() > 2000 {
-            return Err("整改步骤命令过长".to_string());
+            return Err(crate::i18n::t("整改步骤命令过长", "A remediation step command is too long").to_string());
         }
         let description = if step.description.trim().is_empty() {
             command.clone()

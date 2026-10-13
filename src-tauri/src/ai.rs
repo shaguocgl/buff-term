@@ -47,25 +47,25 @@ pub(crate) fn resolve_active_ai(db: &Db) -> Result<(AiProvider, String), String>
 pub(crate) fn resolve_active_ai_model(db: &Db) -> Result<(AiProvider, AiModel), String> {
     let providers = db
         .list_ai_providers()
-        .map_err(|e| format!("读取 AI 配置失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取 AI 配置失败", "Failed to read AI settings")))?;
     let provider = providers
         .into_iter()
         .find(|p| p.enabled)
-        .ok_or_else(|| "未配置启用的 AI 平台，请先在左侧 AI 配置中添加".to_string())?;
+        .ok_or_else(|| crate::i18n::t("未配置启用的 AI 平台，请先在左侧 AI 配置中添加", "No AI platform is enabled; add one in AI settings first").to_string())?;
     let model = provider
         .models
         .iter()
         .find(|m| m.is_active)
         .or_else(|| provider.models.first())
         .cloned()
-        .ok_or_else(|| "该平台未配置模型，请到 AI 配置中添加".to_string())?;
+        .ok_or_else(|| crate::i18n::t("该平台未配置模型，请到 AI 配置中添加", "This platform has no models configured; add one in AI settings").to_string())?;
     Ok((provider, model))
 }
 
 #[tauri::command]
 pub fn list_ai_providers(db: State<'_, Arc<Db>>) -> Result<Vec<AiProvider>, String> {
     db.list_ai_providers()
-        .map_err(|e| format!("读取 AI 配置失败: {e}"))
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取 AI 配置失败", "Failed to read AI settings")))
 }
 
 #[tauri::command]
@@ -99,7 +99,7 @@ pub fn save_ai_provider(
         .enumerate()
         .map(|(idx, m)| {
             if m.context_window == 0 {
-                return Err("模型上下文窗口必须大于 0".to_string());
+                return Err(crate::i18n::t("模型上下文窗口必须大于 0", "The model context window must be greater than 0").to_string());
             }
             let is_active = m.is_active || (idx == 0 && input.models.iter().all(|x| !x.is_active));
             Ok(AiModel {
@@ -114,19 +114,19 @@ pub fn save_ai_provider(
         .collect::<Result<Vec<_>, String>>()?;
     // 禁用其他提供方 + upsert 提供方 + 全量替换模型，放在同一事务里原子完成
     db.save_ai_provider_tx(&provider, &models, input.enabled)
-        .map_err(|e| format!("保存 AI 配置失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存 AI 配置失败", "Failed to save AI settings")))?;
 
     db.list_ai_providers()
-        .map_err(|e| format!("读取 AI 配置失败: {e}"))?
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取 AI 配置失败", "Failed to read AI settings")))?
         .into_iter()
         .find(|p| p.id == id)
-        .ok_or_else(|| "保存成功但读取失败".to_string())
+        .ok_or_else(|| crate::i18n::t("保存成功但读取失败", "Saved successfully but the read-back failed").to_string())
 }
 
 #[tauri::command]
 pub fn delete_ai_provider(db: State<'_, Arc<Db>>, id: String) -> Result<(), String> {
     db.delete_ai_provider(&id)
-        .map_err(|e| format!("删除 AI 配置失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("删除 AI 配置失败", "Failed to delete AI settings")))?;
     credentials::delete_api_key(&id);
     Ok(())
 }
@@ -134,16 +134,16 @@ pub fn delete_ai_provider(db: State<'_, Arc<Db>>, id: String) -> Result<(), Stri
 #[tauri::command]
 pub fn get_ai_max_tool_rounds(db: State<'_, Arc<Db>>) -> Result<u32, String> {
     db.get_ai_max_tool_rounds()
-        .map_err(|e| format!("读取工具轮次上限失败: {e}"))
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取工具轮次上限失败", "Failed to read the tool round limit")))
 }
 
 #[tauri::command]
 pub fn save_ai_max_tool_rounds(db: State<'_, Arc<Db>>, value: u32) -> Result<u32, String> {
     if value == 0 {
-        return Err("工具轮次上限必须大于 0".to_string());
+        return Err(crate::i18n::t("工具轮次上限必须大于 0", "The tool round limit must be greater than 0").to_string());
     }
     db.set_ai_max_tool_rounds(value)
-        .map_err(|e| format!("保存工具轮次上限失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存工具轮次上限失败", "Failed to save the tool round limit")))?;
     Ok(value)
 }
 
@@ -154,26 +154,26 @@ pub fn set_active_ai_model(
     model_id: String,
 ) -> Result<(), String> {
     db.set_active_ai_model(&provider_id, &model_id)
-        .map_err(|e| format!("切换模型失败: {e}"))
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("切换模型失败", "Failed to switch the model")))
 }
 
 #[tauri::command]
 pub fn set_active_ai_provider(db: State<'_, Arc<Db>>, provider_id: String) -> Result<(), String> {
     db.activate_ai_provider_tx(&provider_id)
-        .map_err(|e| format!("切换平台失败: {e}"))
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("切换平台失败", "Failed to switch the platform")))
 }
 
 #[tauri::command]
 pub fn list_ai_rules(db: State<'_, Arc<Db>>) -> Result<Vec<AiRule>, String> {
     db.list_ai_rules()
-        .map_err(|e| format!("读取智能审核规则失败: {e}"))
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取智能审核规则失败", "Failed to read smart approval rules")))
 }
 
 #[tauri::command]
 pub fn add_ai_rule(db: State<'_, Arc<Db>>, pattern: String) -> Result<AiRule, String> {
     let pattern = pattern.trim();
     if pattern.is_empty() {
-        return Err("规则不能为空".to_string());
+        return Err(crate::i18n::t("规则不能为空", "The rule must not be empty").to_string());
     }
     let rule = AiRule {
         id: uuid::Uuid::new_v4().to_string(),
@@ -182,14 +182,14 @@ pub fn add_ai_rule(db: State<'_, Arc<Db>>, pattern: String) -> Result<AiRule, St
         created_at: now(),
     };
     db.insert_ai_rule(&rule)
-        .map_err(|e| format!("保存规则失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存规则失败", "Failed to save the rule")))?;
     Ok(rule)
 }
 
 #[tauri::command]
 pub fn delete_ai_rule(db: State<'_, Arc<Db>>, id: String) -> Result<(), String> {
     db.delete_ai_rule(&id)
-        .map_err(|e| format!("删除规则失败: {e}"))
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("删除规则失败", "Failed to delete the rule")))
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -215,7 +215,7 @@ fn resolve_api_key(
     if let Some(id) = id {
         if let Some(provider) = db
             .get_ai_provider(&id)
-            .map_err(|e| format!("读取 AI 配置失败: {e}"))?
+            .map_err(|e| format!("{}: {e}", crate::i18n::t("读取 AI 配置失败", "Failed to read AI settings")))?
         {
             let saved = provider.base_url.trim_end_matches('/');
             let given = base_url.trim_end_matches('/');
@@ -224,7 +224,7 @@ fn resolve_api_key(
                     return Ok(key);
                 }
             } else {
-                return Err("Base URL 与已保存配置不一致，请显式输入 API Key 后再测试".to_string());
+                return Err(crate::i18n::t("Base URL 与已保存配置不一致，请显式输入 API Key 后再测试", "The Base URL differs from the saved configuration; enter the API Key explicitly before testing").to_string());
             }
         }
     }
@@ -242,7 +242,7 @@ pub async fn list_remote_ai_models(
 ) -> Result<Vec<RemoteAiModel>, String> {
     let base = base_url.trim();
     if base.is_empty() {
-        return Err("请先填写 Base URL".to_string());
+        return Err(crate::i18n::t("请先填写 Base URL", "Enter the Base URL first").to_string());
     }
     let url = format!("{}/models", base.trim_end_matches('/'));
     let key = resolve_api_key(&db, base, api_key, id)?;
@@ -250,13 +250,13 @@ pub async fn list_remote_ai_models(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("HTTP 客户端初始化失败", "Failed to initialize the HTTP client")))?;
 
     let mut req = client.get(&url);
     if !key.is_empty() {
         req = req.bearer_auth(&key);
     }
-    let resp = req.send().await.map_err(|e| format!("请求失败: {e}"))?;
+    let resp = req.send().await.map_err(|e| format!("{}: {e}", crate::i18n::t("请求失败", "Request failed")))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
 
@@ -266,8 +266,8 @@ pub async fn list_remote_ai_models(
             .and_then(|v| v["error"]["message"].as_str().map(String::from))
             .unwrap_or_else(|| text.chars().take(180).collect::<String>());
         let hint = match status.as_u16() {
-            401 | 403 => "API Key 无效或无权限，请检查 Key 与平台",
-            404 => "该平台不支持 /models 接口，请手动填写模型 ID",
+            401 | 403 => crate::i18n::t("API Key 无效或无权限，请检查 Key 与平台", "Invalid API Key or insufficient permission; check the key and the platform"),
+            404 => crate::i18n::t("该平台不支持 /models 接口，请手动填写模型 ID", "This platform does not support the /models endpoint; enter the model ID manually"),
             _ => "",
         };
         let msg = if hint.is_empty() {
@@ -280,13 +280,13 @@ pub async fn list_remote_ai_models(
 
     // 兼容 { data: [{id, owned_by}, ...] } 与 { models: [...] } 两种形态
     let parsed: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("解析响应失败: {e}"))?;
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", crate::i18n::t("解析响应失败", "Failed to parse the response")))?;
     let arr = parsed
         .get("data")
         .or_else(|| parsed.get("models"))
         .and_then(|v| v.as_array())
         .ok_or_else(|| {
-            "响应中未找到 data/models 数组，该平台可能不兼容 OpenAI /models 协议".to_string()
+            crate::i18n::t("响应中未找到 data/models 数组，该平台可能不兼容 OpenAI /models 协议", "No data/models array found in the response; the platform may not implement the OpenAI /models protocol").to_string()
         })?;
 
     let mut seen = std::collections::HashSet::new();
@@ -332,7 +332,7 @@ pub async fn test_ai_provider(
     if key.is_empty() {
         return Ok(TestResult {
             ok: false,
-            message: "未提供 API Key（Ollama 本地模型可随意填写）".to_string(),
+            message: crate::i18n::t("未提供 API Key（Ollama 本地模型可随意填写）", "No API Key provided (any value works for local Ollama models)").to_string(),
         });
     }
 
@@ -340,7 +340,7 @@ pub async fn test_ai_provider(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
-        .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("HTTP 客户端初始化失败", "Failed to initialize the HTTP client")))?;
     let body = serde_json::json!({
         "model": model,
         "messages": [{ "role": "user", "content": "ping" }],
@@ -353,14 +353,18 @@ pub async fn test_ai_provider(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("请求失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("请求失败", "Request failed")))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
 
     if status.is_success() {
         Ok(TestResult {
             ok: true,
-            message: format!("连接成功（HTTP {}）", status.as_u16()),
+            message: format!(
+            "{}{})",
+            crate::i18n::t("连接成功（HTTP ", "Connected successfully (HTTP "),
+            status.as_u16()
+        ),
         })
     } else {
         let detail = serde_json::from_str::<serde_json::Value>(&text)

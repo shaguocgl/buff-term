@@ -76,7 +76,7 @@ impl HostKeyRegistry {
             .lock()
             .unwrap()
             .remove(key)
-            .ok_or_else(|| "确认请求不存在或已超时".to_string())?;
+            .ok_or_else(|| crate::i18n::t("确认请求不存在或已超时", "The confirmation request does not exist or has timed out").to_string())?;
         decision.set(trust);
         Ok(())
     }
@@ -402,7 +402,7 @@ impl RusshManager {
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| "连接已关闭".to_string())?;
+            .map_err(|_| crate::i18n::t("连接已关闭", "The connection is closed").to_string())?;
         Ok(ConnLease {
             handle: conn.handle,
             reused,
@@ -536,7 +536,7 @@ impl RusshManager {
                 // 重连重试会造成重复副作用，因此写操作一律不自动重试
                 if crate::safety::is_write_operation(command) {
                     return Err(
-                        "连接在命令执行期间中断。该命令为写操作，为避免重复执行已停止，请人工确认远端状态后重试"
+                        crate::i18n::t("连接在命令执行期间中断。该命令为写操作，为避免重复执行已停止，请人工确认远端状态后重试", "The connection dropped while the command was running. It is a write operation, so it was stopped to avoid running twice; verify the remote state manually and retry")
                             .to_string(),
                     );
                 }
@@ -570,11 +570,12 @@ pub async fn test_connection(
         do_connect(host, password, passphrase),
     )
     .await
-    .map_err(|_| "连接超时（60 秒）".to_string())??;
-    Ok(format!(
-        "连接成功（{}@{}:{}）",
-        host.username, host.address, host.port
-    ))
+    .map_err(|_| crate::i18n::t("连接超时（60 秒）", "Connection timed out (60s)").to_string())??;
+    Ok(if crate::i18n::is_en() {
+        format!("Connected ({}@{}:{})", host.username, host.address, host.port)
+    } else {
+        format!("连接成功（{}@{}:{}）", host.username, host.address, host.port)
+    })
 }
 
 /// 启动空闲连接回收任务：每 60s 扫描一次连接池，回收超时/已断开的连接。
@@ -596,7 +597,7 @@ pub(crate) async fn connect(host: &Host) -> Result<Handle<ClientHandler>, String
     // 需覆盖首次连接的主机指纹确认窗口（60s）
     tokio::time::timeout(Duration::from_secs(60), do_connect(host, None, None))
         .await
-        .map_err(|_| "SSH 连接超时（60 秒）".to_string())?
+        .map_err(|_| crate::i18n::t("SSH 连接超时（60 秒）", "SSH connection timed out (60s)").to_string())?
 }
 
 pub(crate) async fn do_connect(
@@ -621,12 +622,18 @@ pub(crate) async fn do_connect(
     )
     .await
     .map_err(|e| match host_key_failure.lock().unwrap().take() {
-        Some(HostKeyFailure::Rejected) => format!(
-            "已取消连接：你拒绝了主机 {}:{} 的指纹",
-            host.address, host.port
-        ),
+        Some(HostKeyFailure::Rejected) => {
+            if crate::i18n::is_en() {
+                format!(
+                    "Connection cancelled: you rejected the host key fingerprint of {}:{}",
+                    host.address, host.port
+                )
+            } else {
+                format!("已取消连接：你拒绝了主机 {}:{} 的指纹", host.address, host.port)
+            }
+        }
         Some(HostKeyFailure::Timeout) => {
-            "连接已取消：主机指纹确认超时（60 秒内未确认）".to_string()
+            crate::i18n::t("连接已取消：主机指纹确认超时（60 秒内未确认）", "Connection cancelled: host key confirmation timed out (not confirmed within 60s)").to_string()
         }
         Some(HostKeyFailure::Changed {
             line,
@@ -636,16 +643,35 @@ pub(crate) async fn do_connect(
         }) => {
             let recorded = match recorded_fp {
                 Some(fp) => {
-                    format!("已记录：{key_type} {fp}（~/.ssh/known_hosts 第 {line} 行）")
+                    format!(
+            "{} {key_type} {fp} ({}{line}{})",
+            crate::i18n::t("已记录：", "Recorded: "),
+            crate::i18n::t("~/.ssh/known_hosts 第", "~/.ssh/known_hosts line"),
+            crate::i18n::t(" 行）", ")")
+        )
                 }
-                None => format!("已记录：{key_type}（~/.ssh/known_hosts 第 {line} 行）"),
+                None => format!(
+            "{} {key_type} ({}{line}{})",
+            crate::i18n::t("已记录：", "Recorded: "),
+            crate::i18n::t("~/.ssh/known_hosts 第", "~/.ssh/known_hosts line"),
+            crate::i18n::t(" 行）", ")")
+        ),
             };
-            format!(
-                "主机指纹已变化，已拒绝连接（可能存在中间人攻击）。\n{recorded}\n当前：{key_type} {actual_fp}\n如确认服务器已重装或更换了密钥，请删除 known_hosts 中该行后重试。"
-            )
+            if crate::i18n::is_en() {
+                format!(
+                    "The host key has changed; the connection was rejected (a man-in-the-middle attack is possible).\n{recorded}\nCurrent: {key_type} {actual_fp}\nIf the server was reinstalled or its key changed, delete that line from known_hosts and retry."
+                )
+            } else {
+                format!(
+                    "主机指纹已变化，已拒绝连接（可能存在中间人攻击）。\n{recorded}\n当前：{key_type} {actual_fp}\n如确认服务器已重装或更换了密钥，请删除 known_hosts 中该行后重试。"
+                )
+            }
         }
-        Some(HostKeyFailure::ReadError(e)) => format!("读取 ~/.ssh/known_hosts 失败：{e}"),
-        None => format!("SSH 连接失败: {e}"),
+        Some(HostKeyFailure::ReadError(e)) => format!(
+            "{}: {e}",
+            crate::i18n::t("读取 ~/.ssh/known_hosts 失败", "Failed to read ~/.ssh/known_hosts")
+        ),
+        None => format!("{}: {e}", crate::i18n::t("SSH 连接失败", "SSH connection failed")),
     })?;
 
     if host.auth_type == AuthType::Password {
@@ -667,12 +693,12 @@ async fn authenticate_with_password(
         .filter(|p| !p.trim().is_empty())
         .or_else(|| crate::credentials::get_password(&host.id))
         .ok_or_else(|| {
-            "服务器要求密码认证，但未提供密码。请填写密码或先在主机中保存。".to_string()
+            crate::i18n::t("服务器要求密码认证，但未提供密码。请填写密码或先在主机中保存。", "The server requires password authentication but no password was provided. Enter one or save it for this host first.").to_string()
         })?;
     let (remaining_methods, partial_success) = match session
         .authenticate_password(&host.username, password.as_str())
         .await
-        .map_err(|e| format!("密码认证失败: {e}"))?
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("密码认证失败", "Password authentication failed")))?
     {
         AuthResult::Success => return Ok(()),
         AuthResult::Failure {
@@ -686,15 +712,19 @@ async fn authenticate_with_password(
             .map(String::from)
             .collect::<Vec<_>>()
             .join(",");
-        return Err(format!(
-            "服务器要求多因素认证（{remaining}），当前版本暂不支持"
-        ));
+        return Err(if crate::i18n::is_en() {
+            format!(
+                "The server requires multi-factor authentication ({remaining}), which is not supported yet"
+            )
+        } else {
+            format!("服务器要求多因素认证（{remaining}），当前版本暂不支持")
+        });
     }
     if remaining_methods.contains(&MethodKind::KeyboardInteractive) {
         let mut response = session
             .authenticate_keyboard_interactive_start(&host.username, None::<String>)
             .await
-            .map_err(|e| format!("交互式认证失败: {e}"))?;
+            .map_err(|e| format!("{}: {e}", crate::i18n::t("交互式认证失败", "Interactive authentication failed")))?;
         // 服务器可能连续下发多轮 prompt，最多应答 5 轮防止死循环
         for _ in 0..5 {
             match response {
@@ -716,12 +746,12 @@ async fn authenticate_with_password(
                     response = session
                         .authenticate_keyboard_interactive_respond(answers)
                         .await
-                        .map_err(|e| format!("交互式认证失败: {e}"))?;
+                        .map_err(|e| format!("{}: {e}", crate::i18n::t("交互式认证失败", "Interactive authentication failed")))?;
                 }
             }
         }
     }
-    Err("SSH 认证失败（用户名 / 密码不正确）".to_string())
+    Err(crate::i18n::t("SSH 认证失败（用户名 / 密码不正确）", "SSH authentication failed (incorrect username or password)").to_string())
 }
 
 /// 密钥认证：先试本地私钥文件（支持口令解密），再试 ssh-agent 中的身份。
@@ -762,22 +792,43 @@ async fn authenticate_with_key(
                 {
                     Ok(AuthResult::Success) => return Ok(()),
                     Ok(AuthResult::Failure { .. }) => {
-                        file_err = Some(format!("服务器拒绝了私钥 {key_path}"));
+                        file_err = Some(format!(
+                "{} {key_path}",
+                crate::i18n::t("服务器拒绝了私钥", "The server rejected the private key")
+            ));
                     }
-                    Err(e) => return Err(format!("密钥认证失败: {e}")),
+                    Err(e) => {
+                return Err(format!(
+                    "{}: {e}",
+                    crate::i18n::t("密钥认证失败", "Key authentication failed")
+                ))
+            }
                 }
             }
             Err(e) => {
                 file_err = Some(if matches!(e, keys::Error::KeyIsEncrypted)
                     && passphrase.is_none()
                 {
-                    format!(
-                        "私钥 {key_path} 已加密，请在主机编辑中填写私钥口令（或将其加入 ssh-agent）"
-                    )
+                    if crate::i18n::is_en() {
+                        format!(
+                            "The private key {key_path} is encrypted; enter its passphrase in the host editor (or add it to ssh-agent)"
+                        )
+                    } else {
+                        format!(
+                            "私钥 {key_path} 已加密，请在主机编辑中填写私钥口令（或将其加入 ssh-agent）"
+                        )
+                    }
                 } else if passphrase.is_some() && !matches!(e, keys::Error::IO(_)) {
-                    format!("私钥 {key_path} 解密失败：口令不正确或文件损坏")
+                    format!(
+                "{} {key_path}: {}",
+                crate::i18n::t("私钥解密失败", "Failed to decrypt the private key"),
+                crate::i18n::t("口令不正确或文件损坏", "wrong passphrase or corrupt file")
+            )
                 } else {
-                    format!("读取私钥失败（{key_path}）: {e}")
+                    format!(
+                "{}{key_path}): {e}",
+                crate::i18n::t("读取私钥失败（", "Failed to read the private key (")
+            )
                 });
             }
         }
@@ -791,17 +842,24 @@ async fn authenticate_with_key(
         };
 
     let agent_note = if agent_tried > 0 {
-        format!("ssh-agent 中 {agent_tried} 个身份均被服务器拒绝")
+        format!(
+                "{}{agent_tried}{}",
+                crate::i18n::t("ssh-agent 中 ", "All "),
+                crate::i18n::t(" 个身份均被服务器拒绝", " identities from ssh-agent were rejected by the server")
+            )
     } else if agent_available {
-        "ssh-agent 中没有可用身份".to_string()
+        crate::i18n::t("ssh-agent 中没有可用身份", "No usable identity in ssh-agent").to_string()
     } else {
-        "未检测到 ssh-agent（SSH_AUTH_SOCK）".to_string()
+        crate::i18n::t("未检测到 ssh-agent（SSH_AUTH_SOCK）", "No ssh-agent detected (SSH_AUTH_SOCK)").to_string()
     };
     let detail = match file_err {
         Some(e) => format!("{e}；{agent_note}"),
         None => agent_note,
     };
-    Err(format!("SSH 密钥认证失败：{detail}"))
+    Err(format!(
+            "{}: {detail}",
+            crate::i18n::t("SSH 密钥认证失败", "SSH key authentication failed")
+        ))
 }
 
 /// ssh-agent 认证尝试结果
@@ -886,12 +944,12 @@ pub(crate) async fn exec_on(
     let mut channel: Channel<russh::client::Msg> =
         tokio::time::timeout(CHANNEL_OP_TIMEOUT, handle.channel_open_session())
             .await
-            .map_err(|_| "打开通道超时".to_string())?
-            .map_err(|e| format!("打开通道失败: {e}"))?;
+            .map_err(|_| crate::i18n::t("打开通道超时", "Timed out opening the channel").to_string())?
+            .map_err(|e| format!("{}: {e}", crate::i18n::t("打开通道失败", "Failed to open the channel")))?;
     tokio::time::timeout(CHANNEL_OP_TIMEOUT, channel.exec(true, command))
         .await
-        .map_err(|_| "提交命令超时".to_string())?
-        .map_err(|e| format!("执行命令失败: {e}"))?;
+        .map_err(|_| crate::i18n::t("提交命令超时", "Timed out submitting the command").to_string())?
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("执行命令失败", "Failed to execute the command")))?;
     // 提交后立即关闭 stdin：cat/read 等读取标准输入的命令得以正常结束，
     // 否则会一直挂到超时
     let _ = channel.eof().await;
@@ -916,7 +974,7 @@ pub(crate) async fn exec_on(
             _ = cancel.cancelled() => {
                 let _ = channel.signal(russh::Sig::TERM).await;
                 let _ = channel.close().await;
-                return Err("命令已被用户中断（已向远端进程发送 SIGTERM）".to_string());
+                return Err(crate::i18n::t("命令已被用户中断（已向远端进程发送 SIGTERM）", "The command was interrupted by the user (SIGTERM sent to the remote process)").to_string());
             }
         } {
             Ok(m) => m,
@@ -958,7 +1016,7 @@ pub(crate) async fn exec_on(
     let _ = channel.close().await;
     let mut text = String::from_utf8_lossy(&merged).to_string();
     if truncated {
-        text.push_str("\n[输出超过 8MB，已截断]");
+        text.push_str(crate::i18n::t("\n[输出超过 8MB，已截断]", "\n[output exceeded 8MB and was truncated]"));
     }
     Ok(ExecResult {
         text,

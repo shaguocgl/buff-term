@@ -153,8 +153,14 @@ pub async fn monitor_host_info(
     host_id: String,
 ) -> Result<HostInfo, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
+    // 远端脚本通过 GEO_LANG 决定 ip-api 返回的国家/城市语言（与界面语言一致）
+    let script = format!(
+        "GEO_LANG={}\n{}",
+        crate::i18n::t("zh-CN", "en"),
+        HOST_INFO_SCRIPT
+    );
     let out = russh
-        .exec(&host, HOST_INFO_SCRIPT, Duration::from_secs(30))
+        .exec(&host, &script, Duration::from_secs(30))
         .await?;
     let mut info = parse_host_info(&out.text)?;
     // 本地兜底：IP 缺失时查连接地址；只有 IP 无归属地时用该 IP 再补一次位置
@@ -180,9 +186,11 @@ pub async fn monitor_host_info(
 /// ip-api 会自行解析域名并拒绝私网地址（返回 status=fail），因此连接地址是
 /// 域名或公网 IP 时能补出归属地；私网地址则自然落空返回 None。
 async fn geo_lookup(address: &str) -> Option<(String, String)> {
+    // 国家/城市名跟随界面语言（ip-api 的 lang 参数），避免英文界面里出现中文地名
     let url = format!(
-        "http://ip-api.com/json/{}?fields=status,country,city,query&lang=zh-CN",
-        address
+        "http://ip-api.com/json/{}?fields=status,country,city,query&lang={}",
+        address,
+        crate::i18n::t("zh-CN", "en")
     );
     let client = reqwest::Client::builder()
         // 归属地服务不可达时快速失败，不让 command 挂起
@@ -243,7 +251,7 @@ pub fn monitor_history(
     let window = window_secs.unwrap_or(1800).clamp(60, 86_400);
     let since = now().saturating_sub(window);
     db.list_metrics(&host_id, since, 5000)
-        .map_err(|e| format!("读取历史指标失败: {e}"))
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取历史指标失败", "Failed to read historical metrics")))
 }
 
 /// 采集节拍：采集循环每 5 秒醒来一次判断是否到采集时机（醒来本身无远端开销）。
@@ -590,7 +598,7 @@ echo "END"
 "#;
 
 /// 静态信息采集脚本：`KEY|value` 行 + GEO|START/END 包裹的归属地 JSON。
-/// 公网查询链式兜底：ip-api（中文国家名）→ ipinfo.io → ipify（仅 IP）；
+/// 公网查询链式兜底：ip-api（国家名语言由调用方注入的 GEO_LANG 决定）→ ipinfo.io → ipify（仅 IP）；
 /// curl 缺失时尝试 wget。全程只读，远端无外网时 GEO 段为空。
 const HOST_INFO_SCRIPT: &str = r#"
 echo "BEGIN"
@@ -615,7 +623,7 @@ get() {
   if command -v curl >/dev/null 2>&1; then curl -s4 --max-time 5 "$1" 2>/dev/null;
   elif command -v wget >/dev/null 2>&1; then wget -qO- -T 5 "$1" 2>/dev/null; fi
 }
-geo=$(get "http://ip-api.com/json/?fields=status,country,countryCode,city,query&lang=zh-CN")
+geo=$(get "http://ip-api.com/json/?fields=status,country,countryCode,city,query&lang=$GEO_LANG")
 case "$geo" in
   *'"status":"success"'*) ;;
   *) geo=$(get "https://ipinfo.io/json")
@@ -789,7 +797,7 @@ fn parse(text: &str, host: &Host) -> Result<MonitorSnapshot, String> {
         }
     }
     if snap.mem.total_mb == 0 && snap.cpu_percent == 0.0 && snap.disks.is_empty() {
-        return Err("无法解析监控数据（服务器可能不是 Linux 或缺少 /proc）".to_string());
+        return Err(crate::i18n::t("无法解析监控数据（服务器可能不是 Linux 或缺少 /proc）", "Cannot parse monitoring data (the server may not be Linux or /proc may be missing)").to_string());
     }
     Ok(snap)
 }
@@ -889,7 +897,7 @@ fn parse_host_info(text: &str) -> Result<HostInfo, String> {
     info.public_ip = ip;
     info.location = format_location(&country, &city);
     if info.os.is_empty() && info.threads == 0 {
-        return Err("无法解析服务器信息（服务器可能不是 Linux）".to_string());
+        return Err(crate::i18n::t("无法解析服务器信息（服务器可能不是 Linux）", "Cannot parse server information (the server may not be Linux)").to_string());
     }
     Ok(info)
 }

@@ -1,3 +1,4 @@
+import { useT } from '../i18n';
 import Modal from './Modal';
 import { StarIcon } from './Icons';
 
@@ -23,23 +24,20 @@ export default function StarPromptModal({
   onLater,
   onNever,
 }: Props) {
+  const t = useT();
   return (
-    <Modal title="感谢使用 buffTerm" onClose={onLater} className="modal-sm">
+    <Modal title={t('star.title')} onClose={onLater} className="modal-sm">
       <div className="star-prompt">
-        <p className="star-prompt-text">
-          buffTerm 已经陪伴你完成了 {launches} 次启动。
-          如果它对你有帮助，欢迎到 GitHub 项目点一颗 Star，
-          这是对持续开发最好的鼓励。
-        </p>
+        <p className="star-prompt-text">{t('star.body', { n: launches })}</p>
         <div className="tool-actions">
           <button className="btn primary small" onClick={onStar}>
-            <StarIcon size={13} /> 去 GitHub Star
+            <StarIcon size={13} /> {t('star.go')}
           </button>
           <button className="btn ghost small" onClick={onLater}>
-            以后再说
+            {t('star.later')}
           </button>
           <button className="btn ghost small" onClick={onNever}>
-            不再提示
+            {t('star.never')}
           </button>
         </div>
       </div>

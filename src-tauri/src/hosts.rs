@@ -48,7 +48,7 @@ pub fn host_from_input(input: HostInput) -> Host {
 }
 
 pub fn list(db: &Db) -> Result<Vec<Host>, String> {
-    db.list().map_err(|e| format!("读取主机列表失败: {e}"))
+    db.list().map_err(|e| format!("{}: {e}", crate::i18n::t("读取主机列表失败", "Failed to list hosts")))
 }
 
 /// 按 id 从数据库加载主机（凭据类操作的唯一受信来源）。
@@ -57,25 +57,25 @@ pub fn list(db: &Db) -> Result<Vec<Host>, String> {
 /// 却仍用该 id 对应的已保存密码认证（凭据重定向）。
 pub fn load_host(db: &Db, host_id: &str) -> Result<Host, String> {
     db.get_host(host_id)
-        .map_err(|e| format!("读取主机失败: {e}"))?
-        .ok_or_else(|| "主机不存在或已被删除".to_string())
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取主机失败", "Failed to read the host")))?
+        .ok_or_else(|| crate::i18n::t("主机不存在或已被删除", "The host does not exist or has been deleted").to_string())
 }
 
 pub fn create(db: &Db, input: HostInput) -> Result<Host, String> {
     let host = host_from_input(input);
     db.insert(&host)
-        .map_err(|e| format!("保存主机失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存主机失败", "Failed to save the host")))?;
     Ok(host)
 }
 
 pub fn update(db: &Db, host: Host) -> Result<(), String> {
-    db.update(&host).map_err(|e| format!("更新主机失败: {e}"))
+    db.update(&host).map_err(|e| format!("{}: {e}", crate::i18n::t("更新主机失败", "Failed to update the host")))
 }
 
 pub fn delete(db: &Db, id: String) -> Result<(), String> {
     // 级联清理该主机的指标/审计/巡检/整改，避免孤儿数据
     db.delete_host_cascade(&id)
-        .map_err(|e| format!("删除主机失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("删除主机失败", "Failed to delete the host")))?;
     credentials::delete_password(&id);
     credentials::delete_key_passphrase(&id);
     Ok(())
@@ -100,11 +100,11 @@ pub fn import_config(
 ) -> Result<ImportResult, String> {
     let path = path.unwrap_or_else(default_ssh_config_path);
     let content =
-        fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败: {e}", path))?;
+        fs::read_to_string(&path).map_err(|e| format!("{} {}: {e}", crate::i18n::t("读取失败", "Failed to read"), path))?;
     let parsed = sshconfig::parse(&content);
     let mut existing: HashSet<String> = db
         .list()
-        .map_err(|e| format!("读取主机列表失败: {e}"))?
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取主机列表失败", "Failed to list hosts")))?
         .into_iter()
         .map(|h| h.name)
         .collect();
@@ -113,7 +113,7 @@ pub fn import_config(
     if !dry_run {
         for input in accepted {
             let host = host_from_input(input);
-            db.insert(&host).map_err(|e| format!("导入主机失败: {e}"))?;
+            db.insert(&host).map_err(|e| format!("{}: {e}", crate::i18n::t("导入主机失败", "Failed to import the host")))?;
         }
     }
     Ok(ImportResult {
@@ -211,7 +211,7 @@ pub async fn test_host_connection(
 ) -> Result<TestResult, String> {
     let saved = db
         .get_host(&host.id)
-        .map_err(|e| format!("读取主机失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取主机失败", "Failed to read the host")))?;
     if let Some(saved) = saved {
         let matches = saved.address == host.address
             && saved.port == host.port
@@ -222,7 +222,7 @@ pub async fn test_host_connection(
                 if password.as_deref().map(str::trim).unwrap_or("").is_empty() {
                     return Ok(TestResult {
                         ok: false,
-                        message: "主机的连接信息与已保存记录不一致，请显式输入密码后再测试".to_string(),
+                        message: crate::i18n::t("主机的连接信息与已保存记录不一致，请显式输入密码后再测试", "The host connection info differs from the saved record; enter the password explicitly before testing").to_string(),
                     });
                 }
             }
@@ -232,7 +232,7 @@ pub async fn test_host_connection(
     {
         return Ok(TestResult {
             ok: false,
-            message: "密码认证需要输入密码后再测试".to_string(),
+            message: crate::i18n::t("密码认证需要输入密码后再测试", "Password authentication requires entering the password before testing").to_string(),
         });
     }
     // passphrase 只用于本地解密私钥文件，不发往远端，

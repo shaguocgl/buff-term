@@ -10,12 +10,12 @@ const MAX_AUDIT_LIMIT: u32 = 1000;
 pub fn list_audit_logs(db: State<'_, Arc<Db>>, limit: Option<u32>) -> Result<Vec<AuditLog>, String> {
     let limit = limit.unwrap_or(MAX_AUDIT_LIMIT).min(MAX_AUDIT_LIMIT);
     db.list_audit_logs(limit)
-        .map_err(|e| format!("读取操作审计失败: {e}"))
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取操作审计失败", "Failed to read the audit log")))
 }
 
 /// 清空全部操作审计记录，返回删除条数。
 #[tauri::command]
 pub fn clear_audit_logs(db: State<'_, Arc<Db>>) -> Result<usize, String> {
     db.clear_audit_logs()
-        .map_err(|e| format!("清空操作审计失败: {e}"))
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("清空操作审计失败", "Failed to clear the audit log")))
 }

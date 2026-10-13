@@ -13,6 +13,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { fmtError } from './utils/errors';
 import { baseName } from './utils/remote';
+import { useI18n } from './i18n';
 import {
   checkForUpdate,
   deleteHost,
@@ -185,6 +186,7 @@ function readSavedPanels(): Record<string, PanelKind> {
 }
 
 function App() {
+  const { t, lang, setLang } = useI18n();
   const [hosts, setHosts] = useState<Host[]>([]);
   const [aiProviders, setAiProviders] = useState<AiProvider[]>([]);
   const [showAi, setShowAi] = useState(false);
@@ -388,7 +390,7 @@ function App() {
         if (next.update_available) {
           showToast(
             'info',
-            `发现新版本 v${next.latest_version}，可在左下角菜单下载更新。`,
+            t('app.updateToast', { version: next.latest_version }),
           );
         }
       })
@@ -398,7 +400,7 @@ function App() {
         if (s.show_star_prompt) setStarPromptLaunches(s.launches);
       })
       .catch(() => {});
-  }, [showToast]);
+  }, [showToast, t]);
 
   // 把面板宽度同步到 CSS 变量（首帧即生效，避免宽度跳变）
   useLayoutEffect(() => {
@@ -727,7 +729,7 @@ function App() {
     try {
       await deleteHost(host.id);
       await refresh();
-      showToast('success', `已删除 ${host.name}`);
+      showToast('success', t('app.deletedHost', { name: host.name }));
     } catch (e) {
       showToast('error', fmtError(e));
     }
@@ -736,9 +738,11 @@ function App() {
   /** 导入结果的补充说明：跳过重名 / 忽略的规则块 */
   const importDetail = (r: ImportResult) => {
     const parts: string[] = [];
-    if (r.skipped > 0) parts.push(`跳过重名 ${r.skipped} 台`);
-    if (r.ignored > 0) parts.push(`忽略 ${r.ignored} 条通配规则或空 Host 行`);
-    return parts.length > 0 ? `（${parts.join('，')}）` : '';
+    if (r.skipped > 0) parts.push(t('app.importSkipDup', { n: r.skipped }));
+    if (r.ignored > 0) parts.push(t('app.importIgnored', { n: r.ignored }));
+    return parts.length > 0
+      ? t('app.importDetail', { parts: parts.join(t('app.importDetailJoin')) })
+      : '';
   };
 
   // 导入前先预览统计：没有可导入的主机时直接提示，否则弹确认窗口
@@ -748,7 +752,7 @@ function App() {
       if (preview.imported === 0) {
         showToast(
           'info',
-          `~/.ssh/config 中没有可导入的主机${importDetail(preview)}`,
+          t('app.importNothing', { detail: importDetail(preview) }),
         );
         return;
       }
@@ -765,7 +769,10 @@ function App() {
       await refresh();
       showToast(
         'success',
-        `已从 ~/.ssh/config 导入 ${result.imported} 台主机${importDetail(result)}`,
+        t('app.importedCount', {
+          n: result.imported,
+          detail: importDetail(result),
+        }),
       );
     } catch (e) {
       showToast('error', fmtError(e));
@@ -817,7 +824,7 @@ function App() {
   const handleUpdateCheck = async () => {
     if (updateInfo?.update_available) {
       openUrl(updateInfo.release_url).catch(() => {
-        showToast('error', '无法打开浏览器，请手动访问 GitHub Release 页面');
+        showToast('error', t('app.cannotOpenBrowser'));
       });
       return;
     }
@@ -829,10 +836,10 @@ function App() {
       showToast(
         'info',
         !next.release_found
-          ? 'GitHub 尚未发布可下载版本。'
+          ? t('app.noRelease')
           : next.update_available
-          ? `发现新版本 v${next.latest_version}，点击“下载更新”前往 GitHub。`
-          : '当前已是最新版本。',
+            ? t('app.updateFound', { version: next.latest_version })
+            : t('app.latest'),
       );
     } catch (e) {
       showToast('error', fmtError(e));
@@ -847,7 +854,7 @@ function App() {
     setStarPromptLaunches(null);
     void starPromptDismiss();
     openUrl(REPO_URL).catch(() => {
-      showToast('error', '无法打开浏览器，请手动访问 GitHub 项目页');
+      showToast('error', t('app.cannotOpenRepo'));
     });
   };
   const handleStarLater = () => {
@@ -879,16 +886,24 @@ function App() {
             <button
               className="rail-btn"
               onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
-              title={theme === 'dark' ? '切换到日间模式' : '切换到夜间模式'}
-              aria-label={theme === 'dark' ? '切换到日间模式' : '切换到夜间模式'}
+              title={theme === 'dark' ? t('app.themeLight') : t('app.themeDark')}
+              aria-label={theme === 'dark' ? t('app.themeLight') : t('app.themeDark')}
             >
               {theme === 'dark' ? <SunIcon size={16} /> : <MoonIcon size={16} />}
             </button>
             <button
+              className="rail-btn lang-toggle"
+              onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
+              title={lang === 'zh' ? t('app.switchToEn') : t('app.switchToZh')}
+              aria-label={t('app.langAria')}
+            >
+              {lang === 'zh' ? t('app.langCurrentZh') : t('app.langCurrentEn')}
+            </button>
+            <button
               className="rail-btn"
               onClick={() => setCollapsed(false)}
-              title="展开侧边栏"
-              aria-label="展开侧边栏"
+              title={t('app.expandSidebar')}
+              aria-label={t('app.expandSidebar')}
             >
               <PanelLeftOpenIcon size={16} />
             </button>
@@ -896,12 +911,12 @@ function App() {
 
           <div className="rail-middle">
             <div className="rail-icon-wrap">
-              <button className="rail-btn" aria-label="主机">
+              <button className="rail-btn" aria-label={t('app.hosts')}>
                 <ServerIcon size={18} />
               </button>
               <div className="rail-popover">
                 <div className="rail-popover-title">
-                  主机
+                  {t('app.hosts')}
                   {hosts.length > 0 && (
                     <span className="count">
                       {hostSearch.trim()
@@ -913,16 +928,16 @@ function App() {
                 {hosts.length > 0 && (
                   <input
                     className="host-search"
-                    placeholder="搜索主机…"
+                    placeholder={t('app.searchHostsShort')}
                     value={hostSearch}
                     spellCheck={false}
                     onChange={(e) => setHostSearch(e.target.value)}
                   />
                 )}
                 {hosts.length === 0 ? (
-                  <div className="rail-popover-empty">还没有主机</div>
+                  <div className="rail-popover-empty">{t('app.noHosts')}</div>
                 ) : filteredHosts.length === 0 ? (
-                  <div className="rail-popover-empty">没有匹配的主机</div>
+                  <div className="rail-popover-empty">{t('app.noMatchHosts')}</div>
                 ) : (
                   <div className="rail-host-list">
                     {filteredHosts.map((host) => {
@@ -945,7 +960,7 @@ function App() {
                             <div className="host-name-row">
                               <span className="host-name">{host.name}</span>
                               {active && (
-                                <span className="status-dot" title="已连接">
+                                <span className="status-dot" title={t('app.connected')}>
                                   <span />
                                 </span>
                               )}
@@ -957,7 +972,7 @@ function App() {
                           <div className="rail-host-actions">
                             <button
                               className="icon-btn"
-                              title="编辑主机"
+                              title={t('app.editHost')}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setEditingHost(host);
@@ -968,7 +983,7 @@ function App() {
                             </button>
                             <button
                               className="icon-btn danger"
-                              title="删除主机"
+                              title={t('app.deleteHost')}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setDeleteHostTarget(host);
@@ -997,25 +1012,25 @@ function App() {
               >
                 <PlusIcon size={16} />
               </button>
-              <span className="rail-tip">新建主机</span>
+              <span className="rail-tip">{t('app.newHost')}</span>
             </div>
             <div className="rail-icon-wrap">
               <button className="rail-btn" onClick={handleImport}>
                 <ImportIcon size={16} />
               </button>
-              <span className="rail-tip">导入 ~/.ssh/config</span>
+              <span className="rail-tip">{t('app.importSsh')}</span>
             </div>
             <div className="rail-icon-wrap">
               <button className="rail-btn" onClick={() => setShowMcp(true)}>
                 <WrenchIcon size={16} />
               </button>
-              <span className="rail-tip">MCP 服务</span>
+              <span className="rail-tip">{t('app.mcpService')}</span>
             </div>
             <div className="rail-icon-wrap">
               <button className="rail-btn" onClick={() => setShowAlerts(true)}>
                 <BellIcon size={16} />
               </button>
-              <span className="rail-tip">通知配置</span>
+              <span className="rail-tip">{t('app.notifications')}</span>
             </div>
             <div className="rail-icon-wrap">
               <button
@@ -1024,14 +1039,14 @@ function App() {
               >
                 <ShieldIcon size={16} />
               </button>
-              <span className="rail-tip">终端防护</span>
+              <span className="rail-tip">{t('app.terminalGuard')}</span>
             </div>
 
             <div className="rail-icon-wrap">
               <button className="rail-btn" onClick={() => setShowLogs(true)}>
                 <ListIcon size={16} />
               </button>
-              <span className="rail-tip">操作审计</span>
+              <span className="rail-tip">{t('app.auditLog')}</span>
             </div>
             <div className="rail-icon-wrap">
               <button
@@ -1043,10 +1058,12 @@ function App() {
               </button>
               <span className="rail-tip">
                 {checkingUpdate
-                  ? '正在检查更新…'
+                  ? t('app.checkingUpdate')
                   : updateInfo?.update_available
-                    ? `下载更新 v${updateInfo.latest_version}`
-                    : '检查更新'}
+                    ? t('app.downloadUpdate', {
+                        version: updateInfo.latest_version,
+                      })
+                    : t('app.checkUpdate')}
               </span>
             </div>
             <div className="rail-icon-wrap">
@@ -1065,7 +1082,7 @@ function App() {
           </div>
           <div className="brand-text">
             <span className="brand-name">buffTerm</span>
-            <span className="brand-sub">SSH Agent · 本地优先</span>
+            <span className="brand-sub">{t('app.brandSub')}</span>
           </div>
           <button
             className="theme-toggle"
@@ -1073,10 +1090,21 @@ function App() {
               e.stopPropagation();
               setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
             }}
-            title={theme === 'dark' ? '切换到日间模式' : '切换到夜间模式'}
-            aria-label={theme === 'dark' ? '切换到日间模式' : '切换到夜间模式'}
+            title={theme === 'dark' ? t('app.themeLight') : t('app.themeDark')}
+            aria-label={theme === 'dark' ? t('app.themeLight') : t('app.themeDark')}
           >
             {theme === 'dark' ? <SunIcon size={16} /> : <MoonIcon size={16} />}
+          </button>
+          <button
+            className="theme-toggle lang-toggle"
+            onClick={(e) => {
+              e.stopPropagation();
+              setLang(lang === 'zh' ? 'en' : 'zh');
+            }}
+            title={lang === 'zh' ? t('app.switchToEn') : t('app.switchToZh')}
+            aria-label={t('app.langAria')}
+          >
+            {lang === 'zh' ? t('app.langCurrentZh') : t('app.langCurrentEn')}
           </button>
           <button
             className="sidebar-toggle"
@@ -1084,8 +1112,8 @@ function App() {
               e.stopPropagation();
               setCollapsed(true);
             }}
-            title="收起侧边栏"
-            aria-label="收起侧边栏"
+            title={t('app.collapseSidebar')}
+            aria-label={t('app.collapseSidebar')}
           >
             <PanelLeftCloseIcon size={16} />
           </button>
@@ -1099,15 +1127,15 @@ function App() {
               setShowForm(true);
             }}
           >
-            <PlusIcon size={16} /> 新建主机
+            <PlusIcon size={16} /> {t('app.newHost')}
           </button>
           <button className="btn secondary block" onClick={handleImport}>
-            <ImportIcon size={16} /> 导入 ~/.ssh/config
+            <ImportIcon size={16} /> {t('app.importSsh')}
           </button>
         </div>
 
         <div className="section-title">
-          <span>主机</span>
+          <span>{t('app.hosts')}</span>
           <span className="count">
             {hostSearch.trim()
               ? `${filteredHosts.length}/${hosts.length}`
@@ -1119,7 +1147,7 @@ function App() {
           {hosts.length > 0 && (
             <input
               className="host-search"
-              placeholder="搜索主机，或按 Cmd+K"
+              placeholder={t('app.searchHosts')}
               value={hostSearch}
               spellCheck={false}
               onChange={(e) => setHostSearch(e.target.value)}
@@ -1128,15 +1156,15 @@ function App() {
           {hosts.length === 0 && (
             <div className="host-empty">
               <ServerIcon size={28} />
-              <p>还没有主机</p>
-              <span>新建一台，或从 ssh config 导入</span>
+              <p>{t('app.noHosts')}</p>
+              <span>{t('app.noHostsHint')}</span>
             </div>
           )}
 
           {hosts.length > 0 && filteredHosts.length === 0 && (
             <div className="host-empty">
-              <p>没有匹配的主机</p>
-              <span>换个关键词试试</span>
+              <p>{t('app.noMatchHosts')}</p>
+              <span>{t('app.tryAnotherKeyword')}</span>
             </div>
           )}
 
@@ -1158,7 +1186,7 @@ function App() {
                   <div className="host-name-row">
                     <span className="host-name">{host.name}</span>
                     {active && (
-                      <span className="status-dot" title="已连接">
+                      <span className="status-dot" title={t('app.connected')}>
                         <span />
                       </span>
                     )}
@@ -1168,7 +1196,9 @@ function App() {
                   </span>
                   <div className="host-tags">
                     <span className={`tag tag-${host.auth_type}`}>
-                      {host.auth_type === 'key' ? '密钥' : '密码'}
+                      {host.auth_type === 'key'
+                        ? t('hostForm.authKey')
+                        : t('hostForm.authPassword')}
                     </span>
                   </div>
                 </div>
@@ -1178,7 +1208,7 @@ function App() {
                   <>
                     <button
                       className="icon-btn"
-                      title="编辑主机"
+                      title={t('app.editHost')}
                       onClick={(e) => {
                         e.stopPropagation();
                         setEditingHost(host);
@@ -1189,7 +1219,7 @@ function App() {
                     </button>
                     <button
                       className="icon-btn danger"
-                      title="删除主机"
+                      title={t('app.deleteHost')}
                       onClick={(e) => {
                         e.stopPropagation();
                         setDeleteHostTarget(host);
@@ -1209,17 +1239,15 @@ function App() {
             className="footer-toggle"
             onClick={() => setFooterCollapsed((v) => !v)}
             title={
-              footerCollapsed
-                ? '展开菜单'
-                : '收起菜单，把纵向空间让给主机列表'
+              footerCollapsed ? t('app.expandMenu') : t('app.collapseMenu')
             }
             aria-expanded={!footerCollapsed}
             aria-controls="sidebar-footer-menu"
           >
-            <span>{footerCollapsed ? '展开' : '收起'}</span>
+            <span>{footerCollapsed ? t('app.expand') : t('app.collapse')}</span>
             <span className="footer-toggle-right">
               {footerCollapsed && updateInfo?.update_available && (
-                <span className="footer-toggle-badge">有更新</span>
+                <span className="footer-toggle-badge">{t('app.hasUpdate')}</span>
               )}
               {footerCollapsed ? (
                 <ChevronRightIcon size={14} />
@@ -1232,20 +1260,20 @@ function App() {
           {!footerCollapsed && (
             <div className="footer-menu" id="sidebar-footer-menu">
               <button className="log-entry" onClick={() => setShowMcp(true)}>
-                <WrenchIcon size={15} /> MCP 服务
+                <WrenchIcon size={15} /> {t('app.mcpService')}
               </button>
               <button className="log-entry" onClick={() => setShowAlerts(true)}>
-                <BellIcon size={15} /> 通知配置
+                <BellIcon size={15} /> {t('app.notifications')}
               </button>
               <button
                 className="log-entry"
                 onClick={() => setShowTerminalGuard(true)}
               >
-                <ShieldIcon size={15} /> 终端防护
+                <ShieldIcon size={15} /> {t('app.terminalGuard')}
               </button>
 
               <button className="log-entry" onClick={() => setShowLogs(true)}>
-                <ListIcon size={15} /> 操作审计
+                <ListIcon size={15} /> {t('app.auditLog')}
               </button>
               <div className="version-entry">
                 <button
@@ -1256,24 +1284,25 @@ function App() {
                   disabled={checkingUpdate}
                   title={
                     updateInfo?.update_available
-                      ? `下载 v${updateInfo.latest_version}`
-                      : '检查 GitHub 最新发布版本'
+                      ? t('app.downloadVersion', {
+                          version: updateInfo.latest_version,
+                        })
+                      : t('app.checkGithubRelease')
                   }
                 >
                   <RefreshIcon size={15} />
                   <span>
                     {checkingUpdate
-                      ? '正在检查更新…'
+                      ? t('app.checkingUpdate')
                       : updateInfo?.update_available
-                        ? `下载更新 v${updateInfo.latest_version}`
-                        : '检查更新'}
+                        ? t('app.downloadUpdate', {
+                            version: updateInfo.latest_version,
+                          })
+                        : t('app.checkUpdate')}
                   </span>
                 </button>
                 <span className="version-current">
-                  当前版本 v{appVersion ?? '—'}
-                  {updateInfo?.release_found &&
-                    !updateInfo.update_available &&
-                    ' · 已是最新'}
+                  {t('app.currentVersion', { version: appVersion ?? '—' })}
                 </span>
               </div>
             </div>
@@ -1288,7 +1317,7 @@ function App() {
               <span className="ai-entry-sub">
                 {activeProvider
                   ? `${activeProvider.name} · ${activeModelLabel}`
-                  : '未配置模型平台'}
+                  : t('app.noProvider')}
               </span>
             </span>
             <ChevronRightIcon size={15} />
@@ -1327,18 +1356,18 @@ function App() {
                       />
                       <span className="tab-title">{tab.title}</span>
                       {dirtyTabs[tab.key] && (
-                        <span className="tab-dirty" title="有未保存的改动">
+                        <span className="tab-dirty" title={t('app.unsavedChanges')}>
                           ●
                         </span>
                       )}
                       {isTerminal && tab.status === 'exited' && (
-                        <span className="tab-alert" title="连接已断开">
+                        <span className="tab-alert" title={t('app.disconnected')}>
                           !
                         </span>
                       )}
                       <button
                         className="tab-close"
-                        title="关闭标签"
+                        title={t('app.closeTab')}
                         onClick={(e) => {
                           e.stopPropagation();
                           closeTab(tab.key);
@@ -1351,7 +1380,7 @@ function App() {
                 })}
                 <button
                   className="tab-new"
-                  title="新建连接"
+                  title={t('app.newConnection')}
                   onClick={() => {
                     setEditingHost(null);
                     setShowForm(true);
@@ -1412,7 +1441,7 @@ function App() {
                           const tab = tabs.find((t) => t.key === key);
                           return tab && cur === tab.host.id ? null : cur;
                         });
-                        showToast('error', `连接失败: ${message}`);
+                        showToast('error', t('app.connectionFailed', { msg: message }));
                       }}
                       onExited={(key) => {
                         setTabs((prev) =>
@@ -1430,7 +1459,7 @@ function App() {
                     <Suspense
                       fallback={
                         <div className="file-editor-loading">
-                          正在加载编辑器…
+                          {t('app.loadingEditor')}
                         </div>
                       }
                     >
@@ -1523,16 +1552,16 @@ function App() {
             <div className="welcome-logo brand-mark">
               <img className="brand-logo" src={logoUrl} alt="buffTerm" />
             </div>
-            <h2>选择左侧主机开始连接</h2>
+            <h2>{t('app.welcomeTitle')}</h2>
             <p>
-              支持密钥 / 密码认证，多标签并行连接
+              {t('app.welcomeLine1')}
               <br />
-              首次连接请按终端提示确认主机指纹
+              {t('app.welcomeLine2')}
             </p>
             <div className="welcome-hints">
-              <span>⇥ 多标签会话</span>
-              <span>⛨ 凭据本地加密</span>
-              <span>⛨ AI 自动审批</span>
+              <span>{t('app.welcomeHint1')}</span>
+              <span>{t('app.welcomeHint2')}</span>
+              <span>{t('app.welcomeHint3')}</span>
             </div>
           </div>
         )}
@@ -1545,7 +1574,7 @@ function App() {
             setShowForm(false);
             setEditingHost(null);
             refresh().catch(() => {});
-            showToast('success', `主机已保存`);
+            showToast('success', t('app.hostSaved'));
           }}
           onCancel={() => {
             setShowForm(false);
@@ -1641,17 +1670,17 @@ function App() {
 
       {importPreview && (
         <ConfirmModal
-          title="导入 ~/.ssh/config"
+          title={t('app.importTitle')}
           body={[
-            `将从 ~/.ssh/config 导入 ${importPreview.imported} 台主机。`,
+            t('app.importBodyFrom', { n: importPreview.imported }),
             importPreview.skipped > 0
-              ? `其中 ${importPreview.skipped} 台与现有主机重名，将自动跳过。`
+              ? t('app.importBodySkip', { n: importPreview.skipped })
               : '',
-            '导入的主机不含密码与私钥口令，需要时请在主机编辑中补充。',
+            t('app.importBodyNote'),
           ]
             .filter(Boolean)
             .join('\n')}
-          confirmText={`导入 ${importPreview.imported} 台`}
+          confirmText={t('app.importConfirm', { n: importPreview.imported })}
           onConfirm={confirmImport}
           onCancel={() => setImportPreview(null)}
         />
@@ -1668,9 +1697,9 @@ function App() {
 
       {deleteHostTarget && (
         <ConfirmModal
-          title="删除主机"
-          body={`确定删除主机 "${deleteHostTarget.name}" 吗？`}
-          confirmText="删除"
+          title={t('app.deleteHostTitle')}
+          body={t('app.deleteHostBody', { name: deleteHostTarget.name })}
+          confirmText={t('common.delete')}
           danger
           onConfirm={() => handleDelete(deleteHostTarget)}
           onCancel={() => setDeleteHostTarget(null)}
@@ -1679,9 +1708,9 @@ function App() {
 
       {pendingCloseKey !== null && (
         <ConfirmModal
-          title="关闭标签"
-          body="该文件有未保存的改动，关闭后这些改动将丢失。确定关闭吗？"
-          confirmText="丢弃并关闭"
+          title={t('app.closeTabTitle')}
+          body={t('app.closeTabBody')}
+          confirmText={t('app.discardClose')}
           danger
           onConfirm={() => {
             const key = pendingCloseKey;

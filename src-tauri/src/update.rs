@@ -36,12 +36,12 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
         .timeout(std::time::Duration::from_secs(15))
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()
-        .map_err(|e| format!("初始化更新检查失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("初始化更新检查失败", "Failed to initialize the update check")))?;
     let response = client
         .get(RELEASES_LATEST_URL)
         .send()
         .await
-        .map_err(|e| format!("无法连接 GitHub 检查更新: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("无法连接 GitHub 检查更新", "Cannot reach GitHub to check for updates")))?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(UpdateInfo {
             latest_version: current_version.clone(),
@@ -52,12 +52,12 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
         });
     }
     if !response.status().is_success() {
-        return Err(format!("GitHub 返回更新检查失败（{}）", response.status()));
+        return Err(format!("{}{})", crate::i18n::t("GitHub 返回更新检查失败（", "GitHub returned an error for the update check ("), response.status()));
     }
     let release: GithubRelease = response
         .json()
         .await
-        .map_err(|e| format!("读取 GitHub 发布信息失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取 GitHub 发布信息失败", "Failed to read the GitHub release info")))?;
     let latest_version = release.tag_name.trim_start_matches('v').to_string();
 
     Ok(UpdateInfo {
@@ -91,16 +91,16 @@ pub fn record_launch(
     let read = |key: &str| -> Result<u64, String> {
         Ok(db
             .get_setting(key)
-            .map_err(|e| format!("读取启动状态失败: {e}"))?
+            .map_err(|e| format!("{}: {e}", crate::i18n::t("读取启动状态失败", "Failed to read the launch state")))?
             .and_then(|v| v.trim().parse::<u64>().ok())
             .unwrap_or(0))
     };
     let launches = read("launch_count")?.saturating_add(1);
     db.set_setting("launch_count", &launches.to_string())
-        .map_err(|e| format!("记录启动次数失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("记录启动次数失败", "Failed to record the launch count")))?;
     let never = db
         .get_setting("star_prompt_never")
-        .map_err(|e| format!("读取 Star 引导状态失败: {e}"))?
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取 Star 引导状态失败", "Failed to read the Star prompt state")))?
         .as_deref()
         == Some("1");
     let next = read("star_prompt_next_launch")?.max(STAR_PROMPT_FIRST_LAUNCH);
@@ -115,14 +115,14 @@ pub fn record_launch(
 pub fn star_prompt_snooze(db: State<'_, std::sync::Arc<Db>>) -> Result<(), String> {
     let launches = db
         .get_setting("launch_count")
-        .map_err(|e| format!("读取启动次数失败: {e}"))?
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取启动次数失败", "Failed to read the launch count")))?
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(0);
     db.set_setting(
         "star_prompt_next_launch",
         &launches.saturating_add(STAR_PROMPT_SNOOZE_LAUNCHES).to_string(),
     )
-    .map_err(|e| format!("保存 Star 引导状态失败: {e}"))?;
+    .map_err(|e| format!("{}: {e}", crate::i18n::t("保存 Star 引导状态失败", "Failed to save the Star prompt state")))?;
     Ok(())
 }
 
@@ -130,7 +130,7 @@ pub fn star_prompt_snooze(db: State<'_, std::sync::Arc<Db>>) -> Result<(), Strin
 #[tauri::command]
 pub fn star_prompt_dismiss(db: State<'_, std::sync::Arc<Db>>) -> Result<(), String> {
     db.set_setting("star_prompt_never", "1")
-        .map_err(|e| format!("保存 Star 引导状态失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存 Star 引导状态失败", "Failed to save the Star prompt state")))?;
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { sftpList } from '../api';
+import { useT } from '../i18n';
 import type { SftpEntry } from '../types';
 import { fmtError } from '../utils/errors';
 import { baseName, formatBytes, formatMtime, joinPath, parentPath } from '../utils/remote';
@@ -21,6 +22,7 @@ export default function RemoteFilePicker({
   onSelect,
   onClose,
 }: Props) {
+  const t = useT();
   const [cwd, setCwd] = useState('/');
   const [entries, setEntries] = useState<SftpEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -65,7 +67,7 @@ export default function RemoteFilePicker({
   };
 
   return (
-    <Modal title="选择服务器文件" subtitle={cwd} onClose={onClose} className="modal-filepicker">
+    <Modal title={t('filePicker.title')} subtitle={cwd} onClose={onClose} className="modal-filepicker">
       <div className="filepicker-bar">
         <input
           className="filepicker-path"
@@ -87,7 +89,7 @@ export default function RemoteFilePicker({
         />
         <button
           className="icon-btn"
-          title="刷新"
+          title={t('common.refresh')}
           onClick={() => load(cwd)}
           disabled={loading}
         >
@@ -96,7 +98,7 @@ export default function RemoteFilePicker({
       </div>
 
       <div className="filepicker-body">
-        {loading && <div className="sftp-status">加载中…</div>}
+        {loading && <div className="sftp-status">{t('common.loading')}</div>}
         {!loading && error && <div className="sftp-status err">{error}</div>}
         {!loading && !error && (
           <div className="sftp-list">
@@ -128,7 +130,11 @@ export default function RemoteFilePicker({
                   {entry.is_dir ? <FolderIcon size={15} /> : <FileIcon size={15} />}
                   <span className="sftp-name">
                     {entry.name}
-                    {already && <span className="filepicker-badge">已引用</span>}
+                    {already && (
+                      <span className="filepicker-badge">
+                        {t('filePicker.referenced')}
+                      </span>
+                    )}
                   </span>
                   <span className="sftp-size">
                     {entry.is_dir ? '—' : formatBytes(entry.size)}
@@ -137,21 +143,25 @@ export default function RemoteFilePicker({
                 </div>
               );
             })}
-            {entries.length === 0 && <div className="sftp-status">空目录</div>}
+            {entries.length === 0 && (
+              <div className="sftp-status">{t('filePicker.empty')}</div>
+            )}
           </div>
         )}
       </div>
 
       <div className="filepicker-foot">
         <span className="filepicker-picked" title={picked ?? ''}>
-          {picked ? `已选择：${baseName(picked)}` : '点击选择一个文件'}
+          {picked
+            ? t('filePicker.picked', { name: baseName(picked) })
+            : t('filePicker.pickHint')}
         </span>
         <div className="tool-actions">
           <button className="btn primary small" onClick={confirm} disabled={!picked}>
-            添加引用
+            {t('filePicker.add')}
           </button>
           <button className="btn ghost small" onClick={onClose}>
-            取消
+            {t('common.cancel')}
           </button>
         </div>
       </div>

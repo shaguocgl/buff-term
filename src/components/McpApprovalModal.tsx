@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useT } from '../i18n';
 import type { McpApprovalRequest } from '../types';
 
 interface Props {
@@ -15,6 +16,7 @@ export default function McpApprovalModal({
   deadline,
   onResolve,
 }: Props) {
+  const t = useT();
   const timeoutSecs = request.timeout_secs ?? DEFAULT_TIMEOUT;
   const [remaining, setRemaining] = useState(() =>
     Math.max(0, Math.ceil((deadline - Date.now()) / 1000)),
@@ -33,8 +35,8 @@ export default function McpApprovalModal({
       <div className="modal modal-sm">
         <div className="modal-header">
           <div>
-            <h2>外部 AI 请求执行命令</h2>
-            <p>来自 MCP 服务的外部 AI 调用</p>
+            <h2>{t('mcpApproval.title')}</h2>
+            <p>{t('mcpApproval.subtitle')}</p>
           </div>
         </div>
         <div className="mcp-approval-body">
@@ -46,8 +48,8 @@ export default function McpApprovalModal({
             </div>
             <span className="approval-countdown-text">
               {timedOut
-                ? '已超时，按拒绝处理'
-                : `${remaining}s 后未确认将自动拒绝`}
+                ? t('guardApproval.timedOut')
+                : t('guardApproval.countdown', { n: remaining })}
             </span>
           </div>
           <div className="tool-actions">
@@ -56,10 +58,10 @@ export default function McpApprovalModal({
               onClick={() => onResolve(true)}
               disabled={timedOut}
             >
-              批准执行
+              {t('mcpApproval.approve')}
             </button>
             <button className="btn ghost small" onClick={() => onResolve(false)}>
-              拒绝
+              {t('mcpApproval.deny')}
             </button>
           </div>
         </div>

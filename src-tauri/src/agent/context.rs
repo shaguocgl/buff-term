@@ -139,7 +139,7 @@ fn content(msg: &Value) -> std::borrow::Cow<'_, str> {
                         if !buf.is_empty() {
                             buf.push(' ');
                         }
-                        buf.push_str("[图片]");
+                        buf.push_str(crate::i18n::t("[图片]", "[image]"));
                     }
                     _ => {}
                 }
@@ -190,7 +190,10 @@ fn strip_image_parts(msg: &mut Value) {
     };
     for part in parts.iter_mut() {
         if part["type"].as_str() == Some("image_url") {
-            *part = json!({"type": "text", "text": "[图片]"});
+            *part = json!({
+                "type": "text",
+                "text": crate::i18n::t("[图片]", "[image]"),
+            });
         }
     }
 }
@@ -231,7 +234,10 @@ pub(crate) fn repair_dangling_tool_calls(history: &mut Vec<Value>) {
                 json!({
                     "role": "tool",
                     "tool_call_id": id,
-                    "content": "（该工具调用未完成，无结果）",
+                    "content": crate::i18n::t(
+                        "（该工具调用未完成，无结果）",
+                        "(this tool call did not finish and has no result)",
+                    ),
                 }),
             );
         }
@@ -291,6 +297,7 @@ fn summarize_args(name: &str, raw: &str) -> String {
 fn tool_result_summary(text: &str) -> (bool, String) {
     let lower = text.to_lowercase();
     let failed = text.contains("执行失败")
+        || lower.contains("execution failed")
         || lower.contains("error")
         || lower.contains("failed")
         || lower.contains("exception")
@@ -300,30 +307,48 @@ fn tool_result_summary(text: &str) -> (bool, String) {
 
 /// 单轮规则摘要：保留命令原文、路径和错误尾部，不做语义概括。
 fn round_digest(round: &[Value], index: usize) -> String {
+    let en = crate::i18n::is_en();
     let mut parts: Vec<String> = Vec::new();
     for msg in round {
         match role(msg) {
-            "user" => parts.push(format!(
-                "[轮次{index}｜用户] {}",
-                clip_head_tail(&content(msg), 400)
-            )),
+            "user" => parts.push(if en {
+                format!("[round {index} | user] {}", clip_head_tail(&content(msg), 400))
+            } else {
+                format!("[轮次{index}｜用户] {}", clip_head_tail(&content(msg), 400))
+            }),
             "assistant" => {
                 if !content(msg).trim().is_empty() {
-                    parts.push(format!("[助手] {}", clip_head_tail(&content(msg), 300)));
+                    parts.push(format!(
+                        "[{}] {}",
+                        if en { "assistant" } else { "助手" },
+                        clip_head_tail(&content(msg), 300)
+                    ));
                 }
                 if let Some(calls) = msg["tool_calls"].as_array() {
                     for call in calls {
-                        let name = call["function"]["name"].as_str().unwrap_or("未知工具");
+                        let name = call["function"]["name"]
+                            .as_str()
+                            .unwrap_or(crate::i18n::t("未知工具", "unknown tool"));
                         let args = call["function"]["arguments"].as_str().unwrap_or("");
-                        parts.push(format!("[调用 {name}] {}", summarize_args(name, args)));
+                        parts.push(format!(
+                            "[{} {name}] {}",
+                            if en { "call" } else { "调用" },
+                            summarize_args(name, args)
+                        ));
                     }
                 }
             }
             "tool" => {
                 let (failed, summary) = tool_result_summary(&content(msg));
                 parts.push(format!(
-                    "[结果 {}] {}",
-                    if failed { "失败" } else { "成功" },
+                    "[{} {}] {}",
+                    if en { "result" } else { "结果" },
+                    match (failed, en) {
+                        (true, true) => "failed",
+                        (true, false) => "失败",
+                        (false, true) => "ok",
+                        (false, false) => "成功",
+                    },
                     summary
                 ));
             }
@@ -331,7 +356,11 @@ fn round_digest(round: &[Value], index: usize) -> String {
         }
     }
     let text = if parts.is_empty() {
-        format!("[轮次{index}] （无可提取内容）")
+        if en {
+            format!("[round {index}] (no extractable content)")
+        } else {
+            format!("[轮次{index}] （无可提取内容）")
+        }
     } else {
         parts.join("\n")
     };
@@ -340,11 +369,14 @@ fn round_digest(round: &[Value], index: usize) -> String {
 
 /// 最老轮次折叠成一行，避免摘要块无限增长。
 fn one_line_digest(round: &[Value], index: usize) -> String {
+    let en = crate::i18n::is_en();
     let user = round
         .iter()
         .find(|m| role(m) == "user")
         .map(|m| clip_head_tail(&content(m), 120))
-        .unwrap_or_else(|| "（无用户消息）".to_string());
+        .unwrap_or_else(|| {
+            crate::i18n::t("（无用户消息）", "(no user message)").to_string()
+        });
     let outcome = round
         .iter()
         .rev()
@@ -353,15 +385,20 @@ fn one_line_digest(round: &[Value], index: usize) -> String {
         .or_else(|| {
             round.iter().rev().find(|m| role(m) == "tool").map(|m| {
                 let (failed, _) = tool_result_summary(&content(m));
-                if failed {
-                    "工具失败".to_string()
-                } else {
-                    "工具完成".to_string()
+                match (failed, en) {
+                    (true, true) => "tool failed".to_string(),
+                    (true, false) => "工具失败".to_string(),
+                    (false, true) => "tool completed".to_string(),
+                    (false, false) => "工具完成".to_string(),
                 }
             })
         })
-        .unwrap_or_else(|| "（无结果）".to_string());
-    format!("[轮次{index}] 用户：{user} → {outcome}")
+        .unwrap_or_else(|| crate::i18n::t("（无结果）", "(no result)").to_string());
+    if en {
+        format!("[round {index}] user: {user} → {outcome}")
+    } else {
+        format!("[轮次{index}] 用户：{user} → {outcome}")
+    }
 }
 
 /// 组装历史摘要块。超过摘要预算时先折叠最老轮次，再省略最老条目并给出省略数量。
@@ -377,12 +414,25 @@ fn build_digest_block(rounds: &[Vec<Value>], start_index: usize, budget_tokens: 
     let mut omitted = 0usize;
 
     let block = |entries: &[String], omitted: usize| {
-        let mut out = String::from("[历史摘要｜规则抽取，非模型生成]\n");
+        let en = crate::i18n::is_en();
+        let mut out = String::from(if en {
+            "[history summary | rule-extracted, not model-generated]\n"
+        } else {
+            "[历史摘要｜规则抽取，非模型生成]\n"
+        });
         if omitted > 0 {
-            out.push_str(&format!("[更早的 {omitted} 轮已省略]\n"));
+            out.push_str(&if en {
+                format!("[{omitted} earlier rounds omitted]\n")
+            } else {
+                format!("[更早的 {omitted} 轮已省略]\n")
+            });
         }
         out.push_str(&entries.join("\n"));
-        out.push_str("\n[历史摘要结束]");
+        out.push_str(if en {
+            "\n[history summary end]"
+        } else {
+            "\n[历史摘要结束]"
+        });
         out
     };
 
@@ -545,10 +595,18 @@ pub(crate) fn build_context_view(
     let fixed_tokens = scale(system_tokens + plan_tokens + tools_tokens);
 
     if fixed_tokens >= input_budget {
-        return Err(format!(
-            "当前模型的上下文窗口配置过小（{window} tokens）：系统提示与工具定义已占约 \
-             {fixed_tokens} tokens，请更换模型或调大 context_window"
-        ));
+        return Err(if crate::i18n::is_en() {
+            format!(
+                "The context window configured for the current model is too small ({window} tokens): \
+                 the system prompt and tool definitions already take about {fixed_tokens} tokens. \
+                 Switch to another model or increase context_window"
+            )
+        } else {
+            format!(
+                "当前模型的上下文窗口配置过小（{window} tokens）：系统提示与工具定义已占约 \
+                 {fixed_tokens} tokens，请更换模型或调大 context_window"
+            )
+        });
     }
 
     let history_budget = input_budget
@@ -683,18 +741,29 @@ pub(crate) fn build_context_view(
                 estimated: true,
                 calibrated: false,
                 warning: Some(
-                    "上下文已达上限，已重置早期历史，仅保留任务台账、任务锚点和最近一轮"
-                        .to_string(),
+                    crate::i18n::t(
+                        "上下文已达上限，已重置早期历史，仅保留任务台账、任务锚点和最近一轮",
+                        "The context limit was reached; earlier history was reset and only the task plan, the task anchor and the latest round were kept",
+                    )
+                    .to_string(),
                 ),
             },
         });
     }
 
     let used = scale(raw);
-    Err(format!(
-        "当前模型的上下文窗口配置过小（{window} tokens）：即使只保留系统提示、任务台账和最近一轮，\
-         仍需要约 {used} tokens。请调大该模型的 context_window，或更换窗口更大的模型"
-    ))
+    Err(if crate::i18n::is_en() {
+        format!(
+            "The context window configured for the current model is too small ({window} tokens): \
+             even keeping only the system prompt, the task plan and the latest round needs about \
+             {used} tokens. Increase this model's context_window or switch to a model with a larger window"
+        )
+    } else {
+        format!(
+            "当前模型的上下文窗口配置过小（{window} tokens）：即使只保留系统提示、任务台账和最近一轮，\
+             仍需要约 {used} tokens。请调大该模型的 context_window，或更换窗口更大的模型"
+        )
+    })
 }
 
 #[cfg(test)]

@@ -92,8 +92,8 @@ impl ApprovalRegistry {
     fn resolve(&self, id: &str, allow: bool) -> Result<(), String> {
         let tx = self.pending.lock().unwrap().remove(id);
         match tx {
-            Some(tx) => tx.send(allow).map_err(|_| "审批接收方已关闭".to_string()),
-            None => Err("审批请求不存在或已超时".to_string()),
+            Some(tx) => tx.send(allow).map_err(|_| crate::i18n::t("审批接收方已关闭", "The approval receiver is closed").to_string()),
+            None => Err(crate::i18n::t("审批请求不存在或已超时", "The approval request does not exist or has timed out").to_string()),
         }
     }
 
@@ -116,7 +116,7 @@ pub fn get_mcp_service(
 ) -> Result<McpServiceView, String> {
     let mut config = db
         .get_mcp_service()
-        .map_err(|e| format!("读取 MCP 服务配置失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取 MCP 服务配置失败", "Failed to read the MCP service config")))?;
     // token 加密存储在凭据表，读取时解密回填供前端展示
     if config.token.is_none() {
         config.token = crate::credentials::get_mcp_token();
@@ -135,12 +135,12 @@ pub async fn save_mcp_service(
     input: McpServiceInput,
 ) -> Result<McpServiceView, String> {
     if input.enabled && input.host_ids.is_empty() {
-        return Err("启用 MCP 服务前，请至少勾选一台服务器".to_string());
+        return Err(crate::i18n::t("启用 MCP 服务前，请至少勾选一台服务器", "Select at least one server before enabling the MCP service").to_string());
     }
 
     let mut config = db
         .get_mcp_service()
-        .map_err(|e| format!("读取 MCP 服务配置失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取 MCP 服务配置失败", "Failed to read the MCP service config")))?;
     config.enabled = input.enabled;
     config.host_ids = input.host_ids;
     config.permission_mode = input.permission_mode;
@@ -152,7 +152,7 @@ pub async fn save_mcp_service(
         drop(_life);
         config.port = None;
         db.save_mcp_service(&config)
-            .map_err(|e| format!("保存 MCP 服务配置失败: {e}"))?;
+            .map_err(|e| format!("{}: {e}", crate::i18n::t("保存 MCP 服务配置失败", "Failed to save the MCP service config")))?;
         return Ok(McpServiceView {
             running: false,
             config,
@@ -167,7 +167,7 @@ pub async fn save_mcp_service(
     // token 加密存凭据表，不落明文到 mcp_service 表
     if let Some(token) = config.token.clone() {
         crate::credentials::save_mcp_token(&token)
-            .map_err(|e| format!("保存 MCP token 失败: {e}"))?;
+            .map_err(|e| format!("{}: {e}", crate::i18n::t("保存 MCP token 失败", "Failed to save the MCP token")))?;
     }
     config.token = None;
     // 未运行时才启动；已运行时只需更新配置（请求时实时读取）。
@@ -178,7 +178,7 @@ pub async fn save_mcp_service(
         config.port = Some(port);
     }
     db.save_mcp_service(&config)
-        .map_err(|e| format!("保存 MCP 服务配置失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存 MCP 服务配置失败", "Failed to save the MCP service config")))?;
     drop(_life);
     // 回填明文 token 供前端展示
     config.token = crate::credentials::get_mcp_token();
@@ -195,14 +195,14 @@ pub fn rotate_mcp_token(
 ) -> Result<McpServiceView, String> {
     let mut config = db
         .get_mcp_service()
-        .map_err(|e| format!("读取 MCP 服务配置失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取 MCP 服务配置失败", "Failed to read the MCP service config")))?;
     let token = generate_token();
     crate::credentials::save_mcp_token(&token)
-        .map_err(|e| format!("保存 MCP token 失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存 MCP token 失败", "Failed to save the MCP token")))?;
     config.token = None;
     config.updated_at = now();
     db.save_mcp_service(&config)
-        .map_err(|e| format!("保存 MCP 服务配置失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存 MCP 服务配置失败", "Failed to save the MCP service config")))?;
     config.token = Some(token);
     Ok(McpServiceView {
         running: manager.is_running(),
@@ -222,14 +222,14 @@ pub fn mcp_approve(
 #[tauri::command]
 pub fn list_mcp_rules(db: State<'_, Arc<Db>>) -> Result<Vec<McpRule>, String> {
     db.list_mcp_rules()
-        .map_err(|e| format!("读取 MCP 管控规则失败: {e}"))
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取 MCP 管控规则失败", "Failed to read MCP guard rules")))
 }
 
 #[tauri::command]
 pub fn add_mcp_rule(db: State<'_, Arc<Db>>, pattern: String) -> Result<McpRule, String> {
     let pattern = pattern.trim().to_string();
     if pattern.is_empty() {
-        return Err("管控命令不能为空".to_string());
+        return Err(crate::i18n::t("管控命令不能为空", "The guarded command must not be empty").to_string());
     }
     let rule = McpRule {
         id: uuid::Uuid::new_v4().to_string(),
@@ -238,14 +238,14 @@ pub fn add_mcp_rule(db: State<'_, Arc<Db>>, pattern: String) -> Result<McpRule, 
         created_at: now(),
     };
     db.insert_mcp_rule(&rule)
-        .map_err(|e| format!("保存管控规则失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存管控规则失败", "Failed to save the guard rule")))?;
     Ok(rule)
 }
 
 #[tauri::command]
 pub fn delete_mcp_rule(db: State<'_, Arc<Db>>, id: String) -> Result<(), String> {
     db.delete_mcp_rule(&id)
-        .map_err(|e| format!("删除管控规则失败: {e}"))
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("删除管控规则失败", "Failed to delete the guard rule")))
 }
 
 // ---------- 服务生命周期 ----------
@@ -257,7 +257,7 @@ pub(crate) fn start_service(app: &AppHandle, manager: &McpServiceManager) -> Res
     std::thread::spawn(move || mcp_server_main(app, port_tx, shutdown_rx));
     let port = port_rx
         .recv_timeout(Duration::from_secs(5))
-        .map_err(|_| "MCP 服务启动超时".to_string())??;
+        .map_err(|_| crate::i18n::t("MCP 服务启动超时", "Timed out starting the MCP service").to_string())??;
     manager.set(Some(RunningMcp {
         shutdown: shutdown_tx,
     }));
@@ -280,7 +280,7 @@ fn mcp_server_main(
         Err(_) => match Server::http("127.0.0.1:0") {
             Ok(s) => s,
             Err(e) => {
-                let _ = port_tx.send(Err(format!("启动 MCP 服务失败: {e}")));
+                let _ = port_tx.send(Err(format!("{}: {e}", crate::i18n::t("启动 MCP 服务失败", "Failed to start the MCP service"))));
                 return;
             }
         },
@@ -296,7 +296,7 @@ fn mcp_server_main(
     {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("[mcp] 创建 runtime 失败: {e}");
+            eprintln!("[mcp] {}: {e}", crate::i18n::t("创建 runtime 失败", "failed to create the runtime"));
             return;
         }
     };
@@ -311,7 +311,7 @@ fn mcp_server_main(
             }
             Ok(None) => {}
             Err(e) => {
-                eprintln!("[mcp] HTTP 服务器错误: {e}");
+                eprintln!("[mcp] {}: {e}", crate::i18n::t("HTTP 服务器错误", "HTTP server error"));
                 break;
             }
         }
@@ -465,7 +465,7 @@ fn handle_http(app: AppHandle, rt: Arc<tokio::runtime::Runtime>, mut request: Re
     if !check_auth(&app, &request) {
         let headers = cors_headers(&request);
         let resp = attach_headers(
-            Response::from_string("未授权：请检查 MCP 配置中的 token")
+            Response::from_string(crate::i18n::t("未授权：请检查 MCP 配置中的 token", "Unauthorized: check the token in your MCP configuration"))
                 .with_status_code(StatusCode(401)),
             headers,
         );
@@ -483,7 +483,7 @@ fn handle_http(app: AppHandle, rt: Arc<tokio::runtime::Runtime>, mut request: Re
             if limited.read_to_string(&mut body).is_err() || body.len() as u64 > MAX_BODY {
                 let headers = cors_headers(&request);
                 let resp = attach_headers(
-                    Response::from_string("请求体过大或读取失败（上限 1MB）")
+                    Response::from_string(crate::i18n::t("请求体过大或读取失败（上限 1MB）", "Request body too large or failed to read (limit 1MB)"))
                         .with_status_code(StatusCode(413)),
                     headers,
                 );
@@ -550,7 +550,7 @@ fn handle_sse(request: Request) {
 async fn handle_jsonrpc(app: &AppHandle, body: &str) -> String {
     let value: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
-        Err(e) => return json_error(None, -32700, &format!("解析请求失败: {e}")),
+        Err(e) => return json_error(None, -32700, &format!("{}: {e}", crate::i18n::t("解析请求失败", "Failed to parse the request"))),
     };
     let method = value["method"].as_str().unwrap_or("").to_string();
     let id = value.get("id").cloned();
@@ -588,13 +588,13 @@ async fn handle_jsonrpc(app: &AppHandle, body: &str) -> String {
                 Err(e) => respond(
                     id,
                     serde_json::json!({
-                        "content": [{ "type": "text", "text": format!("错误: {e}") }],
+                        "content": [{ "type": "text", "text": format!("{}: {e}", crate::i18n::t("错误", "Error")) }],
                         "isError": true
                     }),
                 ),
             }
         }
-        _ => json_error(id, -32601, &format!("未知方法: {method}")),
+        _ => json_error(id, -32601, &format!("{}: {method}", crate::i18n::t("未知方法", "Unknown method"))),
     }
 }
 
@@ -625,51 +625,51 @@ fn tools_schema() -> Vec<serde_json::Value> {
     let tools = vec![
         serde_json::json!({
             "name": "list_hosts",
-            "description": "列出当前 MCP 服务授权可操作的服务器（仅包含用户勾选的主机）",
+            "description": crate::i18n::t("列出当前 MCP 服务授权可操作的服务器（仅包含用户勾选的主机）", "List the servers this MCP service is authorized to operate on (only the hosts selected by the user)"),
             "inputSchema": { "type": "object", "properties": {} }
         }),
         serde_json::json!({
             "name": "resource_usage",
-            "description": "查看指定服务器（host 参数）的磁盘、内存、负载和占用最高的进程。host 可以是 list_hosts 返回的 id、name 或 address",
+            "description": crate::i18n::t("查看指定服务器（host 参数）的磁盘、内存、负载和占用最高的进程。host 可以是 list_hosts 返回的 id、name 或 address", "Show disk, memory, load and the busiest processes of the given server (host parameter). host may be an id, name or address returned by list_hosts"),
             "inputSchema": {
                 "type": "object",
-                "properties": { "host": { "type": "string", "description": "主机 id / name / address" } },
+                "properties": { "host": { "type": "string", "description": crate::i18n::t("主机 id / name / address", "host id / name / address") } },
                 "required": ["host"]
             }
         }),
         serde_json::json!({
             "name": "read_file",
-            "description": "读取指定服务器上的文件内容",
+            "description": crate::i18n::t("读取指定服务器上的文件内容", "Read a file on the given server"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "host": { "type": "string", "description": "主机 id / name / address" },
-                    "path": { "type": "string", "description": "服务器上的文件路径" }
+                    "host": { "type": "string", "description": crate::i18n::t("主机 id / name / address", "host id / name / address") },
+                    "path": { "type": "string", "description": crate::i18n::t("服务器上的文件路径", "path of the file on the server") }
                 },
                 "required": ["host", "path"]
             }
         }),
         serde_json::json!({
             "name": "list_dir",
-            "description": "列出指定服务器上的目录内容",
+            "description": crate::i18n::t("列出指定服务器上的目录内容", "List the contents of a directory on the given server"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "host": { "type": "string", "description": "主机 id / name / address" },
-                    "path": { "type": "string", "description": "目录路径，默认当前目录" }
+                    "host": { "type": "string", "description": crate::i18n::t("主机 id / name / address", "host id / name / address") },
+                    "path": { "type": "string", "description": crate::i18n::t("目录路径，默认当前目录", "directory path, defaults to the current directory") }
                 },
                 "required": ["host"]
             }
         }),
         serde_json::json!({
             "name": "exec_command",
-            "description": "在指定服务器上执行一条 shell 命令并返回输出。只读模式下写操作会被拒绝；管控模式下命中自定义管控规则的命令会触发用户确认。host 可以是 list_hosts 返回的 id、name 或 address",
+            "description": crate::i18n::t("在指定服务器上执行一条 shell 命令并返回输出。只读模式下写操作会被拒绝；管控模式下命中自定义管控规则的命令会触发用户确认。host 可以是 list_hosts 返回的 id、name 或 address", "Run a shell command on the given server and return its output. In read-only mode write operations are rejected; in guarded mode commands matching a custom guard rule trigger a user confirmation. host may be an id, name or address returned by list_hosts"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "host": { "type": "string", "description": "主机 id / name / address" },
-                    "command": { "type": "string", "description": "要执行的 shell 命令" },
-                    "timeout_secs": { "type": "number", "description": "超时秒数，默认 30" }
+                    "host": { "type": "string", "description": crate::i18n::t("主机 id / name / address", "host id / name / address") },
+                    "command": { "type": "string", "description": crate::i18n::t("要执行的 shell 命令", "shell command to run") },
+                    "timeout_secs": { "type": "number", "description": crate::i18n::t("超时秒数，默认 30", "timeout in seconds, default 30") }
                 },
                 "required": ["host", "command"]
             }
@@ -683,15 +683,15 @@ fn tools_schema() -> Vec<serde_json::Value> {
 async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Result<String, String> {
     let db = app
         .try_state::<Arc<Db>>()
-        .ok_or_else(|| "数据库不可用".to_string())?;
+        .ok_or_else(|| crate::i18n::t("数据库不可用", "The database is unavailable").to_string())?;
     let config = db
         .get_mcp_service()
-        .map_err(|e| format!("读取 MCP 服务配置失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取 MCP 服务配置失败", "Failed to read the MCP service config")))?;
     if !config.enabled {
-        return Err("MCP 服务未启用".to_string());
+        return Err(crate::i18n::t("MCP 服务未启用", "The MCP service is not enabled").to_string());
     }
     let allowed: HashSet<String> = config.host_ids.iter().cloned().collect();
-    let hosts = db.list().map_err(|e| format!("读取主机失败: {e}"))?;
+    let hosts = db.list().map_err(|e| format!("{}: {e}", crate::i18n::t("读取主机失败", "Failed to read hosts")))?;
 
     if name == "list_hosts" {
         let visible: Vec<serde_json::Value> = hosts
@@ -713,21 +713,26 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
 
     let host = resolve_host(&hosts, args.get("host").and_then(|h| h.as_str()))?;
     if !allowed.contains(&host.id) {
-        return Err(format!(
-            "主机 {} 未授权给 MCP 服务，请先在 buffTerm 中勾选该服务器",
-            host.name
-        ));
+        return Err(if crate::i18n::is_en() {
+            format!("Host {} is not authorized for the MCP service; select it in buffTerm first", host.name)
+        } else {
+            format!("主机 {} 未授权给 MCP 服务，请先在 buffTerm 中勾选该服务器", host.name)
+        });
     }
     match name {
         "resource_usage" => {
-            let script = "echo '-- 磁盘 --'; df -h; echo; echo '-- 内存 --'; (free -h 2>/dev/null || vm_stat); echo; echo '-- 负载 --'; uptime; echo; echo '-- TOP 进程 --'; (ps aux --sort=-%mem 2>/dev/null || ps aux) | head -8";
+            let script = if crate::i18n::is_en() {
+            "echo '-- Disk --'; df -h; echo; echo '-- Memory --'; (free -h 2>/dev/null || vm_stat); echo; echo '-- Load --'; uptime; echo; echo '-- TOP processes --'; (ps aux --sort=-%mem 2>/dev/null || ps aux) | head -8"
+        } else {
+            "echo '-- 磁盘 --'; df -h; echo; echo '-- 内存 --'; (free -h 2>/dev/null || vm_stat); echo; echo '-- 负载 --'; uptime; echo; echo '-- TOP 进程 --'; (ps aux --sort=-%mem 2>/dev/null || ps aux) | head -8"
+        };
             run_and_log(app, host, name, script, 25, None).await
         }
         "read_file" => {
             let path = args
                 .get("path")
                 .and_then(|p| p.as_str())
-                .ok_or_else(|| "缺少 path 参数".to_string())?;
+                .ok_or_else(|| crate::i18n::t("缺少 path 参数", "Missing path parameter").to_string())?;
             let script = format!("cat -- {}", shq(path));
             run_and_log(app, host, name, &script, 15, None).await
         }
@@ -740,7 +745,7 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
             let command = args
                 .get("command")
                 .and_then(|c| c.as_str())
-                .ok_or_else(|| "缺少 command 参数".to_string())?
+                .ok_or_else(|| crate::i18n::t("缺少 command 参数", "Missing command parameter").to_string())?
                 .to_string();
             let timeout = args
                 .get("timeout_secs")
@@ -752,7 +757,7 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
                 // 只读模式：允许只读命令，拒绝任何写操作
                 if is_write_operation(&command) {
                     let message =
-                        "只读模式不允许写操作，已拒绝执行。如需写操作请切换到管控模式或全部放行";
+                        crate::i18n::t("只读模式不允许写操作，已拒绝执行。如需写操作请切换到管控模式或全部放行", "Write operations are not allowed in read-only mode and were rejected. Switch to guarded mode or allow-all to permit writes");
                     let _ = write_audit(
                         app,
                         host,
@@ -780,16 +785,16 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
                             &command,
                             "denied",
                             "denied",
-                            Some("用户拒绝执行该命令"),
+                            Some(crate::i18n::t("用户拒绝执行该命令", "The user denied this command")),
                             None,
                         );
-                        return Err("用户拒绝执行该命令".to_string());
+                        return Err(crate::i18n::t("用户拒绝执行该命令", "The user denied this command").to_string());
                     }
                 }
             }
             run_and_log(app, host, name, &command, timeout, approval).await
         }
-        _ => Err(format!("未知工具: {name}")),
+        _ => Err(format!("{}: {name}", crate::i18n::t("未知工具", "Unknown tool"))),
     }
 }
 
@@ -816,7 +821,7 @@ async fn run_and_log(
     };
     let russh = app
         .try_state::<RusshManager>()
-        .ok_or_else(|| "SSH 管理器不可用".to_string())?;
+        .ok_or_else(|| crate::i18n::t("SSH 管理器不可用", "The SSH manager is unavailable").to_string())?;
     let started = Instant::now();
     match russh
         .exec(host, command, Duration::from_secs(timeout_secs))
@@ -874,7 +879,7 @@ async fn request_approval(
 ) -> Result<bool, String> {
     let registry = app
         .try_state::<ApprovalRegistry>()
-        .ok_or_else(|| "审批服务不可用".to_string())?;
+        .ok_or_else(|| crate::i18n::t("审批服务不可用", "The approval service is unavailable").to_string())?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let rx = registry.register(request_id.clone());
     let _ = app.emit(
@@ -889,8 +894,8 @@ async fn request_approval(
     );
     let result = match tokio::time::timeout(Duration::from_secs(600), rx).await {
         Ok(Ok(allow)) => Ok(allow),
-        Ok(Err(_)) => Err("审批通道已关闭".to_string()),
-        Err(_) => Err("等待用户审批超时（10 分钟）".to_string()),
+        Ok(Err(_)) => Err(crate::i18n::t("审批通道已关闭", "The approval channel is closed").to_string()),
+        Err(_) => Err(crate::i18n::t("等待用户审批超时（10 分钟）", "Timed out waiting for user approval (10 minutes)").to_string()),
     };
     registry.remove(&request_id);
     result
@@ -907,7 +912,7 @@ fn write_audit(
     result: Option<&str>,
     duration_ms: Option<u64>,
 ) -> Result<(), String> {
-    let db = app.try_state::<Arc<Db>>().ok_or_else(|| "数据库不可用".to_string())?;
+    let db = app.try_state::<Arc<Db>>().ok_or_else(|| crate::i18n::t("数据库不可用", "The database is unavailable").to_string())?;
     let log = crate::models::AuditLog {
         id: uuid::Uuid::new_v4().to_string(),
         ts: now(),
@@ -929,11 +934,17 @@ fn write_audit(
 }
 
 fn resolve_host<'a>(hosts: &'a [Host], key: Option<&str>) -> Result<&'a Host, String> {
-    let key = key.ok_or_else(|| "缺少 host 参数".to_string())?;
+    let key = key.ok_or_else(|| crate::i18n::t("缺少 host 参数", "Missing host parameter").to_string())?;
     hosts
         .iter()
         .find(|h| h.id == key || h.name == key || h.address == key)
-        .ok_or_else(|| format!("未找到主机 {key}，请先调用 list_hosts 查看可用主机"))
+        .ok_or_else(|| {
+            if crate::i18n::is_en() {
+                format!("Host {key} not found; call list_hosts to see the available hosts")
+            } else {
+                format!("未找到主机 {key}，请先调用 list_hosts 查看可用主机")
+            }
+        })
 }
 
 #[cfg(test)]

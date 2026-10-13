@@ -14,6 +14,7 @@ import {
   monitorState,
 } from '../api';
 import type { Host, HostInfo, MonitorPoint, MonitorSnapshot } from '../types';
+import { useI18n, useT, type TFunc } from '../i18n';
 import { fmtError } from '../utils/errors';
 import { formatBytes } from '../utils/remote';
 import {
@@ -168,6 +169,8 @@ function HistoryChart({
   value: number;
   color: 'cpu' | 'mem';
 }) {
+  const { t, lang } = useI18n();
+  const locale = lang === 'en' ? 'en-US' : 'zh-CN';
   const [hover, setHover] = useState<{ idx: number; x: number } | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const W = 320;
@@ -274,25 +277,25 @@ function HistoryChart({
             style={{ left: `${(hover.x / W) * 100}%` }}
           >
             <span className="tooltip-time">
-              {new Date(hovered.ts * 1000).toLocaleTimeString('zh-CN', { hour12: false })}
+              {new Date(hovered.ts * 1000).toLocaleTimeString(locale, { hour12: false })}
             </span>
             <span className="tooltip-value">{hovered.value.toFixed(1)}%</span>
           </div>
         )}
       </div>
       <div className="monitor-chart-axis">
-        <span>{formatAgo(window)}</span>
-        <span>现在</span>
+        <span>{formatAgo(window, t)}</span>
+        <span>{t('monitor.now')}</span>
       </div>
     </div>
   );
 }
 
-function formatAgo(sec: number): string {
+function formatAgo(sec: number, t: TFunc): string {
   const minutes = sec / 60;
-  if (minutes < 1) return '1分钟内';
-  if (minutes < 60) return `${Math.round(minutes)}分钟前`;
-  return `${Math.round(minutes / 60)}小时前`;
+  if (minutes < 1) return t('monitor.agoWithinMinute');
+  if (minutes < 60) return t('monitor.agoMinutes', { n: Math.round(minutes) });
+  return t('monitor.agoHours', { n: Math.round(minutes / 60) });
 }
 
 /** 字节速率自适应单位（B/s → KB/s → MB/s → GB/s） */
@@ -304,14 +307,14 @@ function fmtRate(bps: number): string {
 }
 
 /** 运行时长：3天 5小时 / 2小时 10分 / 30分 */
-function fmtUptime(secs: number): string {
+function fmtUptime(secs: number, t: TFunc): string {
   if (secs <= 0) return '—';
   const d = Math.floor(secs / 86400);
   const h = Math.floor((secs % 86400) / 3600);
   const m = Math.floor((secs % 3600) / 60);
-  if (d > 0) return `${d}天 ${h}小时`;
-  if (h > 0) return `${h}小时 ${m}分`;
-  return `${m}分`;
+  if (d > 0) return t('monitor.uptimeDays', { d, h });
+  if (h > 0) return t('monitor.uptimeHours', { h, m });
+  return t('monitor.uptimeMinutes', { m });
 }
 
 /** KB → df -h 风格展示串：40G / 6.3M / 1.5T（与后端 fmt_kb 同口径） */
@@ -337,6 +340,7 @@ function niceCeil(v: number): number {
 
 /** 顶部服务器信息卡：公网 IP（可复制）/ 位置 / 系统 / CPU / 内存 / 运行时长 */
 function HostInfoCard({ info }: { info: HostInfo }) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
   const copyIp = () => {
     if (!info.public_ip) return;
@@ -348,9 +352,10 @@ function HostInfoCard({ info }: { info: HostInfo }) {
   const sys = [info.os, info.arch].filter(Boolean).join(' ') || '—';
   const cpu =
     info.cores > 0 || info.threads > 0
-      ? `${info.cores || info.threads} 核 / ${info.threads} 线程${
-          info.cpu_model ? ` · ${info.cpu_model}` : ''
-        }`
+      ? `${t('monitor.coresThreads', {
+          cores: info.cores || info.threads,
+          threads: info.threads,
+        })}${info.cpu_model ? ` · ${info.cpu_model}` : ''}`
       : info.cpu_model || '—';
   return (
     <div className="monitor-info">
@@ -363,7 +368,7 @@ function HostInfoCard({ info }: { info: HostInfo }) {
           {info.public_ip && (
             <button
               className="icon-btn monitor-copy"
-              title="复制公网 IP"
+              title={t('monitor.copyIp')}
               onClick={copyIp}
             >
               {copied ? <CheckIcon size={11} /> : <CopyIcon size={11} />}
@@ -372,12 +377,15 @@ function HostInfoCard({ info }: { info: HostInfo }) {
         </span>
       </div>
       <div className="info-row">
-        <span className="info-label">位置</span>
+        <span className="info-label">{t('monitor.location')}</span>
         <span className="info-value">{info.location || '—'}</span>
       </div>
       <div className="info-row">
-        <span className="info-label">系统</span>
-        <span className="info-value" title={info.kernel ? `内核 ${info.kernel}` : undefined}>
+        <span className="info-label">{t('monitor.system')}</span>
+        <span
+          className="info-value"
+          title={info.kernel ? t('monitor.kernel', { v: info.kernel }) : undefined}
+        >
           {sys}
         </span>
       </div>
@@ -388,7 +396,7 @@ function HostInfoCard({ info }: { info: HostInfo }) {
         </span>
       </div>
       <div className="info-row">
-        <span className="info-label">内存</span>
+        <span className="info-label">{t('monitor.memory')}</span>
         <span className="info-value">
           {info.mem_total_mb > 0
             ? `${(info.mem_total_mb / 1024).toFixed(1)} GB`
@@ -396,8 +404,8 @@ function HostInfoCard({ info }: { info: HostInfo }) {
         </span>
       </div>
       <div className="info-row">
-        <span className="info-label">运行</span>
-        <span className="info-value">{fmtUptime(info.uptime_secs)}</span>
+        <span className="info-label">{t('monitor.uptime')}</span>
+        <span className="info-value">{fmtUptime(info.uptime_secs, t)}</span>
       </div>
     </div>
   );
@@ -413,6 +421,8 @@ function NetChart({
   totalRx: number;
   totalTx: number;
 }) {
+  const { t, lang } = useI18n();
+  const locale = lang === 'en' ? 'en-US' : 'zh-CN';
   const [hover, setHover] = useState<{ idx: number; x: number } | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const W = 320;
@@ -465,7 +475,7 @@ function NetChart({
     <div className="monitor-chart">
       <div className="monitor-chart-head">
         <span className="monitor-chart-label">
-          <i className="dot-rx" /> 流量
+          <i className="dot-rx" /> {t('monitor.net')}
         </span>
         <span className="monitor-chart-value net">
           <span className="rx">↓ {last ? fmtRate(last.rx) : '—'}</span>
@@ -523,7 +533,7 @@ function NetChart({
             style={{ left: `${(hover.x / W) * 100}%` }}
           >
             <span className="tooltip-time">
-              {new Date(hovered.ts * 1000).toLocaleTimeString('zh-CN', {
+              {new Date(hovered.ts * 1000).toLocaleTimeString(locale, {
                 hour12: false,
               })}
             </span>
@@ -534,17 +544,22 @@ function NetChart({
         )}
       </div>
       <div className="monitor-chart-axis">
-        <span>{formatAgo(window)}</span>
+        <span>{formatAgo(window, t)}</span>
         <span className="monitor-net-total">
-          累计 流入 {formatBytes(totalRx)} 流出 {formatBytes(totalTx)}
+          {t('monitor.netTotal', {
+            rx: formatBytes(totalRx),
+            tx: formatBytes(totalTx),
+          })}
         </span>
-        <span>现在</span>
+        <span>{t('monitor.now')}</span>
       </div>
     </div>
   );
 }
 
 function MonitorPanel({ host, hidden = false, onClose }: Props) {
+  const { t, lang } = useI18n();
+  const locale = lang === 'en' ? 'en-US' : 'zh-CN';
   const [snap, setSnap] = useState<MonitorSnapshot | null>(
     () => panelCache.get(host.id)?.snap ?? null,
   );
@@ -618,6 +633,16 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
     setLoading(!cached);
     fetchInfo();
   }, [fetchInfo, host.id]);
+
+  // 切换界面语言后归属地（国家 / 城市）需按新语言重新采集：
+  // 清掉静态信息模块缓存并强制刷新一次，避免英文界面下仍显示中文地名
+  const infoLangRef = useRef(lang);
+  useEffect(() => {
+    if (infoLangRef.current === lang) return;
+    infoLangRef.current = lang;
+    infoCache.clear();
+    fetchInfo(true);
+  }, [lang, fetchInfo]);
 
   // 面板打开 / 切换主机时读取后台采集状态：后台采集在会话建立后就已启动，
   // 这里一次性拿到连接以来的完整历史（面板打开 5s / 后台 30s 粒度，含面板关闭期间
@@ -757,12 +782,12 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
     >
       <div className="sftp-header">
         <div className="sftp-path">
-          <ActivityIcon size={14} /> 资源监控（每 5 秒刷新）
+          <ActivityIcon size={14} /> {t('monitor.title')}
         </div>
         <div className="sftp-actions">
           <button
             className="icon-btn"
-            title="立即刷新"
+            title={t('monitor.refreshNow')}
             onClick={() => {
               setLoading(true);
               void load();
@@ -771,22 +796,22 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
           >
             <RefreshIcon size={14} />
           </button>
-          <button className="icon-btn" title="关闭" onClick={onClose}>
+          <button className="icon-btn" title={t('common.close')} onClick={onClose}>
             <XIcon size={14} />
           </button>
         </div>
       </div>
 
       <div className="monitor-body">
-        {loading && !snap && <div className="sftp-status">加载中…</div>}
+        {loading && !snap && <div className="sftp-status">{t('common.loading')}</div>}
         {error && !snap && <div className="sftp-status err">{error}</div>}
         {info && <HostInfoCard info={info} />}
         {snap && (
           <>
             <div className="monitor-summary">
-              <span>负载 1/5/15：{snap.load || '—'}</span>
+              <span>{t('monitor.loadAvg', { load: snap.load || '—' })}</span>
               <span>
-                {new Date(snap.ts * 1000).toLocaleTimeString('zh-CN', { hour12: false })}
+                {new Date(snap.ts * 1000).toLocaleTimeString(locale, { hour12: false })}
               </span>
             </div>
 
@@ -798,7 +823,7 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
                 color="cpu"
               />
               <HistoryChart
-                label="内存"
+                label={t('monitor.memory')}
                 points={history.map((p) => ({ ts: p.ts, value: p.mem }))}
                 value={snap.mem.percent}
                 color="mem"
@@ -814,7 +839,7 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
               <div className="monitor-chart monitor-disks">
                 <div className="monitor-chart-head">
                   <span className="monitor-chart-label">
-                    <i className="dot-disk" /> 磁盘
+                    <i className="dot-disk" /> {t('monitor.disk')}
                   </span>
                   <span className="monitor-chart-value">
                     {fmtKb(snap.disks.reduce((s, d) => s + d.used_kb, 0))}
@@ -833,7 +858,7 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
                   {snap.disks.map((d) => (
                     <Gauge
                       key={d.mount}
-                      label={`磁盘 ${d.mount}`}
+                      label={t('monitor.diskMount', { mount: d.mount })}
                       value={d.percent}
                       display={`${d.used} / ${d.total}`}
                     />
@@ -843,7 +868,7 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
             )}
 
             <div className="monitor-section-title monitor-procs-head">
-              TOP10 进程
+              {t('monitor.topProcs')}
               <span className="proc-switch">
                 <button
                   className={procTab === 'cpu' ? 'active' : ''}

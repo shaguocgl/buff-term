@@ -23,6 +23,7 @@ import {
   sessionInput,
 } from '../api';
 import type { TerminalStatusFrame } from '../api';
+import { useT } from '../i18n';
 import type { Host } from '../types';
 import { fmtError } from '../utils/errors';
 import { IS_MAC } from '../utils/platform';
@@ -111,6 +112,7 @@ function TerminalSearchBar({
   searchAddon: SearchAddon;
   onClose: () => void;
 }) {
+  const t = useT();
   const [query, setQuery] = useState('');
   const [stats, setStats] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -122,13 +124,13 @@ function TerminalSearchBar({
 
   useEffect(() => {
     const disposable = searchAddon.onDidChangeResults((r) => {
-      if (r.resultCount === 0) setStats('无结果');
+      if (r.resultCount === 0) setStats(t('term.noResults'));
       else if (r.resultIndex >= 0 && r.resultCount > 0)
         setStats(`${r.resultIndex + 1}/${r.resultCount}`);
       else setStats(null);
     });
     return () => disposable.dispose();
-  }, [searchAddon]);
+  }, [searchAddon, t]);
 
   const doSearch = (dir: 'next' | 'prev') => {
     if (!query) return;
@@ -141,7 +143,7 @@ function TerminalSearchBar({
       <input
         ref={inputRef}
         value={query}
-        placeholder="搜索终端…"
+        placeholder={t('term.searchPlaceholder')}
         onChange={(e) => setQuery(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === 'Enter') {
@@ -156,19 +158,19 @@ function TerminalSearchBar({
       {stats && <span className="terminal-search-stats">{stats}</span>}
       <button
         className="icon-btn"
-        title="上一个 (Shift+Enter)"
+        title={t('term.prev')}
         onClick={() => doSearch('prev')}
       >
         ↑
       </button>
       <button
         className="icon-btn"
-        title="下一个 (Enter)"
+        title={t('term.next')}
         onClick={() => doSearch('next')}
       >
         ↓
       </button>
-      <button className="icon-btn" title="关闭 (Esc)" onClick={onClose}>
+      <button className="icon-btn" title={t('term.closeEsc')} onClick={onClose}>
         ×
       </button>
     </div>
@@ -193,6 +195,10 @@ export default function TerminalView({
   onDisconnect,
   onAddToChat,
 }: Props) {
+  const t = useT();
+  // 终端实例只在挂载时创建一次；用 ref 取最新文案，避免切换语言时重建终端（会断开会话）
+  const tRef = useRef(t);
+  tRef.current = t;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sessionIdRef = useRef<number | null>(null);
   const activeConnectionRequestRef = useRef<string | null>(null);
@@ -334,25 +340,27 @@ export default function TerminalView({
       setConnecting(false);
       if (s.status === 'closed') {
         // 手动断开：不自动重连（标签页即将关闭）
-        term?.writeln(`\r\n\x1b[33m[会话已结束: closed]\x1b[0m`);
+        term?.writeln(`\r\n\x1b[33m${t('term.sessionClosed')}\x1b[0m`);
         if (term) term.options.disableStdin = true;
         setExited(true);
       } else if (s.reason === 'disconnected') {
-        term?.writeln(`\r\n\x1b[31m[连接已断开]\x1b[0m`);
+        term?.writeln(`\r\n\x1b[31m${t('term.disconnected')}\x1b[0m`);
         if (term) term.options.disableStdin = true;
         setExited(true);
         onExitedRef.current(tabKey);
         if (autoReconnectRef.current) scheduleReconnectRef.current();
       } else {
+        const code =
+          s.exit_code != null ? t('term.exitCode', { n: s.exit_code }) : '';
         term?.writeln(
-          `\r\n\x1b[33m[会话已结束：shell 已退出${s.exit_code != null ? `，退出码 ${s.exit_code}` : ''}]\x1b[0m`,
+          `\r\n\x1b[33m${t('term.shellExited', { code })}\x1b[0m`,
         );
         if (term) term.options.disableStdin = true;
         setExited(true);
         onExitedRef.current(tabKey);
       }
     },
-    [tabKey],
+    [tabKey, t],
   );
 
   const connect = useCallback(async (): Promise<boolean> => {
@@ -414,14 +422,17 @@ export default function TerminalView({
     const attempt = reconnectAttemptsRef.current;
     if (attempt >= 5) {
       termRef.current?.writeln(
-        '\r\n\x1b[31m[自动重连失败：已达最大重试次数，请手动重连]\x1b[0m',
+        `\r\n\x1b[31m${t('term.reconnectFailedMax')}\x1b[0m`,
       );
       return;
     }
     reconnectScheduledRef.current = true;
     const delayMs = Math.min(30_000, 1000 * 2 ** attempt);
     termRef.current?.writeln(
-      `\r\n\x1b[90m[${Math.round(delayMs / 1000)}s 后自动重连（第 ${attempt + 1}/5 次）…]\x1b[0m`,
+      `\r\n\x1b[90m${t('term.reconnectIn', {
+        s: Math.round(delayMs / 1000),
+        n: attempt + 1,
+      })}\x1b[0m`,
     );
     reconnectTimerRef.current = window.setTimeout(() => {
       reconnectTimerRef.current = null;
@@ -432,17 +443,19 @@ export default function TerminalView({
         .then((ok) => {
           if (!ok) return;
           reconnectAttemptsRef.current = 0;
-          termRef.current?.writeln('\r\n\x1b[32m[已自动重新连接]\x1b[0m');
+          termRef.current?.writeln(`\r\n\x1b[32m${t('term.reconnected')}\x1b[0m`);
         })
         .catch((e) => {
           setConnecting(false);
           setExited(true);
           const message = fmtError(e);
-          termRef.current?.writeln(`\r\n\x1b[31m[重连失败: ${message}]\x1b[0m`);
+          termRef.current?.writeln(
+            `\r\n\x1b[31m${t('term.reconnectFailed', { msg: message })}\x1b[0m`,
+          );
           scheduleReconnectRef.current();
         });
     }, delayMs);
-  }, []);
+  }, [t]);
   scheduleReconnectRef.current = scheduleReconnect;
 
   const toggleAutoReconnect = () => {
@@ -661,7 +674,9 @@ export default function TerminalView({
     })().catch((e) => {
       if (disposed) return;
       const message = fmtError(e);
-      term.writeln(`\r\n\x1b[31m[连接失败: ${message}]\x1b[0m`);
+      term.writeln(
+        `\r\n\x1b[31m${tRef.current('term.connectFailed', { msg: message })}\x1b[0m`,
+      );
       setConnecting(false);
       setExited(true);
       onFailedRef.current(tabKey, message);
@@ -748,7 +763,9 @@ export default function TerminalView({
     termRef.current?.reset();
     connectRef.current().catch((e) => {
       const message = fmtError(e);
-      termRef.current?.writeln(`\r\n\x1b[31m[重连失败: ${message}]\x1b[0m`);
+      termRef.current?.writeln(
+        `\r\n\x1b[31m${t('term.reconnectFailed', { msg: message })}\x1b[0m`,
+      );
       setConnecting(false);
       setExited(true);
       onFailedRef.current(tabKey, message);
@@ -769,13 +786,13 @@ export default function TerminalView({
       <div className="terminal-header" onMouseDown={startWindowDrag}>
         {exited && !connecting && (
           <button className="btn reconnect" onClick={handleReconnect}>
-            <RefreshIcon size={13} /> 重连
+            <RefreshIcon size={13} /> {t('term.reconnect')}
           </button>
         )}
         {exited && !connecting && (
           <label
             className="autoreconnect-toggle"
-            title="会话结束后自动尝试重连（最多 5 次，指数退避）。注意：手动输入 exit 退出也会触发"
+            title={t('term.autoReconnectTitle')}
             onMouseDown={(e) => e.stopPropagation()}
           >
             <input
@@ -783,7 +800,7 @@ export default function TerminalView({
               checked={autoReconnect}
               onChange={toggleAutoReconnect}
             />
-            自动重连
+            {t('term.autoReconnect')}
           </label>
         )}
         <div className="terminal-header-actions">
@@ -797,22 +814,22 @@ export default function TerminalView({
             className={`btn ai-toggle${sftpOpen ? ' active' : ''}`}
             onClick={onToggleSftp}
           >
-            <FolderIcon size={14} /> <span className="toolbar-label">文件</span>
+            <FolderIcon size={14} /> <span className="toolbar-label">{t('editor.files')}</span>
           </button>
           <button
             className={`btn ai-toggle${monitorOpen ? ' active' : ''}`}
             onClick={onToggleMonitor}
           >
-            <ActivityIcon size={14} /> <span className="toolbar-label">监控</span>
+            <ActivityIcon size={14} /> <span className="toolbar-label">{t('term.monitor')}</span>
           </button>
           <button
             className={`btn ai-toggle${inspectionOpen ? ' active' : ''}`}
             onClick={onToggleInspection}
           >
-            <InspectIcon size={14} /> <span className="toolbar-label">巡检</span>
+            <InspectIcon size={14} /> <span className="toolbar-label">{t('term.inspect')}</span>
           </button>
           <button className="btn disconnect" onClick={handleDisconnect}>
-            <PowerIcon size={14} /> <span className="toolbar-label">断开</span>
+            <PowerIcon size={14} /> <span className="toolbar-label">{t('term.disconnect')}</span>
           </button>
         </div>
       </div>
@@ -820,7 +837,7 @@ export default function TerminalView({
         {connecting && (
           <div className="terminal-overlay">
             <div className="spinner" />
-            <span>正在连接 {host.name}…</span>
+            <span>{t('term.connecting', { name: host.name })}</span>
           </div>
         )}
         {searchOpen && searchAddonRef.current && (
@@ -834,7 +851,7 @@ export default function TerminalView({
             type="button"
             className="terminal-selection-action"
             style={{ left: selectionAction.x, top: selectionAction.y }}
-            title="把选中的内容加入 AI 提问"
+            title={t('term.askAiTitle')}
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => {
               onAddToChatRef.current(selectionAction.text);
@@ -842,7 +859,7 @@ export default function TerminalView({
               termRef.current?.clearSelection();
             }}
           >
-            <SparklesIcon size={13} /> 问 AI
+            <SparklesIcon size={13} /> {t('term.askAi')}
           </button>
         )}
       </div>

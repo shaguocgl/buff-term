@@ -69,28 +69,41 @@ fn fmt_ts(ts: u64) -> String {
         .unwrap_or_else(|| ts.to_string())
 }
 
-/// 各粒度对应的中文说明，用于在输出里告知模型当前序列是原始采样还是聚合均值。
+/// 各粒度对应的说明，用于在输出里告知模型当前序列是原始采样还是聚合均值。
 fn granularity_label(granularity: &str) -> &'static str {
     match granularity {
-        "hour" => "按小时聚合均值",
-        "day" => "按天聚合均值",
-        _ => "原始采样点（未聚合）",
+        "hour" => crate::i18n::t("按小时聚合均值", "hourly averages"),
+        "day" => crate::i18n::t("按天聚合均值", "daily averages"),
+        _ => crate::i18n::t("原始采样点（未聚合）", "raw samples (not aggregated)"),
     }
 }
 
 /// 格式化单个标量指标（cpu/mem/load）的趋势文本，供模型阅读。
 /// `granularity` 决定是否先按小时/天聚合再做回归和展示（见 `bucket_seconds`）。
 fn format_scalar_trend(label: &str, unit: &str, points: &[(f64, f64)], window_h: f64, granularity: &str) -> String {
+    let en = crate::i18n::is_en();
     if points.is_empty() {
-        return format!("指标: {}\n数据不足：该时间窗口内没有历史样本，建议先多使用几次监控/巡检/对话来积累数据。\n", label);
+        return if en {
+            format!("metric: {label}\nnot enough data: no historical samples in this window; use monitoring/inspection/chat a few more times to accumulate data.\n")
+        } else {
+            format!("指标: {}\n数据不足：该时间窗口内没有历史样本，建议先多使用几次监控/巡检/对话来积累数据。\n", label)
+        };
     }
     let points = bucket_points(points, bucket_seconds(granularity));
     if points.len() < 5 {
-        return format!(
-            "指标: {} ({} 个样本，数据偏少)\n最早: {} → {:.1}{}\n最新: {} → {:.1}{}\n样本不足 5 个，趋势斜率不可靠，建议多观察几天。\n",
-            label, points.len(), fmt_ts(points[0].0 as u64), points[0].1, unit,
-            fmt_ts(points.last().unwrap().0 as u64), points.last().unwrap().1, unit,
-        );
+        return if en {
+            format!(
+                "metric: {} ({} samples, sparse)\nfirst: {} → {:.1}{}\nlatest: {} → {:.1}{}\nfewer than 5 samples, the slope is unreliable; observe for a few more days.\n",
+                label, points.len(), fmt_ts(points[0].0 as u64), points[0].1, unit,
+                fmt_ts(points.last().unwrap().0 as u64), points.last().unwrap().1, unit,
+            )
+        } else {
+            format!(
+                "指标: {} ({} 个样本，数据偏少)\n最早: {} → {:.1}{}\n最新: {} → {:.1}{}\n样本不足 5 个，趋势斜率不可靠，建议多观察几天。\n",
+                label, points.len(), fmt_ts(points[0].0 as u64), points[0].1, unit,
+                fmt_ts(points.last().unwrap().0 as u64), points.last().unwrap().1, unit,
+            )
+        };
     }
     let (slope, _) = linear_slope(&points);
     let values: Vec<f64> = points.iter().map(|p| p.1).collect();
@@ -102,30 +115,55 @@ fn format_scalar_trend(label: &str, unit: &str, points: &[(f64, f64)], window_h:
     // points 的 x 轴是秒级 Unix 时间戳，slope 是“值/秒”，乘以每天秒数换算为“值/天”
     let slope_per_day = slope * 86400.0;
 
-    let mut out = format!(
-        "指标: {}\n时间窗口: 最近 {:.0} 小时\n聚合粒度: {}\n样本数: {}\n最早: {} → {:.1}{}\n最新: {} → {:.1}{}\n最小值: {:.1}{}\n最大值: {:.1}{}\n平均值: {:.1}{}\n",
-        label, window_h, granularity_label(granularity), points.len(),
-        fmt_ts(points[0].0 as u64), first, unit,
-        fmt_ts(points.last().unwrap().0 as u64), latest, unit,
-        min_v, unit, max_v, unit, avg, unit,
-    );
+    let mut out = if en {
+        format!(
+            "metric: {}\ntime window: last {:.0} hours\naggregation: {}\nsamples: {}\nfirst: {} → {:.1}{}\nlatest: {} → {:.1}{}\nmin: {:.1}{}\nmax: {:.1}{}\nmean: {:.1}{}\n",
+            label, window_h, granularity_label(granularity), points.len(),
+            fmt_ts(points[0].0 as u64), first, unit,
+            fmt_ts(points.last().unwrap().0 as u64), latest, unit,
+            min_v, unit, max_v, unit, avg, unit,
+        )
+    } else {
+        format!(
+            "指标: {}\n时间窗口: 最近 {:.0} 小时\n聚合粒度: {}\n样本数: {}\n最早: {} → {:.1}{}\n最新: {} → {:.1}{}\n最小值: {:.1}{}\n最大值: {:.1}{}\n平均值: {:.1}{}\n",
+            label, window_h, granularity_label(granularity), points.len(),
+            fmt_ts(points[0].0 as u64), first, unit,
+            fmt_ts(points.last().unwrap().0 as u64), latest, unit,
+            min_v, unit, max_v, unit, avg, unit,
+        )
+    };
 
     if slope_per_day.abs() < 0.01 {
-        out.push_str("趋势: 平稳（日变化 < 0.01）\n");
+        out.push_str(crate::i18n::t(
+            "趋势: 平稳（日变化 < 0.01）\n",
+            "trend: stable (daily change < 0.01)\n",
+        ));
     } else if slope_per_day > 0.0 {
-        out.push_str(&format!("趋势斜率: +{:.2}{}/天（持续上升）\n", slope_per_day, unit));
+        out.push_str(&if en {
+            format!("slope: +{slope_per_day:.2}{unit}/day (rising)\n")
+        } else {
+            format!("趋势斜率: +{:.2}{}/天（持续上升）\n", slope_per_day, unit)
+        });
         // 外推到 90% 的天数
         if latest < 90.0 && slope_per_day > 0.0 {
             let days = (90.0 - latest) / slope_per_day;
             if days > 0.0 && days < 365.0 {
-                out.push_str(&format!(
-                    "线性外推: 按当前增速，约 {:.1} 天后达到 90%{}\n",
-                    days, unit,
-                ));
+                out.push_str(&if en {
+                    format!("extrapolation: at the current rate, reaches 90%{unit} in about {days:.1} days\n")
+                } else {
+                    format!(
+                        "线性外推: 按当前增速，约 {:.1} 天后达到 90%{}\n",
+                        days, unit,
+                    )
+                });
             }
         }
     } else {
-        out.push_str(&format!("趋势斜率: {:.2}{}/天（下降中）\n", slope_per_day, unit));
+        out.push_str(&if en {
+            format!("slope: {slope_per_day:.2}{unit}/day (falling)\n")
+        } else {
+            format!("趋势斜率: {:.2}{}/天（下降中）\n", slope_per_day, unit)
+        });
     }
 
     // 完整序列（最多 30 个点，等间隔采样）
@@ -135,7 +173,10 @@ fn format_scalar_trend(label: &str, unit: &str, points: &[(f64, f64)], window_h:
     } else {
         1
     };
-    out.push_str("完整序列（时间, 值）:\n");
+    out.push_str(crate::i18n::t(
+        "完整序列（时间, 值）:\n",
+        "full series (time, value):\n",
+    ));
     for p in points.iter().step_by(step) {
         out.push_str(&format!("{} {:.1}\n", fmt_ts(p.0 as u64), p.1));
     }
@@ -144,6 +185,7 @@ fn format_scalar_trend(label: &str, unit: &str, points: &[(f64, f64)], window_h:
 
 /// 格式化磁盘指标趋势（按挂载点分组）。
 fn format_disk_trend(rows: &[HostMetric], window_h: f64, granularity: &str) -> String {
+    let en = crate::i18n::is_en();
     // 收集所有出现过的挂载点
     let mut mounts: Vec<String> = Vec::new();
     for r in rows {
@@ -154,14 +196,25 @@ fn format_disk_trend(rows: &[HostMetric], window_h: f64, granularity: &str) -> S
         }
     }
     if mounts.is_empty() {
-        return format!("指标: disk_percent（按挂载点）\n数据不足：该时间窗口内没有磁盘历史样本。\n");
+        return if en {
+            "metric: disk_percent (per mount)\nnot enough data: no disk history samples in this window.\n".to_string()
+        } else {
+            "指标: disk_percent（按挂载点）\n数据不足：该时间窗口内没有磁盘历史样本。\n".to_string()
+        };
     }
     mounts.sort();
 
-    let mut out = format!(
-        "指标: disk_percent（按挂载点）\n时间窗口: 最近 {:.0} 小时\n聚合粒度: {}\n样本数: {}\n\n",
-        window_h, granularity_label(granularity), rows.len(),
-    );
+    let mut out = if en {
+        format!(
+            "metric: disk_percent (per mount)\ntime window: last {:.0} hours\naggregation: {}\nsamples: {}\n\n",
+            window_h, granularity_label(granularity), rows.len(),
+        )
+    } else {
+        format!(
+            "指标: disk_percent（按挂载点）\n时间窗口: 最近 {:.0} 小时\n聚合粒度: {}\n样本数: {}\n\n",
+            window_h, granularity_label(granularity), rows.len(),
+        )
+    };
     let bucket_secs = bucket_seconds(granularity);
     for mount in &mounts {
         let points: Vec<(f64, f64)> = rows
@@ -174,12 +227,23 @@ fn format_disk_trend(rows: &[HostMetric], window_h: f64, granularity: &str) -> S
         if points.is_empty() {
             continue;
         }
-        out.push_str(&format!("挂载点 {}:\n", mount));
+        out.push_str(&if en {
+            format!("mount {mount}:\n")
+        } else {
+            format!("挂载点 {}:\n", mount)
+        });
         if points.len() < 5 {
-            out.push_str(&format!(
-                "  样本 {} 个，最早 {:.1}% → 最新 {:.1}%，数据偏少\n\n",
-                points.len(), points[0].1, points.last().unwrap().1,
-            ));
+            out.push_str(&if en {
+                format!(
+                    "  {} samples, first {:.1}% → latest {:.1}%, sparse\n\n",
+                    points.len(), points[0].1, points.last().unwrap().1,
+                )
+            } else {
+                format!(
+                    "  样本 {} 个，最早 {:.1}% → 最新 {:.1}%，数据偏少\n\n",
+                    points.len(), points[0].1, points.last().unwrap().1,
+                )
+            });
             continue;
         }
         let (slope, _) = linear_slope(&points);
@@ -187,19 +251,35 @@ fn format_disk_trend(rows: &[HostMetric], window_h: f64, granularity: &str) -> S
         let slope_per_day = slope * 86400.0;
         let latest = points.last().unwrap().1;
         let first = points[0].1;
-        out.push_str(&format!("  最早 {:.1}% → 最新 {:.1}%", first, latest));
+        out.push_str(&if en {
+            format!("  first {first:.1}% → latest {latest:.1}%")
+        } else {
+            format!("  最早 {:.1}% → 最新 {:.1}%", first, latest)
+        });
         if slope_per_day.abs() < 0.01 {
-            out.push_str("，平稳\n");
+            out.push_str(crate::i18n::t("，平稳\n", ", stable\n"));
         } else if slope_per_day > 0.0 {
-            out.push_str(&format!("，+{:.2}%/天（上升）\n", slope_per_day));
+            out.push_str(&if en {
+                format!(", +{slope_per_day:.2}%/day (rising)\n")
+            } else {
+                format!("，+{:.2}%/天（上升）\n", slope_per_day)
+            });
             if latest < 90.0 {
                 let days = (90.0 - latest) / slope_per_day;
                 if days > 0.0 && days < 365.0 {
-                    out.push_str(&format!("  ⚠ 按当前增速，约 {:.1} 天后达到 90%\n", days));
+                    out.push_str(&if en {
+                        format!("  ⚠ at the current rate, reaches 90% in about {days:.1} days\n")
+                    } else {
+                        format!("  ⚠ 按当前增速，约 {:.1} 天后达到 90%\n", days)
+                    });
                 }
             }
         } else {
-            out.push_str(&format!("，{:.2}%/天（下降）\n", slope_per_day));
+            out.push_str(&if en {
+                format!(", {slope_per_day:.2}%/day (falling)\n")
+            } else {
+                format!("，{:.2}%/天（下降）\n", slope_per_day)
+            });
         }
         out.push('\n');
     }
@@ -220,10 +300,21 @@ pub(crate) fn format_metric_trend(metric: &str, rows: &[HostMetric], window_h: f
         }
         "load" => {
             let points: Vec<(f64, f64)> = rows.iter().map(|r| (r.ts as f64, r.load1)).collect();
-            format_scalar_trend("load1 (1分钟)", "", &points, window_h, granularity)
+            format_scalar_trend(
+                crate::i18n::t("load1 (1分钟)", "load1 (1 min)"),
+                "",
+                &points,
+                window_h,
+                granularity,
+            )
         }
         "disk" => format_disk_trend(rows, window_h, granularity),
-        _ => format!("未知指标: {}。可用: cpu, mem, load, disk\n", metric),
+        _ => format!(
+            "{}: {}。{}: cpu, mem, load, disk\n",
+            crate::i18n::t("未知指标", "Unknown metric"),
+            metric,
+            crate::i18n::t("可用", "available")
+        ),
     }
 }
 

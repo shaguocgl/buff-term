@@ -27,9 +27,10 @@ import {
 } from '../api';
 import { copyToClipboard } from '../utils/clipboard';
 import { fmtError } from '../utils/errors';
+import { useT, type DictKey, type TFunc } from '../i18n';
 import { baseName } from '../utils/remote';
 import type { AiModel, ContextUsage, HistoryEntry, TaskPlan } from '../types';
-import Select, { type SelectOption } from './Select';
+import Select from './Select';
 import RemoteFilePicker from './RemoteFilePicker';
 import {
   FileIcon,
@@ -100,11 +101,20 @@ interface Props {
   onClose: () => void;
 }
 
-const PERMISSION_OPTIONS: SelectOption<'all' | 'smart' | 'none'>[] = [
-  { value: 'all', label: '全部审核' },
-  { value: 'smart', label: '智能审核' },
-  { value: 'none', label: '全部放行' },
+type PermissionMode = 'all' | 'smart' | 'none';
+
+const PERMISSION_OPTIONS: { value: PermissionMode; labelKey: DictKey }[] = [
+  { value: 'all', labelKey: 'chat.permissionAll' },
+  { value: 'smart', labelKey: 'chat.permissionSmart' },
+  { value: 'none', labelKey: 'chat.permissionNone' },
 ];
+
+/** 安全级别提示文案键（按当前模式） */
+const PERMISSION_TIP_KEY: Record<PermissionMode, DictKey> = {
+  all: 'chat.tipAll',
+  smart: 'chat.tipSmart',
+  none: 'chat.tipNone',
+};
 
 function safeParseArgs(raw: string): Record<string, unknown> {
   try {
@@ -151,7 +161,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error('图片解析失败'));
+    img.onerror = () => reject(new Error('image decode failed'));
     img.src = src;
   });
 }
@@ -184,18 +194,28 @@ function refLineCount(text: string): number {
 }
 
 // 非命令类工具把参数翻成人话，避免直接展示 JSON
-function describeToolArgs(name: string, args: Record<string, unknown>): string | null {
+function describeToolArgs(
+  name: string,
+  args: Record<string, unknown>,
+  t: TFunc,
+): string | null {
   const path = typeof args.path === 'string' ? args.path : null;
   switch (name) {
     case 'read_file':
-      return path ? `读取 ${path}` : '读取文件';
+      return path
+        ? t('chat.toolReadPath', { path })
+        : t('chat.toolReadFile');
     case 'list_dir':
-      return path ? `列目录 ${path}` : '列目录';
+      return path
+        ? t('chat.toolListDirPath', { path })
+        : t('chat.toolListDir');
     case 'resource_usage':
-      return '查看资源概览';
+      return t('chat.toolResource');
     case 'query_history': {
       const metric = typeof args.metric === 'string' ? args.metric : '';
-      return metric ? `查询 ${metric} 趋势` : '查询历史指标趋势';
+      return metric
+        ? t('chat.toolTrendMetric', { metric })
+        : t('chat.toolTrendGeneric');
     }
     default:
       return null;
@@ -210,6 +230,7 @@ function ApprovalCountdown({
   requestedAt: number;
   timeoutSecs: number;
 }) {
+  const t = useT();
   const [remaining, setRemaining] = useState(() =>
     Math.max(0, timeoutSecs - Math.floor((Date.now() - requestedAt) / 1000)),
   );
@@ -228,7 +249,9 @@ function ApprovalCountdown({
         <span style={{ width: `${pct}%` }} />
       </div>
       <span className="approval-countdown-text">
-        {remaining > 0 ? `${remaining}s 后未处理将自动拒绝` : '已超时，按拒绝处理'}
+        {remaining > 0
+          ? t('chat.countdown', { n: remaining })
+          : t('chat.countdownTimeout')}
       </span>
     </div>
   );
@@ -236,6 +259,7 @@ function ApprovalCountdown({
 
 // 工具输出默认折叠（180px 可滚动），长输出可展开，右上角常驻复制
 function ToolOutput({ output }: { output: string }) {
+  const t = useT();
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
   const long = output.length > 400 || output.split('\n').length > 10;
@@ -245,7 +269,7 @@ function ToolOutput({ output }: { output: string }) {
       <div className="tool-output-actions">
         {long && (
           <button onClick={() => setExpanded((v) => !v)}>
-            {expanded ? '收起' : '展开'}
+            {expanded ? t('chat.collapse') : t('chat.expand')}
           </button>
         )}
         <button
@@ -256,7 +280,7 @@ function ToolOutput({ output }: { output: string }) {
             }
           }}
         >
-          {copied ? '已复制' : '复制'}
+          {copied ? t('chat.copied') : t('chat.copy')}
         </button>
       </div>
     </div>
@@ -276,12 +300,13 @@ function extractText(node: ReactNode): string {
 
 // markdown 代码块容器：右上角复制按钮
 function MarkdownPre({ children }: { children?: ReactNode }) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
   return (
     <div className="md-code">
       <button
         className="md-code-copy"
-        title="复制代码"
+        title={t('chat.copyCode')}
         onClick={async () => {
           if (await copyToClipboard(extractText(children))) {
             setCopied(true);
@@ -289,7 +314,7 @@ function MarkdownPre({ children }: { children?: ReactNode }) {
           }
         }}
       >
-        {copied ? '已复制' : '复制'}
+        {copied ? t('chat.copied') : t('chat.copy')}
       </button>
       <pre>{children}</pre>
     </div>
@@ -357,6 +382,7 @@ function ChatPanel({
   onModelSwitched,
   onClose,
 }: Props) {
+  const t = useT();
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -446,11 +472,11 @@ function ChatPanel({
             prev.length >= MAX_IMAGES ? prev : [...prev, url],
           );
         } catch {
-          flashImgNotice('图片读取失败，已跳过');
+          flashImgNotice(t('chat.imageReadFailed'));
         }
       }
     },
-    [flashImgNotice],
+    [flashImgNotice, t],
   );
 
   const handleModelChange = async (modelId: string) => {
@@ -718,7 +744,7 @@ function ChatPanel({
       ? refs
           .map((r) =>
             r.kind === 'file'
-              ? `会话引用的文件：${r.text}`
+              ? t('chat.refFilePrefix', { path: r.text })
               : `\`\`\`\n${r.text}\n\`\`\``,
           )
           .join('\n\n')
@@ -777,19 +803,21 @@ function ChatPanel({
       <div className="tool-head">
         <span className="tool-name">{tool.name}</span>
         <span className="tool-state">
-          {tool.state === 'request' && '等待审批'}
-          {tool.state === 'denied' && '已拒绝'}
-          {tool.state === 'running' && '执行中'}
-          {tool.state === 'result' && '已完成'}
-          {tool.state === 'error' && '出错'}
+          {tool.state === 'request' && t('chat.toolStateRequest')}
+          {tool.state === 'denied' && t('chat.toolStateDenied')}
+          {tool.state === 'running' && t('chat.toolStateRunning')}
+          {tool.state === 'result' && t('chat.toolStateResult')}
+          {tool.state === 'error' && t('chat.toolStateError')}
         </span>
       </div>
       {tool.reason && <div className="tool-reason">{tool.reason}</div>}
       <div className="tool-args">
         {typeof tool.args.command === 'string' ? (
           <code className="tool-command">{tool.args.command}</code>
-        ) : describeToolArgs(tool.name, tool.args) ? (
-          <code className="tool-command">{describeToolArgs(tool.name, tool.args)}</code>
+        ) : describeToolArgs(tool.name, tool.args, t) ? (
+          <code className="tool-command">
+            {describeToolArgs(tool.name, tool.args, t)}
+          </code>
         ) : (
           <code>{JSON.stringify(tool.args, null, 2)}</code>
         )}
@@ -805,16 +833,16 @@ function ChatPanel({
       {tool.state === 'request' && (
         <div className="tool-actions">
           <button className="btn primary small" onClick={() => handleApprove(tool.id, true)}>
-            批准执行
+            {t('chat.approve')}
           </button>
           <button className="btn ghost small" onClick={() => handleApprove(tool.id, false)}>
-            拒绝
+            {t('chat.deny')}
           </button>
         </div>
       )}
       {tool.state === 'running' && (
         <div className="tool-running">
-          <span className="spinner" /> 执行中…
+          <span className="spinner" /> {t('chat.running')}
         </div>
       )}
       {tool.output && <ToolOutput output={tool.output} />}
@@ -837,14 +865,14 @@ function ChatPanel({
           <div className="chat-header-text">
             <span className="chat-title">AI Agent</span>
             <span className="chat-sub">
-              {providerLabel || '未配置模型平台'} · {hostName}
+              {providerLabel || t('chat.noProvider')} · {hostName}
             </span>
           </div>
         </div>
         <div className="chat-header-actions">
           <button
             className="icon-btn"
-            title="清空对话"
+            title={t('chat.clearTitle')}
             onClick={() => {
               // 后端 agent_reset 会同时停止运行中的循环并清空历史
               agentReset(sessionId, hostId).catch(() => {});
@@ -859,7 +887,7 @@ function ChatPanel({
           >
             <RefreshIcon size={15} />
           </button>
-          <button className="icon-btn" title="关闭对话" onClick={onClose}>
+          <button className="icon-btn" title={t('chat.closeTitle')} onClick={onClose}>
             <XIcon size={15} />
           </button>
         </div>
@@ -872,23 +900,27 @@ function ChatPanel({
               type="button"
               className="task-plan-head"
               onClick={() => setPlanExpanded((v) => !v)}
-              title={planExpanded ? '收起任务台账' : '展开任务台账'}
+              title={planExpanded ? t('chat.planCollapse') : t('chat.planExpand')}
             >
-              <span className="task-plan-title">任务台账</span>
+              <span className="task-plan-title">{t('chat.planTitle')}</span>
               <span className="task-plan-progress">
                 {plan.completed.length}/{plan.completed.length + plan.pending.length}
               </span>
-              <span className="task-plan-toggle">{planExpanded ? '收起' : '展开'}</span>
+              <span className="task-plan-toggle">
+                {planExpanded ? t('chat.collapse') : t('chat.expand')}
+              </span>
             </button>
             {plan.goal && <div className="task-plan-goal">{plan.goal}</div>}
             {plan.current_step && (
-              <div className="task-plan-step">当前：{plan.current_step}</div>
+              <div className="task-plan-step">
+                {t('chat.planCurrent', { step: plan.current_step })}
+              </div>
             )}
             {planExpanded && (
               <div className="task-plan-details">
                 {plan.constraints.length > 0 && (
                   <div>
-                    <strong>约束</strong>
+                    <strong>{t('chat.planConstraints')}</strong>
                     <ul>
                       {plan.constraints.map((item, i) => (
                         <li key={`c${i}`}>{item}</li>
@@ -898,7 +930,7 @@ function ChatPanel({
                 )}
                 {plan.completed.length > 0 && (
                   <div>
-                    <strong>已完成</strong>
+                    <strong>{t('chat.planCompleted')}</strong>
                     <ul>
                       {plan.completed.map((item, i) => (
                         <li key={`d${i}`}>{item}</li>
@@ -908,7 +940,7 @@ function ChatPanel({
                 )}
                 {plan.pending.length > 0 && (
                   <div>
-                    <strong>待办</strong>
+                    <strong>{t('chat.planPending')}</strong>
                     <ul>
                       {plan.pending.map((item, i) => (
                         <li key={`p${i}`}>{item}</li>
@@ -918,7 +950,7 @@ function ChatPanel({
                 )}
                 {plan.failed.length > 0 && (
                   <div className="task-plan-failed">
-                    <strong>失败尝试</strong>
+                    <strong>{t('chat.planFailed')}</strong>
                     <ul>
                       {plan.failed.map((item, i) => (
                         <li key={`f${i}`}>{item}</li>
@@ -934,10 +966,8 @@ function ChatPanel({
         {messages.length === 0 && (
           <div className="chat-empty">
             <SparklesIcon size={26} />
-            <p>向 AI 描述你想做的事</p>
-            <span>
-              例如：“看看磁盘占用”“查一下 /var/log 里的报错”“部署这个服务”
-            </span>
+            <p>{t('chat.emptyTitle')}</p>
+            <span>{t('chat.emptyHint')}</span>
           </div>
         )}
 
@@ -955,7 +985,7 @@ function ChatPanel({
                 {msg.images && msg.images.length > 0 && (
                   <div className="msg-images">
                     {msg.images.map((src, i) => (
-                      <img key={i} src={src} alt={`图片 ${i + 1}`} />
+                      <img key={i} src={src} alt={t('chat.imageAlt', { n: i + 1 })} />
                     ))}
                   </div>
                 )}
@@ -981,29 +1011,31 @@ function ChatPanel({
               {roundsPrompt.state === 'waiting' ? (
                 <>
                   <div className="rounds-prompt-text">
-                    已达到工具轮次上限（{roundsPrompt.roundsDone} 轮），是否继续执行下一批（
-                    {roundsPrompt.batch} 轮）？
+                    {t('chat.roundsLimit', {
+                      done: roundsPrompt.roundsDone,
+                      batch: roundsPrompt.batch,
+                    })}
                   </div>
                   <div className="rounds-prompt-actions">
                     <button
                       className="btn secondary small"
                       onClick={() => handleContinue(false)}
                     >
-                      停止
+                      {t('chat.stop')}
                     </button>
                     <button
                       className="btn primary small"
                       onClick={() => handleContinue(true)}
                     >
-                      继续
+                      {t('chat.continue')}
                     </button>
                   </div>
                 </>
               ) : (
                 <div className="rounds-prompt-text">
                   {roundsPrompt.timedOut
-                    ? '等待继续确认超时，已停止执行'
-                    : '已达到工具轮次上限，已停止执行'}
+                    ? t('chat.roundsTimeout')
+                    : t('chat.roundsStopped')}
                 </div>
               )}
             </div>
@@ -1013,7 +1045,7 @@ function ChatPanel({
         {busy && roundsPrompt?.state !== 'waiting' && (
           <div className="msg msg-assistant">
             <div className="msg-bubble msg-thinking">
-              <span className="spinner" /> 思考中…
+              <span className="spinner" /> {t('chat.thinking')}
             </div>
           </div>
         )}
@@ -1022,9 +1054,9 @@ function ChatPanel({
           <button
             className="chat-scroll-bottom"
             onClick={scrollToBottom}
-            title="回到底部"
+            title={t('chat.scrollBottom')}
           >
-            ↓ 回到底部
+            ↓ {t('chat.scrollBottom')}
           </button>
         )}
       </div>
@@ -1032,9 +1064,9 @@ function ChatPanel({
       <div className="chat-footer">
         {!providerConfigured && (
           <div className="chat-noconfig">
-            <span>还没有配置 AI 平台</span>
+            <span>{t('chat.noConfig')}</span>
             <button className="btn secondary small" onClick={onOpenConfig}>
-              去配置
+              {t('chat.goConfig')}
             </button>
           </div>
         )}
@@ -1057,14 +1089,14 @@ function ChatPanel({
                   </div>
                   <div className="chat-ref-sub">
                     {ref.kind === 'file'
-                      ? `服务器文件 · ${ref.text}`
-                      : `选中的终端内容 · ${refLineCount(ref.text)} 行`}
+                      ? t('chat.refFile', { path: ref.text })
+                      : t('chat.refTerminal', { n: refLineCount(ref.text) })}
                   </div>
                 </div>
                 <button
                   type="button"
                   className="chat-ref-remove"
-                  title="移除引用"
+                  title={t('chat.removeRef')}
                   onClick={() =>
                     setReferences((prev) => prev.filter((r) => r.id !== ref.id))
                   }
@@ -1082,11 +1114,11 @@ function ChatPanel({
           <div className="chat-imgs">
             {images.map((src, i) => (
               <div className="chat-img-chip" key={i}>
-                <img src={src} alt={`待发送图片 ${i + 1}`} />
+                <img src={src} alt={t('chat.pendingImageAlt', { n: i + 1 })} />
                 <button
                   type="button"
                   className="chat-img-remove"
-                  title="移除图片"
+                  title={t('chat.removeImage')}
                   onClick={() =>
                     setImages((prev) => prev.filter((_, x) => x !== i))
                   }
@@ -1113,7 +1145,7 @@ function ChatPanel({
                 if (files.length === 0) return;
                 e.preventDefault();
                 if (!supportsVision) {
-                  flashImgNotice('当前模型未开启「支持图片」，请到 AI 配置勾选');
+                  flashImgNotice(t('chat.visionDisabled'));
                   return;
                 }
                 void addImageFiles(files);
@@ -1145,20 +1177,22 @@ function ChatPanel({
                   justComposedRef.current = false;
                 }, 0);
               }}
-              placeholder={providerConfigured ? '给 AI 下达指令…' : '请先配置 AI 平台'}
+              placeholder={
+                providerConfigured
+                  ? t('chat.inputPlaceholder')
+                  : t('chat.inputPlaceholderNoConfig')
+              }
               rows={2}
               disabled={!providerConfigured}
             />
             {providerConfigured && !input && (
-              <span className="chat-input-hint">
-                Enter 发送 · Shift+Enter 换行
-              </span>
+              <span className="chat-input-hint">{t('chat.inputHint')}</span>
             )}
             {imgNotice && <span className="chat-img-notice">{imgNotice}</span>}
             {busy ? (
               <button
                 className="icon-btn stop"
-                title="停止"
+                title={t('chat.stopTitle')}
                 onClick={() => {
                   setBusy(false);
                   agentCancel(sessionId).catch(() => {});
@@ -1169,7 +1203,7 @@ function ChatPanel({
             ) : (
               <button
                 className="icon-btn send"
-                title="发送"
+                title={t('chat.sendTitle')}
                 onClick={handleSend}
                 disabled={
                   !providerConfigured ||
@@ -1188,7 +1222,7 @@ function ChatPanel({
             <button
               type="button"
               className="icon-btn chat-attach-btn"
-              title="引用服务器文件"
+              title={t('chat.attachFile')}
               onClick={() => setPickerOpen(true)}
               disabled={!providerConfigured}
             >
@@ -1211,7 +1245,7 @@ function ChatPanel({
                 <button
                   type="button"
                   className="icon-btn chat-attach-btn"
-                  title="附加图片（或直接粘贴截图）"
+                  title={t('chat.attachImage')}
                   onClick={() => imageInputRef.current?.click()}
                   disabled={!providerConfigured}
                 >
@@ -1221,27 +1255,33 @@ function ChatPanel({
             )}
             <div
               className={`chat-control chat-control-permission permission-${permissionMode}`}
-              title={`安全级别（当前：${
-                PERMISSION_OPTIONS.find((o) => o.value === permissionMode)?.label
-              }）`}
+              title={t('chat.permissionTitle', {
+                label: t(
+                  PERMISSION_OPTIONS.find((o) => o.value === permissionMode)!
+                    .labelKey,
+                ),
+              })}
             >
               <Select
                 className="select-up"
                 value={permissionMode}
-                options={PERMISSION_OPTIONS}
+                options={PERMISSION_OPTIONS.map((o) => ({
+                  value: o.value,
+                  label: t(o.labelKey),
+                }))}
                 onChange={changePermissionMode}
-                ariaLabel="安全级别"
+                ariaLabel={t('chat.permissionAria')}
                 icon={<ShieldIcon size={13} />}
               />
             </div>
             {models.length > 0 && providerId && (
-              <div className="chat-control chat-control-model" title="模型">
+              <div className="chat-control chat-control-model" title={t('chat.modelTitle')}>
                 <Select
                   className="select-up"
                   value={currentModelId ?? ''}
                   options={models.map((m) => ({ value: m.id, label: m.label }))}
                   onChange={handleModelChange}
-                  ariaLabel="模型"
+                  ariaLabel={t('chat.modelAria')}
                 />
               </div>
             )}
@@ -1265,30 +1305,32 @@ function ChatPanel({
                   {contextUsage ? (
                     <>
                       <div className="context-ring-row">
-                        <span>上下文用量</span>
+                        <span>{t('chat.contextUsage')}</span>
                         <strong>
                           {formatTokens(contextUsage.used_tokens)} /{' '}
                           {formatTokens(contextUsage.window_tokens)}
                         </strong>
                       </div>
                       <div className="context-ring-row">
-                        <span>模型窗口</span>
+                        <span>{t('chat.modelWindow')}</span>
                         <strong>{formatTokens(displayWindow)}</strong>
                       </div>
                       <div className="context-ring-row">
-                        <span>用量来源</span>
+                        <span>{t('chat.usageSource')}</span>
                         <strong>
                           {contextUsage.estimated
                             ? contextUsage.calibrated
-                              ? '估算 · 已校准'
-                              : '本地估算'
-                            : '平台实测'}
+                              ? t('chat.estimatedCalibrated')
+                              : t('chat.estimatedLocal')
+                            : t('chat.platformMeasured')}
                         </strong>
                       </div>
                       {contextUsage.compressed_rounds > 0 && (
                         <div className="context-ring-row">
-                          <span>已压缩</span>
-                          <strong>{contextUsage.compressed_rounds} 轮</strong>
+                          <span>{t('chat.compressed')}</span>
+                          <strong>
+                            {t('chat.rounds', { n: contextUsage.compressed_rounds })}
+                          </strong>
                         </div>
                       )}
                       {contextUsage.warning && (
@@ -1300,12 +1342,12 @@ function ChatPanel({
                   ) : (
                     <>
                       <div className="context-ring-row">
-                        <span>模型窗口</span>
+                        <span>{t('chat.modelWindow')}</span>
                         <strong>{formatTokens(currentWindow)}</strong>
                       </div>
                       <div className="context-ring-row">
-                        <span>状态</span>
-                        <strong>正在估算当前历史…</strong>
+                        <span>{t('chat.status')}</span>
+                        <strong>{t('chat.estimating')}</strong>
                       </div>
                     </>
                   )}
@@ -1315,12 +1357,7 @@ function ChatPanel({
           </div>
         </div>
         <p className={`chat-tip tip-${permissionMode}`}>
-          {permissionMode === 'all' &&
-            '安全级别：全部审核 · 每个命令执行前都需要你批准'}
-          {permissionMode === 'smart' &&
-            '安全级别：智能审核 · 写/危险命令需批准，只读命令自动执行'}
-          {permissionMode === 'none' &&
-            '安全级别：全部放行 · 命令直接执行，请谨慎使用'}
+          {t(PERMISSION_TIP_KEY[permissionMode])}
         </p>
       </div>
       {pickerOpen && (

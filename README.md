@@ -4,9 +4,11 @@
 
 # buffTerm
 
-> AI Agent Buff 加持的 SSH 管理工具
+**简体中文** | [English](README.en.md)
+
+> 面向 AI 的 SSH 工具与 MCP 服务器
 >
-> A desktop SSH manager supercharged by a self-built AI agent — manage servers through natural language, locally.
+> An AI-first SSH tool and MCP server
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)
@@ -15,9 +17,9 @@
 ![Agent](https://img.shields.io/badge/Agent-自研编排%20%7C%20无框架依赖-8b5cf6.svg)
 [![Website](https://img.shields.io/badge/官网-buffTerm%20Site-22d3ee.svg)](https://shaguocgl.github.io/buff-term-site/)
 
-buffTerm 是一款有 AI Agent Buff 加持的 SSH 管理工具，——内置**自研 AI Agent 编排层**，接入任意支持open api协议的大模型（如DeepSeek、Qwen、kimi等），用自然语言就能 查询状态、排查问题、安装程序、开展运维工作。
+buffTerm 是一款**面向 AI 的 SSH 工具与 MCP 服务器**，内置**自研 AI Agent 编排层**，接入任意 OpenAI 兼容协议的大模型（如 DeepSeek、Qwen、Kimi 等），用自然语言就能查询状态、排查问题、安装程序、开展运维工作。
 
-并支持将 多个主机 同时暴露为 MCP 服务，提供给其他 AI 工具调用，安全级别由你把关。高危命令拦截、AI 操作审批与审计全程兜底，所有数据只存本机。
+并支持将多个主机同时暴露为 MCP 服务，提供给其他 AI 工具调用，安全级别由你把关。高危命令拦截、AI 操作审批与审计全程兜底；**配置、凭据与审计数据只存本机**，AI 对话与巡检内容会发送到你配置的模型平台。
 
 > 🤖 **Agent 编排层完全自研**：核心工具调用循环（SSE 流式解析 → 工具执行 → 结果回填）由本项目手写实现，**不依赖 LangChain / OpenAI Agents SDK / Vercel AI SDK 等框架**——审批拦截、安全策略、审计留痕全部自己掌控。
 <p align="center">
@@ -29,6 +31,7 @@ buffTerm 是一款有 AI Agent Buff 加持的 SSH 管理工具，——内置**�
   </a>
 </p>
 
+
 ## 📥 下载
 
 请前往 [GitHub Releases](https://github.com/shaguocgl/buff-term/releases) 下载最新安装包：
@@ -39,6 +42,21 @@ buffTerm 是一款有 AI Agent Buff 加持的 SSH 管理工具，——内置**�
 > ⚠️ macOS 版本目前未做 Apple 公证。凭据以 AES-256-GCM 加密存本机 SQLite，主密钥存系统钥匙串；未签名开发版首次访问钥匙串时可能弹一次系统授权提示，属 macOS 正常行为。
 
 ## ✨ 功能特性
+
+### AI Agent
+
+- **自研 Agent 编排层**：SSE 流式解析、工具调用循环、审批与审计均为手写实现，无框架依赖
+- **russh 协议级执行**：AI 工具调用走统一 SSH 连接池（连接复用、通道并发、known_hosts 校验）
+- 多平台配置：DeepSeek / OpenAI / 通义千问 / Kimi / Ollama，单厂商可配多模型
+- 工具调用：`exec_command`、`read_file`、`list_dir`、`resource_usage`、`query_history`（历史指标趋势，支持分钟 / 小时 / 天三档聚合粒度，AI 按分析目的自选）、`update_task_plan`（本地任务台账，免审批）
+- 发送上下文按模型窗口做预算：旧轮次自动压缩摘要，任务台账始终保留
+- 每台主机独立会话历史，可随时中断 / 清空
+
+### MCP 服务
+
+- **buffTerm 作为 MCP 服务器**：基于 Streamable HTTP + JSON-RPC + token 认证，把勾选的服务器能力开放给 Codex、Claude Desktop 等外部 AI 工具
+- 三种权限模式：只读（禁止写操作）/ 管控（危险命令需确认）/ 全部放行
+- 启动后自动生成外部 AI 的 MCP 配置 JSON，支持 token 轮换与吊销
 
 ### SSH 与 SFTP
 
@@ -56,21 +74,6 @@ buffTerm 是一款有 AI Agent Buff 加持的 SSH 管理工具，——内置**�
 - **预置 + 自定义危险规则**：覆盖 `rm -rf`、`mkfs`、`dd if=`、`systemctl stop`、`drop table`、`curl | sh` 等，可删改、可一键恢复
 - 全屏应用（vim / htop 等）内自动透传，不误判编辑内容；每次拦截写入审计日志
 
-### AI Agent
-
-- **自研 Agent 编排层**：SSE 流式解析、工具调用循环、审批与审计均为手写实现，无框架依赖
-- **russh 协议级执行**：AI 工具调用走统一 SSH 连接池（连接复用、通道并发、known_hosts 校验）
-- 多平台配置：DeepSeek / OpenAI / 通义千问 / Kimi / Ollama，单厂商可配多模型
-- 工具调用：`exec_command`、`read_file`、`list_dir`、`resource_usage`、`query_history`（历史指标趋势，支持分钟 / 小时 / 天三档聚合粒度，AI 按分析目的自选）、`update_task_plan`（本地任务台账，免审批）
-- 发送上下文按模型窗口做预算：旧轮次自动压缩摘要，任务台账始终保留
-- 每台主机独立会话历史，可随时中断 / 清空
-
-### MCP 服务
-
-- **buffTerm 作为 MCP 服务器**：基于 Streamable HTTP + JSON-RPC + token 认证，把勾选的服务器能力开放给 Codex、Claude Desktop 等外部 AI 工具
-- 三种权限模式：只读（禁止写操作）/ 管控（危险命令需确认）/ 全部放行
-- 启动后自动生成外部 AI 的 MCP 配置 JSON，支持 token 轮换与吊销
-
 ### 安全体系
 
 - 三级安全级别：全部审核 / 智能审核（只读自动执行，危险命令需批准）/ 全部放行
@@ -81,7 +84,7 @@ buffTerm 是一款有 AI Agent Buff 加持的 SSH 管理工具，——内置**�
 ### 监控、巡检与通知
 
 - 监控面板：CPU / 内存 / 磁盘仪表盘 + 负载 + TOP 进程，自动刷新；终端会话连接后即后台采集（复用会话连接，面板打开 5 秒 / 后台静默 30 秒，保留最近 30 分钟），面板打开即可看到连接以来的趋势，多主机切换不丢数据
-- AI 巡检：采集只读基线数据生成中文 Markdown 报告，含木马 / 挖矿风险检测
+- AI 巡检：采集只读基线数据生成 Markdown 报告（中文 / 英文随界面语言），含木马 / 挖矿风险检测
 - 一键整改：AI 结合巡检报告生成整改步骤，确认后自动执行，支持步骤编辑与失败重试
 - 邮件通知：巡检报告与整改结果可自动发送至已配置的收件人
 
@@ -183,9 +186,11 @@ src-tauri/target/release/bundle/nsis/
 
 ```text
 src/                   前端（React + xterm.js）
+  i18n/                界面多语言（zh / en 字典、Provider、useT hook）
   components/          聊天面板 / 终端 / 文件编辑器 / 弹窗 / 下拉框等
   assets/              buffTerm 界面与文档 logo
 src-tauri/src/         Rust 后端
+  i18n.rs              后端多语言（语言状态、Tauri 命令、t()）
   agent.rs             AI Agent 运行时（流式解析、工具循环、审批、审计）
   agent/tools.rs       Agent 工具定义与执行（系统提示词、工具 schema、exec/read_file/list_dir/resource_usage/query_history/update_task_plan）
   agent/trend.rs       历史指标趋势分析（线性回归、分钟/小时/天粒度聚合、趋势文本格式化）

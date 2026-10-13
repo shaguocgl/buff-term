@@ -332,17 +332,17 @@ const READONLY_EXTRA_FORBIDDEN: &[&str] = &[
 pub(crate) fn validate_readonly_command(command: &str) -> Result<(), String> {
     let c = command.trim();
     if c.is_empty() || c.chars().count() > 500 {
-        return Err("命令为空或过长".to_string());
+        return Err(crate::i18n::t("命令为空或过长", "The command is empty or too long").to_string());
     }
     const META_CHARS: &[&str] = &[";", "&&", "||", "|", ">", ">>", "<", "<<", "$(", "`", "\n", "\r"];
     for token in META_CHARS {
         if c.contains(token) {
-            return Err(format!("包含不允许的字符: {token}"));
+            return Err(format!("{}: {token}", crate::i18n::t("包含不允许的字符", "Contains a disallowed character")));
         }
     }
     let lower = c.to_ascii_lowercase();
     if is_dangerous(&lower) {
-        return Err("命令属于高危操作，只读巡检不允许执行".to_string());
+        return Err(crate::i18n::t("命令属于高危操作，只读巡检不允许执行", "The command is a high-risk operation and is not allowed in read-only inspection").to_string());
     }
     // 基础写操作动词：不依赖工具白名单，任何情况下都拦截
     const BASIC_WRITE: &[&str] = &[
@@ -350,12 +350,12 @@ pub(crate) fn validate_readonly_command(command: &str) -> Result<(), String> {
     ];
     for token in BASIC_WRITE {
         if lower.contains(token) {
-            return Err(format!("包含不允许的操作: {token}"));
+            return Err(format!("{}: {token}", crate::i18n::t("包含不允许的操作", "Contains a disallowed operation")));
         }
     }
     for token in READONLY_EXTRA_FORBIDDEN {
         if lower.contains(token) {
-            return Err(format!("包含不允许的操作: {token}"));
+            return Err(format!("{}: {token}", crate::i18n::t("包含不允许的操作", "Contains a disallowed operation")));
         }
     }
     let first = c
@@ -373,7 +373,7 @@ pub(crate) fn validate_readonly_command(command: &str) -> Result<(), String> {
         "dpkg", "apt", "yum", "dnf", "zypper", "pacman", "brew", "locale",
     ];
     if !ALLOWED.contains(&first) {
-        return Err(format!("命令不在只读白名单内: {first}"));
+        return Err(format!("{}: {first}", crate::i18n::t("命令不在只读白名单内", "The command is not in the read-only allowlist")));
     }
     Ok(())
 }

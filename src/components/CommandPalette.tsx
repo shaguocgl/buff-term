@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useT, type DictKey } from '../i18n';
 import type { Host } from '../types';
 
 interface Props {
@@ -18,14 +19,14 @@ interface PaletteItem {
   action?: string;
 }
 
-const ACTIONS: { key: string; label: string }[] = [
-  { key: 'new-host', label: '新建主机' },
-  { key: 'import-ssh', label: '导入 ~/.ssh/config' },
-  { key: 'ai-config', label: 'AI Agent 配置' },
-  { key: 'logs', label: '操作审计' },
-  { key: 'mcp', label: 'MCP 服务' },
-  { key: 'guard', label: '终端防护' },
-  { key: 'alerts', label: '通知配置' },
+const ACTIONS: { key: string; labelKey: DictKey }[] = [
+  { key: 'new-host', labelKey: 'palette.action.newHost' },
+  { key: 'import-ssh', labelKey: 'palette.action.importSsh' },
+  { key: 'ai-config', labelKey: 'palette.action.aiConfig' },
+  { key: 'logs', labelKey: 'palette.action.logs' },
+  { key: 'mcp', labelKey: 'palette.action.mcp' },
+  { key: 'guard', labelKey: 'palette.action.guard' },
+  { key: 'alerts', labelKey: 'palette.action.alerts' },
 ];
 
 // Cmd+K 快速连接 / 命令面板：主机与常用动作的模糊搜索入口
@@ -35,6 +36,7 @@ export default function CommandPalette({
   onAction,
   onClose,
 }: Props) {
+  const t = useT();
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -61,17 +63,15 @@ export default function CommandPalette({
         kind: 'host' as const,
         host: h,
       }));
-    const actionItems: PaletteItem[] = ACTIONS.filter((a) => match(a.label)).map(
-      (a) => ({
-        key: a.key,
-        title: a.label,
-        subtitle: '操作',
-        kind: 'action' as const,
-        action: a.key,
-      }),
-    );
+    const actionItems: PaletteItem[] = ACTIONS.map((a) => ({
+      key: a.key,
+      title: t(a.labelKey),
+      subtitle: t('palette.action'),
+      kind: 'action' as const,
+      action: a.key,
+    })).filter((a) => match(a.title));
     return [...hostItems, ...actionItems];
-  }, [hosts, query]);
+  }, [hosts, query, t]);
 
   useEffect(() => {
     setActive(0);
@@ -107,7 +107,7 @@ export default function CommandPalette({
           ref={inputRef}
           className="palette-input"
           value={query}
-          placeholder="搜索主机或操作…"
+          placeholder={t('palette.placeholder')}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'ArrowDown') {
@@ -131,7 +131,7 @@ export default function CommandPalette({
         />
         <div className="palette-list" ref={listRef}>
           {items.length === 0 && (
-            <div className="palette-empty">没有匹配的主机或操作</div>
+            <div className="palette-empty">{t('palette.empty')}</div>
           )}
           {items.map((item, idx) => (
             <div
@@ -149,7 +149,7 @@ export default function CommandPalette({
             </div>
           ))}
         </div>
-        <div className="palette-footer">↑↓ 选择 · Enter 确认 · Esc 关闭</div>
+        <div className="palette-footer">{t('palette.footer')}</div>
       </div>
     </div>
   );

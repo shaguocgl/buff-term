@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { getAlertSettings, saveAlertSettings, testAlertSettings } from '../api';
+import { useT } from '../i18n';
 import type { AlertSettings } from '../types';
 import { fmtError } from '../utils/errors';
 import Modal from './Modal';
@@ -21,6 +22,7 @@ const EMPTY_SETTINGS: AlertSettings = {
 };
 
 export default function AlertModal({ onClose }: Props) {
+  const t = useT();
   const [settings, setSettings] = useState<AlertSettings>(EMPTY_SETTINGS);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -42,7 +44,7 @@ export default function AlertModal({ onClose }: Props) {
     setSaving(true);
     try {
       await saveAlertSettings(settings);
-      setTestResult('✓ SMTP 设置已保存');
+      setTestResult(t('alert.saved'));
     } catch (e) {
       setError(fmtError(e));
     } finally {
@@ -69,19 +71,19 @@ export default function AlertModal({ onClose }: Props) {
 
   return (
     <Modal
-      title="通知配置"
-      subtitle="当前支持邮件（SMTP）渠道，配置后可发送通知邮件"
+      title={t('alert.title')}
+      subtitle={t('alert.subtitle')}
       className="modal-wide"
       onClose={onClose}
     >
       <div className="ai-modal">
         <div className="alert-smtp">
           <div className="alert-settings-title">
-            <BellIcon size={15} /> 邮件（SMTP）设置
+            <BellIcon size={15} /> {t('alert.smtpTitle')}
           </div>
 
           <div className="alert-field">
-            <span className="alert-field-label">SMTP 服务器</span>
+            <span className="alert-field-label">{t('alert.smtpHost')}</span>
             <input
               value={settings.smtp_host ?? ''}
               onChange={(e) => set('smtp_host', e.target.value)}
@@ -91,7 +93,7 @@ export default function AlertModal({ onClose }: Props) {
 
           <div className="alert-grid">
             <div className="alert-field field-110">
-              <span className="alert-field-label">端口</span>
+              <span className="alert-field-label">{t('alert.port')}</span>
               <input
                 value={settings.smtp_port ?? ''}
                 onChange={(e) =>
@@ -101,22 +103,22 @@ export default function AlertModal({ onClose }: Props) {
               />
             </div>
             <div className="alert-field field-150">
-              <span className="alert-field-label">加密</span>
+              <span className="alert-field-label">{t('alert.tls')}</span>
               <Select
                 value={settings.smtp_tls ?? 'starttls'}
                 options={[
-                  { value: 'starttls', label: 'STARTTLS（587）' },
-                  { value: 'ssl', label: 'SSL（465）' },
-                  { value: 'none', label: '无' },
+                  { value: 'starttls', label: t('alert.tlsStarttls') },
+                  { value: 'ssl', label: t('alert.tlsSsl') },
+                  { value: 'none', label: t('alert.tlsNone') },
                 ]}
                 onChange={(v) => set('smtp_tls', v)}
-                ariaLabel="加密方式"
+                ariaLabel={t('alert.tlsAria')}
               />
             </div>
           </div>
 
           <div className="alert-field">
-            <span className="alert-field-label">用户名</span>
+            <span className="alert-field-label">{t('alert.username')}</span>
             <input
               value={settings.smtp_username ?? ''}
               onChange={(e) => set('smtp_username', e.target.value)}
@@ -125,17 +127,17 @@ export default function AlertModal({ onClose }: Props) {
           </div>
 
           <div className="alert-field">
-            <span className="alert-field-label">密码 / 授权码</span>
+            <span className="alert-field-label">{t('alert.password')}</span>
             <input
               type="password"
               value={settings.smtp_password ?? ''}
               onChange={(e) => set('smtp_password', e.target.value)}
-              placeholder="SMTP 密码或邮箱授权码"
+              placeholder={t('alert.passwordPlaceholder')}
             />
           </div>
 
           <div className="alert-field">
-            <span className="alert-field-label">发件人</span>
+            <span className="alert-field-label">{t('alert.from')}</span>
             <input
               value={settings.smtp_from ?? ''}
               onChange={(e) => set('smtp_from', e.target.value)}
@@ -144,7 +146,7 @@ export default function AlertModal({ onClose }: Props) {
           </div>
 
           <div className="alert-field">
-            <span className="alert-field-label">收件人（多个用逗号分隔）</span>
+            <span className="alert-field-label">{t('alert.to')}</span>
             <input
               value={settings.smtp_to ?? ''}
               onChange={(e) => set('smtp_to', e.target.value)}
@@ -168,7 +170,7 @@ export default function AlertModal({ onClose }: Props) {
               onClick={handleTest}
               disabled={testing || saving}
             >
-              {testing ? '测试中…' : '测试发送'}
+              {testing ? t('alert.testing') : t('alert.testSend')}
             </button>
             <button
               type="button"
@@ -176,7 +178,7 @@ export default function AlertModal({ onClose }: Props) {
               onClick={handleSave}
               disabled={saving}
             >
-              {saving ? '保存中…' : '保存 SMTP 设置'}
+              {saving ? t('common.saving') : t('alert.saveSettings')}
             </button>
           </div>
         </div>

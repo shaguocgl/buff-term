@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { fmtError } from '../utils/errors';
+import { useI18n, type DictKey } from '../i18n';
 import ConfirmModal from './ConfirmModal';
 import {
   cancelInspection,
@@ -50,14 +51,16 @@ interface Props {
   onClose: () => void;
 }
 
-const RISK_LABEL: Record<string, string> = {
-  low: '低风险',
-  medium: '中风险',
-  high: '高风险',
-  unknown: '未知',
+const RISK_LABEL: Record<string, DictKey> = {
+  low: 'inspect.riskLow',
+  medium: 'inspect.riskMedium',
+  high: 'inspect.riskHigh',
+  unknown: 'inspect.riskUnknown',
 };
 
 function InspectionPanel({ host, hidden = false, onClose }: Props) {
+  const { t, lang } = useI18n();
+  const locale = lang === 'en' ? 'en-US' : 'zh-CN';
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [status, setStatus] = useState<InspectionStatus | null>(null);
   const [progress, setProgress] =
@@ -105,7 +108,7 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
           loadRemediation(id).catch(() => {});
         } else {
           setStatus('failed');
-          setError('未找到巡检报告');
+          setError(t('inspect.notFound'));
         }
       } catch (e) {
         setStatus('failed');
@@ -113,7 +116,7 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
       }
       await refreshHistory();
     },
-    [refreshHistory],
+    [refreshHistory, t],
   );
 
   const loadRemediation = useCallback(async (reportId: string) => {
@@ -360,7 +363,7 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
     setRemediationProgress({
       remediation_id: '',
       phase: 'planning',
-      message: 'AI 正在生成整改步骤…',
+      message: t('inspect.planningMsg'),
     });
     try {
       const id = await startRemediationPlanning(report.id, intervention);
@@ -390,7 +393,7 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
   const handleExecute = () => {
     const steps = editSteps.filter((s) => s.command.trim());
     if (steps.length === 0) {
-      setRemediationError('请至少保留一条可执行的整改步骤');
+      setRemediationError(t('inspect.needStep'));
       return;
     }
     if (steps.some((s) => isDangerousCommand(s.command))) {
@@ -452,11 +455,15 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
       <div className="inspection-header">
         <div className="inspection-title">
           <InspectIcon size={16} />
-          <span>AI 巡检 · {host.name}</span>
+          <span>{t('inspect.title', { name: host.name })}</span>
         </div>
         <div className="inspection-actions">
           {status === 'running' && (
-            <button className="icon-btn" title="取消巡检" onClick={handleCancel}>
+            <button
+              className="icon-btn"
+              title={t('inspect.cancelTitle')}
+              onClick={handleCancel}
+            >
               <StopIcon size={14} />
             </button>
           )}
@@ -464,19 +471,19 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
             className={`inspection-mail-state${emailConfigured === false ? ' warn' : ''}`}
             title={
               emailConfigured === false
-                ? '未配置邮件通知，巡检完成后不会发送邮件报告'
+                ? t('inspect.mailMissingTitle')
                 : emailConfigured === true
-                  ? '邮件通知已配置'
-                  : '正在检查邮件通知配置'
+                  ? t('inspect.mailConfiguredTitle')
+                  : t('inspect.mailCheckingTitle')
             }
           >
             {emailConfigured === false
-              ? '未配置邮件通知'
+              ? t('inspect.mailMissing')
               : emailConfigured === true
-                ? '邮件通知已配置'
-                : '邮件通知检查中'}
+                ? t('inspect.mailConfigured')
+                : t('inspect.mailChecking')}
           </div>
-          <button className="icon-btn" title="关闭" onClick={onClose}>
+          <button className="icon-btn" title={t('common.close')} onClick={onClose}>
             <XIcon size={14} />
           </button>
         </div>
@@ -489,10 +496,12 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
               <InspectIcon size={28} />
             </div>
             <div className="inspection-start-text">
-              对 <strong>{host.name}</strong> 执行一次 AI 只读巡检
+              {t('inspect.startTextA')}
+              <strong>{host.name}</strong>
+              {t('inspect.startTextB')}
             </div>
             <button className="btn primary" onClick={begin}>
-              <InspectIcon size={15} /> 开始巡检
+              <InspectIcon size={15} /> {t('inspect.start')}
             </button>
           </div>
         )}
@@ -502,7 +511,7 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
             <div className="spinner" />
             <div>
               <div className="inspection-phase">
-                {progress?.message ?? '正在准备巡检…'}
+                {progress?.message ?? t('inspect.preparing')}
               </div>
               {steps.length > 0 && (
                 <div className="inspection-steps">
@@ -526,7 +535,9 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
             <div className="inspection-meta">
               <div className="inspection-meta-info">
                 <span className={`risk-badge risk-${report.risk_level}`}>
-                  {RISK_LABEL[report.risk_level] ?? report.risk_level}
+                  {RISK_LABEL[report.risk_level]
+                    ? t(RISK_LABEL[report.risk_level])
+                    : report.risk_level}
                 </span>
                 <span>{report.provider_name} · {report.model}</span>
                 <span>
@@ -534,15 +545,19 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
                     ? `${(report.duration_ms / 1000).toFixed(1)}s`
                     : '—'}
                 </span>
-                <span>{report.email_sent ? '✓ 邮件已发送' : '邮件未发送'}</span>
+                <span>
+                  {report.email_sent
+                    ? t('inspect.emailSent')
+                    : t('inspect.emailNotSent')}
+                </span>
               </div>
               <div className="inspection-meta-actions">
                 <button className="btn secondary inspection-reinspect" onClick={begin}>
-                  <RefreshIcon size={14} /> 重新巡检
+                  <RefreshIcon size={14} /> {t('inspect.reinspect')}
                 </button>
                 {remediation?.status === 'success' ? (
                   <span className="remediation-done-badge">
-                    <CheckIcon size={12} /> 已整改
+                    <CheckIcon size={12} /> {t('inspect.remediated')}
                   </span>
                 ) : (
                   <button
@@ -552,7 +567,7 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
                       setRemediationError(null);
                     }}
                   >
-                    <WrenchIcon size={14} /> 一键整改
+                    <WrenchIcon size={14} /> {t('inspect.remediate')}
                   </button>
                 )}
               </div>
@@ -563,17 +578,17 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
             {remediationOpen && (
               <div className="remediation-box" ref={remediationBoxRef}>
                 <div className="remediation-title">
-                  <WrenchIcon size={14} /> 一键整改
+                  <WrenchIcon size={14} /> {t('inspect.remediate')}
                 </div>
 
                 <div className="remediation-field">
                   <span className="remediation-field-label">
-                    整改干预意见（可选）
+                    {t('inspect.interventionLabel')}
                   </span>
                   <textarea
                     value={intervention}
                     onChange={(e) => setIntervention(e.target.value)}
-                    placeholder="例如：只整改磁盘与日志轮转，不要改动 SSH 配置；服务重启前先通知我"
+                    placeholder={t('inspect.interventionPlaceholder')}
                     disabled={remediationBusy}
                   />
                 </div>
@@ -586,7 +601,7 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
                       onClick={handleGenerateRemediation}
                       disabled={remediationBusy}
                     >
-                      <WrenchIcon size={13} /> 生成整改步骤
+                      <WrenchIcon size={13} /> {t('inspect.generateSteps')}
                     </button>
                   </div>
                 )}
@@ -616,16 +631,16 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
                           >
                             <div className="remediation-step-head">
                               <span className="remediation-step-index">
-                                步骤 {index + 1}
+                                {t('inspect.step', { n: index + 1 })}
                               </span>
                               {dangerous && (
                                 <span className="remediation-danger-badge">
-                                  危险
+                                  {t('inspect.danger')}
                                 </span>
                               )}
                               <button
                                 className="icon-btn danger"
-                                title="删除步骤"
+                                title={t('inspect.deleteStep')}
                                 onClick={() => removeStep(index)}
                               >
                                 <TrashIcon size={13} />
@@ -639,7 +654,7 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
                                   description: e.target.value,
                                 })
                               }
-                              placeholder="步骤说明"
+                              placeholder={t('inspect.stepDescPlaceholder')}
                             />
                             <textarea
                               className="remediation-step-cmd"
@@ -647,11 +662,11 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
                               onChange={(e) =>
                                 updateStep(index, { command: e.target.value })
                               }
-                              placeholder="要执行的命令"
+                              placeholder={t('inspect.stepCmdPlaceholder')}
                               spellCheck={false}
                             />
                             <label className="remediation-step-timeout">
-                              超时（秒）
+                              {t('inspect.timeoutSecs')}
                               <input
                                 type="number"
                                 min={5}
@@ -671,21 +686,21 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
                     </div>
                     <div className="remediation-actions">
                       <button className="btn ghost small" onClick={addStep}>
-                        <PlusIcon size={13} /> 添加步骤
+                        <PlusIcon size={13} /> {t('inspect.addStep')}
                       </button>
                       <button
                         className="btn secondary small"
                         onClick={handleGenerateRemediation}
                         disabled={remediationBusy}
                       >
-                        <RefreshIcon size={13} /> 重新生成
+                        <RefreshIcon size={13} /> {t('inspect.regenerate')}
                       </button>
                       <button
                         className="btn primary small"
                         onClick={handleExecute}
                         disabled={remediationBusy}
                       >
-                        <CheckIcon size={13} /> 确认执行
+                        <CheckIcon size={13} /> {t('inspect.confirmExecute')}
                       </button>
                     </div>
                   </>
@@ -709,13 +724,13 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
                       >
                         <div className="remediation-result-head">
                           <span className="remediation-step-index">
-                            步骤 {index + 1}
+                            {t('inspect.step', { n: index + 1 })}
                           </span>
                           <span className="remediation-step-state">
-                            {step.status === 'pending' && '待执行'}
-                            {step.status === 'running' && '执行中'}
-                            {step.status === 'success' && '已完成'}
-                            {step.status === 'error' && '失败'}
+                            {step.status === 'pending' && t('inspect.statePending')}
+                            {step.status === 'running' && t('inspect.stateRunning')}
+                            {step.status === 'success' && t('inspect.stateSuccess')}
+                            {step.status === 'error' && t('inspect.stateError')}
                           </span>
                         </div>
                         <div className="remediation-step-desc">
@@ -737,7 +752,7 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
                           className="btn danger small"
                           onClick={handleCancelRemediation}
                         >
-                          <StopIcon size={13} /> 取消整改
+                          <StopIcon size={13} /> {t('inspect.cancelRemediation')}
                         </button>
                       )}
                       {(remediation.status === 'failed' ||
@@ -746,7 +761,7 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
                           className="btn primary small"
                           onClick={handleRetryRemediation}
                         >
-                          <RefreshIcon size={13} /> 重新执行
+                          <RefreshIcon size={13} /> {t('inspect.rerun')}
                         </button>
                       )}
                       {(remediation.status === 'success' ||
@@ -759,7 +774,7 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
                             setRemediationOpen(false);
                           }}
                         >
-                          关闭整改
+                          {t('inspect.closeRemediation')}
                         </button>
                       )}
                     </div>
@@ -775,9 +790,9 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
         )}
 
         <div className="inspection-history">
-          <div className="inspection-history-title">历史报告</div>
+          <div className="inspection-history-title">{t('inspect.historyTitle')}</div>
           {history.length === 0 && (
-            <div className="inspection-empty">暂无巡检记录</div>
+            <div className="inspection-empty">{t('inspect.historyEmpty')}</div>
           )}
           {history.map((item) => (
             <button
@@ -791,11 +806,11 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
                 <span className="inspection-history-summary">{item.summary}</span>
               </span>
               <span className="inspection-history-time">
-                {new Date(item.created_at * 1000).toLocaleString()}
+                {new Date(item.created_at * 1000).toLocaleString(locale)}
               </span>
               <button
                 className="icon-btn danger inspection-delete"
-                title="删除报告"
+                title={t('inspect.deleteReportTitle')}
                 onClick={(e) => {
                   e.stopPropagation();
                   handleDeleteReport(item.id);
@@ -809,8 +824,8 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
       </div>
       {confirmingDanger && (
         <Modal
-          title="确认执行危险整改"
-          subtitle="以下步骤包含可能影响服务或数据的危险命令，请确认后执行"
+          title={t('inspect.dangerTitle')}
+          subtitle={t('inspect.dangerSubtitle')}
           onClose={() => setConfirmingDanger(false)}
         >
           <div className="remediation-danger-modal">
@@ -829,21 +844,21 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
                 checked={dangerChecked}
                 onChange={(e) => setDangerChecked(e.target.checked)}
               />
-              我已了解风险，确认执行这些命令
+              {t('inspect.dangerAck')}
             </label>
             <div className="remediation-actions">
               <button
                 className="btn ghost small"
                 onClick={() => setConfirmingDanger(false)}
               >
-                取消
+                {t('common.cancel')}
               </button>
               <button
                 className="btn primary small"
                 onClick={confirmExecuteDanger}
                 disabled={!dangerChecked}
               >
-                确认执行
+                {t('inspect.confirmExecute')}
               </button>
             </div>
           </div>
@@ -852,9 +867,9 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
 
       {confirmDeleteId && (
         <ConfirmModal
-          title="删除巡检报告"
-          body="确定删除这条巡检报告吗？"
-          confirmText="删除"
+          title={t('inspect.deleteTitle')}
+          body={t('inspect.deleteBody')}
+          confirmText={t('common.delete')}
           danger
           onConfirm={() => doDeleteReport(confirmDeleteId)}
           onCancel={() => setConfirmDeleteId(null)}

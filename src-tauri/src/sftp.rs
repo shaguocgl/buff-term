@@ -50,7 +50,7 @@ fn success(text: impl Into<String>) -> SftpResult {
 /// 或覆盖下载到敏感位置。
 fn validate_local_path(local: &str) -> Result<(), String> {
     if !std::path::Path::new(local).is_absolute() {
-        return Err("本地路径必须是绝对路径".to_string());
+        return Err(crate::i18n::t("本地路径必须是绝对路径", "The local path must be absolute").to_string());
     }
     let lower = local.to_ascii_lowercase();
     for bad in [
@@ -63,7 +63,11 @@ fn validate_local_path(local: &str) -> Result<(), String> {
         "/.azure/",
     ] {
         if lower.contains(bad) {
-            return Err(format!("本地路径包含敏感目录（{bad}），已拒绝该操作"));
+            return Err(if crate::i18n::is_en() {
+                format!("The local path contains a sensitive directory ({bad}); the operation was rejected")
+            } else {
+                format!("本地路径包含敏感目录（{bad}），已拒绝该操作")
+            });
         }
     }
     Ok(())
@@ -172,18 +176,18 @@ where
     };
     loop {
         if cancelled.load(Ordering::SeqCst) {
-            return Err("传输已取消".to_string());
+            return Err(crate::i18n::t("传输已取消", "Transfer cancelled").to_string());
         }
         let n = src
             .read(&mut buf)
             .await
-            .map_err(|e| format!("读取数据失败: {e}"))?;
+            .map_err(|e| format!("{}: {e}", crate::i18n::t("读取数据失败", "Failed to read data")))?;
         if n == 0 {
             break;
         }
         dst.write_all(&buf[..n])
             .await
-            .map_err(|e| format!("写入数据失败: {e}"))?;
+            .map_err(|e| format!("{}: {e}", crate::i18n::t("写入数据失败", "Failed to write data")))?;
         transferred += n as u64;
         if last_emit.elapsed() >= PROGRESS_INTERVAL {
             emit(transferred);
@@ -216,14 +220,14 @@ where
                 .handle
                 .channel_open_session()
                 .await
-                .map_err(|e| format!("打开 SFTP 通道失败: {e}"))?;
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("打开 SFTP 通道失败", "Failed to open the SFTP channel")))?;
             channel
                 .request_subsystem(true, "sftp")
                 .await
-                .map_err(|e| format!("启动 SFTP 子系统失败: {e}"))?;
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("启动 SFTP 子系统失败", "Failed to start the SFTP subsystem")))?;
             SftpSession::new(channel.into_stream())
                 .await
-                .map_err(|e| format!("初始化 SFTP 失败: {e}"))
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("初始化 SFTP 失败", "Failed to initialize SFTP")))
         };
 
         let sftp = match tokio::time::timeout(timeout, sftp_setup).await {
@@ -241,7 +245,7 @@ where
                 if attempt == 0 {
                     continue;
                 }
-                return Err("操作超时".to_string());
+                return Err(crate::i18n::t("操作超时", "Operation timed out").to_string());
             }
         };
 
@@ -259,7 +263,7 @@ where
             Err(_) => {
                 // 操作超时：SFTP session 可能处于不一致状态，清理连接避免下次复用出问题
                 russh.invalidate(&host.id, &lease.handle);
-                Err("操作超时".to_string())
+                Err(crate::i18n::t("操作超时", "Operation timed out").to_string())
             }
         };
     }
@@ -273,7 +277,7 @@ async fn list_dir(sftp: &SftpSession, path: &str) -> Result<Vec<SftpEntry>, Stri
     let dir = sftp
         .read_dir(path)
         .await
-        .map_err(|e| format!("读取目录失败: {e}"))?;
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取目录失败", "Failed to read the directory")))?;
     let mut entries = Vec::new();
     for entry in dir {
         let name = entry.file_name();
@@ -355,15 +359,15 @@ pub async fn sftp_download(
             let meta = sftp
                 .metadata(remote.as_str())
                 .await
-                .map_err(|e| format!("读取远程文件信息失败: {e}"))?;
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("读取远程文件信息失败", "Failed to read remote file info")))?;
             let total = meta.len();
             let mut src = sftp
                 .open(remote)
                 .await
-                .map_err(|e| format!("打开远程文件失败: {e}"))?;
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("打开远程文件失败", "Failed to open the remote file")))?;
             let mut dst = tokio::fs::File::create(&local)
                 .await
-                .map_err(|e| format!("创建本地文件失败: {e}"))?;
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("创建本地文件失败", "Failed to create the local file")))?;
             let count = copy_with_progress(
                 &mut src,
                 &mut dst,
@@ -382,7 +386,7 @@ pub async fn sftp_download(
             }
             dst.flush()
                 .await
-                .map_err(|e| format!("刷新本地文件失败: {e}"))?;
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("刷新本地文件失败", "Failed to flush the local file")))?;
             let _ = src.close().await;
             count
         })
@@ -390,7 +394,11 @@ pub async fn sftp_download(
     .await;
     registry.remove(&transfer_id);
     let count = result?;
-    Ok(success(format!("已下载 {count} 字节")))
+    Ok(success(if crate::i18n::is_en() {
+            format!("Downloaded {count} bytes")
+        } else {
+            format!("已下载 {count} 字节")
+        }))
 }
 
 #[tauri::command]
@@ -416,15 +424,15 @@ pub async fn sftp_upload(
         Box::pin(async move {
             let total = tokio::fs::metadata(&local)
                 .await
-                .map_err(|e| format!("读取本地文件信息失败: {e}"))?
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("读取本地文件信息失败", "Failed to read local file info")))?
                 .len();
             let mut src = tokio::fs::File::open(&local)
                 .await
-                .map_err(|e| format!("打开本地文件失败: {e}"))?;
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("打开本地文件失败", "Failed to open the local file")))?;
             let mut dst = sftp
                 .create(&remote)
                 .await
-                .map_err(|e| format!("创建远程文件失败: {e}"))?;
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("创建远程文件失败", "Failed to create the remote file")))?;
             let count = copy_with_progress(
                 &mut src,
                 &mut dst,
@@ -443,14 +451,18 @@ pub async fn sftp_upload(
             }
             dst.close()
                 .await
-                .map_err(|e| format!("关闭远程文件失败: {e}"))?;
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("关闭远程文件失败", "Failed to close the remote file")))?;
             count
         })
     })
     .await;
     registry.remove(&transfer_id);
     let count = result?;
-    Ok(success(format!("已上传 {count} 字节")))
+    Ok(success(if crate::i18n::is_en() {
+            format!("Uploaded {count} bytes")
+        } else {
+            format!("已上传 {count} 字节")
+        }))
 }
 
 #[tauri::command]
@@ -468,21 +480,21 @@ pub async fn sftp_delete(
             let meta = sftp
                 .symlink_metadata(path.as_str())
                 .await
-                .map_err(|e| format!("读取目标信息失败: {e}"))?;
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("读取目标信息失败", "Failed to read the target info")))?;
             if meta.file_type().is_dir() {
                 sftp.remove_dir(path.as_str())
                     .await
-                    .map_err(|e| format!("删除目录失败: {e}"))?;
+                    .map_err(|e| format!("{}: {e}", crate::i18n::t("删除目录失败", "Failed to delete the directory")))?;
             } else {
                 sftp.remove_file(path.as_str())
                     .await
-                    .map_err(|e| format!("删除文件失败: {e}"))?;
+                    .map_err(|e| format!("{}: {e}", crate::i18n::t("删除文件失败", "Failed to delete the file")))?;
             }
             Ok(())
         })
     })
     .await?;
-    Ok(success("已删除"))
+    Ok(success(crate::i18n::t("已删除", "Deleted")))
 }
 
 #[tauri::command]
@@ -498,12 +510,12 @@ pub async fn sftp_mkdir(
         Box::pin(async move {
             sftp.create_dir(path)
                 .await
-                .map_err(|e| format!("创建目录失败: {e}"))?;
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("创建目录失败", "Failed to create the directory")))?;
             Ok(())
         })
     })
     .await?;
-    Ok(success("已创建目录"))
+    Ok(success(crate::i18n::t("已创建目录", "Directory created")))
 }
 
 #[tauri::command]
@@ -521,12 +533,12 @@ pub async fn sftp_rename(
         Box::pin(async move {
             sftp.rename(from, to)
                 .await
-                .map_err(|e| format!("重命名失败: {e}"))?;
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("重命名失败", "Rename failed")))?;
             Ok(())
         })
     })
     .await?;
-    Ok(success("已重命名"))
+    Ok(success(crate::i18n::t("已重命名", "Renamed")))
 }
 
 /// 内置编辑器单文件大小上限（2 MiB）：超过该值不读入内存，避免大文件卡死 / 内存膨胀，
@@ -688,11 +700,11 @@ async fn write_atomic(
     let existing = sftp.symlink_metadata(path).await.ok();
     if let Some(meta) = &existing {
         if meta.file_type().is_dir() {
-            return Err("目标是目录，无法写入文件".to_string());
+            return Err(crate::i18n::t("目标是目录，无法写入文件", "The target is a directory; cannot write a file").to_string());
         }
         if let Some(expected) = expected_mtime {
             if meta.mtime.unwrap_or(0) as u64 != expected {
-                return Err("远端文件已被其它程序修改，请重新打开后再编辑".to_string());
+                return Err(crate::i18n::t("远端文件已被其它程序修改，请重新打开后再编辑", "The remote file was modified by another program; reopen it before editing").to_string());
             }
         }
     }
@@ -702,10 +714,10 @@ async fn write_atomic(
         let mut file = sftp
             .create(temp.as_str())
             .await
-            .map_err(|e| format!("创建临时文件失败: {e}"))?;
+            .map_err(|e| format!("{}: {e}", crate::i18n::t("创建临时文件失败", "Failed to create the temporary file")))?;
         file.write_all(bytes)
             .await
-            .map_err(|e| format!("写入临时文件失败: {e}"))?;
+            .map_err(|e| format!("{}: {e}", crate::i18n::t("写入临时文件失败", "Failed to write the temporary file")))?;
         // 沿用原文件权限（best-effort：部分服务端不支持 fsetstat 时忽略）
         if let Some(meta) = &existing {
             let _ = file
@@ -718,7 +730,7 @@ async fn write_atomic(
         let _ = file.sync_all().await;
         file.close()
             .await
-            .map_err(|e| format!("关闭临时文件失败: {e}"))?;
+            .map_err(|e| format!("{}: {e}", crate::i18n::t("关闭临时文件失败", "Failed to close the temporary file")))?;
         Ok::<(), String>(())
     };
     if let Err(e) = write.await {
@@ -732,7 +744,10 @@ async fn write_atomic(
         let _ = sftp.remove_file(path).await;
         if let Err(e) = sftp.rename(temp.as_str(), path).await {
             let _ = sftp.remove_file(temp.as_str()).await;
-            return Err(format!("替换目标文件失败: {e}"));
+            return Err(format!(
+            "{}: {e}",
+            crate::i18n::t("替换目标文件失败", "Failed to replace the target file")
+        ));
         }
     }
     Ok(())
@@ -756,34 +771,49 @@ pub async fn sftp_read_file(
             let meta = sftp
                 .metadata(real.as_str())
                 .await
-                .map_err(|e| format!("读取远程文件信息失败: {e}"))?;
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("读取远程文件信息失败", "Failed to read remote file info")))?;
             if meta.file_type().is_dir() {
-                return Err("目标是目录，无法作为文件打开".to_string());
+                return Err(crate::i18n::t("目标是目录，无法作为文件打开", "The target is a directory; cannot open it as a file").to_string());
             }
             let size = meta.len();
             if size > MAX_EDIT_BYTES {
-                return Err(format!(
-                    "文件大小 {} 超过内置编辑器上限 {}，请下载到本地编辑",
-                    human_bytes(size),
-                    human_bytes(MAX_EDIT_BYTES)
-                ));
+                return Err(if crate::i18n::is_en() {
+                    format!(
+                        "The file size {} exceeds the built-in editor limit {}; download it and edit locally",
+                        human_bytes(size),
+                        human_bytes(MAX_EDIT_BYTES)
+                    )
+                } else {
+                    format!(
+                        "文件大小 {} 超过内置编辑器上限 {}，请下载到本地编辑",
+                        human_bytes(size),
+                        human_bytes(MAX_EDIT_BYTES)
+                    )
+                });
             }
             let bytes = sftp
                 .read(real.as_str())
                 .await
-                .map_err(|e| format!("读取远程文件失败: {e}"))?;
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("读取远程文件失败", "Failed to read the remote file")))?;
             // stat 与读取之间文件可能变大，读完再兜底校验一次
             if bytes.len() as u64 > MAX_EDIT_BYTES {
-                return Err(format!(
-                    "文件大小超过内置编辑器上限 {}，请下载到本地编辑",
-                    human_bytes(MAX_EDIT_BYTES)
-                ));
+                return Err(if crate::i18n::is_en() {
+                    format!(
+                        "The file size exceeds the built-in editor limit {}; download it and edit locally",
+                        human_bytes(MAX_EDIT_BYTES)
+                    )
+                } else {
+                    format!(
+                        "文件大小超过内置编辑器上限 {}，请下载到本地编辑",
+                        human_bytes(MAX_EDIT_BYTES)
+                    )
+                });
             }
             if looks_binary(&bytes) {
-                return Err("疑似二进制文件，已拒绝在内置编辑器中打开".to_string());
+                return Err(crate::i18n::t("疑似二进制文件，已拒绝在内置编辑器中打开", "The file appears to be binary; refused to open it in the built-in editor").to_string());
             }
             let content = String::from_utf8(bytes)
-                .map_err(|_| "文件不是 UTF-8 文本，请下载到本地编辑".to_string())?;
+                .map_err(|_| crate::i18n::t("文件不是 UTF-8 文本，请下载到本地编辑", "The file is not UTF-8 text; download it and edit locally").to_string())?;
             Ok(SftpFileContent {
                 content,
                 size,
@@ -813,7 +843,11 @@ pub async fn sftp_write_file(
     if sensitive && !confirmed {
         return Ok(SftpWriteOutcome {
             ok: false,
-            text: format!("{path} 属于敏感路径，写入需要确认"),
+            text: if crate::i18n::is_en() {
+            format!("{path} is a sensitive path; writing requires confirmation")
+        } else {
+            format!("{path} 属于敏感路径，写入需要确认")
+        },
             requires_confirm: true,
             mtime: 0,
         });
@@ -821,10 +855,17 @@ pub async fn sftp_write_file(
 
     let bytes = content.into_bytes();
     if bytes.len() as u64 > MAX_EDIT_BYTES {
-        return Err(format!(
-            "内容大小超过内置编辑器上限 {}，已拒绝写入",
-            human_bytes(MAX_EDIT_BYTES)
-        ));
+        return Err(if crate::i18n::is_en() {
+            format!(
+                "The content size exceeds the built-in editor limit {}; write rejected",
+                human_bytes(MAX_EDIT_BYTES)
+            )
+        } else {
+            format!(
+                "内容大小超过内置编辑器上限 {}，已拒绝写入",
+                human_bytes(MAX_EDIT_BYTES)
+            )
+        });
     }
     let total = bytes.len() as u64;
     let started = Instant::now();
@@ -858,7 +899,11 @@ pub async fn sftp_write_file(
         approval: if sensitive { "approved" } else { "auto" }.to_string(),
         status: if result.is_ok() { "ok" } else { "error" }.to_string(),
         result: match &result {
-            Ok(_) => Some(format!("已写入 {} 字节", total)),
+            Ok(_) => Some(if crate::i18n::is_en() {
+            format!("Wrote {total} bytes")
+        } else {
+            format!("已写入 {} 字节", total)
+        }),
             Err(e) => Some(truncate(&sanitize(e), 500)),
         },
         duration_ms: Some(started.elapsed().as_millis() as u64),
@@ -868,7 +913,11 @@ pub async fn sftp_write_file(
     let mtime = result?;
     Ok(SftpWriteOutcome {
         ok: true,
-        text: format!("已保存（{}）", human_bytes(total)),
+        text: if crate::i18n::is_en() {
+            format!("Saved ({})", human_bytes(total))
+        } else {
+            format!("已保存（{}）", human_bytes(total))
+        },
         requires_confirm: false,
         mtime,
     })

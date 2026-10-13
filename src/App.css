@@ -167,6 +167,18 @@ button {
   border-color: var(--border);
 }
 
+/* 语言切换（中 / EN）：与主题按钮同尺寸，显示当前界面语言 */
+.lang-toggle {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+.rail-btn.lang-toggle {
+  font-size: 12px;
+}
+
 /* ============ 收起态图标栏 ============ */
 
 .rail {
@@ -403,6 +415,8 @@ button {
   display: flex;
   flex-direction: column;
   line-height: 1.25;
+  /* 允许收缩：副标题过长时按省略号截断，而不是换行撑高标题区 / 顶掉右侧按钮 */
+  min-width: 0;
 }
 
 .brand-name {
@@ -414,6 +428,9 @@ button {
 .brand-sub {
   color: var(--muted);
   font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sidebar-actions {
@@ -1325,16 +1342,18 @@ input::placeholder {
   margin: -1px 0 8px;
 }
 
-/* 版本按钮在 flex 容器里取消强制整宽，改为可收缩，让出版本号靠右的空间 */
+/* 版本按钮在 flex 容器里取消强制整宽且不参与收缩：文案（如 "Check for updates"）
+   始终保持一行，空间不足时由右侧版本号缩略让位 */
 .version-entry .log-entry {
   width: auto;
-  flex: 0 1 auto;
+  flex: none;
   min-width: 0;
   margin-bottom: 0;
 }
 
 .version-check {
   margin-bottom: 1px;
+  white-space: nowrap;
 }
 
 .version-check.update-ready {
@@ -1351,6 +1370,8 @@ input::placeholder {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 /* ============ 操作审计 ============ */
@@ -2474,16 +2495,23 @@ input::placeholder {
 /* ---- 服务器信息卡 ---- */
 
 .monitor-info {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
+  display: grid;
+  /* 标签列宽度随最长标签自适应（中文 2 字 / 英文 Location、Memory 等都能容纳），
+     数值列可收缩并省略，两者不再重叠 */
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  column-gap: 10px;
+  row-gap: 5px;
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--panel-2);
+  font-size: 11.5px;
+  line-height: 1.55;
 }
 
 .monitor-info-head {
+  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2532,22 +2560,18 @@ input::placeholder {
   color: var(--text);
 }
 
+/* 标签与数值直接参与父级网格（display: contents）：每行无需各自的盒模型，
+   标签列统一由最宽标签决定，中英文都不会互相挤占 */
 .info-row {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  font-size: 11.5px;
-  line-height: 1.55;
+  display: contents;
 }
 
 .info-label {
-  flex: none;
-  width: 30px;
   color: var(--faint);
+  white-space: nowrap;
 }
 
 .info-value {
-  flex: 1;
   min-width: 0;
   font-family: var(--mono);
   color: var(--muted);
@@ -3150,7 +3174,10 @@ input::placeholder {
 }
 
 .terminal-header .btn {
-  width: 88px;
+  /* 中文 2 字标签下 5 个按钮等宽 88px；英文更长的文案（如 Disconnect）
+     按内容加宽，避免文字溢出按钮边框 */
+  min-width: 88px;
+  width: auto;
   flex: none;
   display: inline-flex;
   align-items: center;
@@ -3178,7 +3205,9 @@ input::placeholder {
 
 @container terminal (max-width: 720px) {
   .terminal-header .btn {
+    /* 图标模式：显式覆盖 min-width，否则会被基准规则的 88px 撑宽 */
     width: 38px;
+    min-width: 0;
     padding: 6px 0;
   }
 
@@ -3190,6 +3219,7 @@ input::placeholder {
 @media (max-width: 1180px) {
   .terminal-header .btn {
     width: 38px;
+    min-width: 0;
     padding: 6px 0;
   }
 
@@ -3725,10 +3755,16 @@ input::placeholder {
   min-width: 0;
 }
 
-/* 安全级别固定为约 5 个汉字的宽度，模型固定宽度，避免随面板拉伸/内容变化而抖动 */
+/* 安全级别固定宽度，避免切换级别 / 面板拉伸时抖动。
+   中文 5 字（智能审核）在 126px 内可完整显示；英文 "Smart approval" 更长，
+   故按语言分别给宽，保证按钮文案不被截断（下拉菜单本身已按内容自适应） */
 .chat-bottom-bar .chat-control-permission {
   flex: 0 0 auto;
   width: 126px;
+}
+
+:lang(en) .chat-bottom-bar .chat-control-permission {
+  width: 140px;
 }
 
 .chat-bottom-bar .chat-control-model {
@@ -4422,9 +4458,11 @@ input::placeholder {
 }
 
 .model-default {
-  /* 固定宽度，避免“默认 / 设默认”文字长度不同导致同一行输入框宽度不一致 */
-  flex: 0 0 58px;
-  width: 58px;
+  /* 宽度取内容与 58px 的较大者：中文「默认 / 设默认」两者都小于 58px 故保持等宽，
+     英文 "Set default" 更宽时自动加宽，避免文字溢出按钮 */
+  flex: 0 0 auto;
+  min-width: 58px;
+  width: auto;
   text-align: center;
   border: 1px solid var(--border);
   background: var(--panel-3);
@@ -4440,6 +4478,12 @@ input::placeholder {
   color: var(--success);
   border-color: rgba(52, 211, 153, 0.35);
   background: rgba(52, 211, 153, 0.1);
+}
+
+/* 英文 "Set default" 更长：按语言统一给宽，保持各模型行输入框对齐 */
+:lang(en) .model-default {
+  flex-basis: 76px;
+  width: 76px;
 }
 
 /* 模型行「图片」能力勾选 */

@@ -52,7 +52,9 @@ fn parse_with_user(content: &str, fallback_user: String) -> ParsedConfig {
                         username: String::new(),
                         auth_type: AuthType::Key,
                         key_path: None,
-                        notes: Some("来自 ~/.ssh/config".to_string()),
+                        notes: Some(
+            crate::i18n::t("来自 ~/.ssh/config", "from ~/.ssh/config").to_string(),
+        ),
                     });
                 }
             }
