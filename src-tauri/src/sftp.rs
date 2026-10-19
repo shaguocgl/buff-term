@@ -429,10 +429,20 @@ pub async fn sftp_upload(
             let mut src = tokio::fs::File::open(&local)
                 .await
                 .map_err(|e| format!("{}: {e}", crate::i18n::t("打开本地文件失败", "Failed to open the local file")))?;
+            // 与 write_atomic 一致：符号链接写到真实目标（rename 到链接路径会把链接替换成普通文件），
+            // 目标是目录直接拒绝，覆盖已有文件时沿用其权限
+            let real = resolve_link(sftp, &remote).await;
+            let existing = sftp.symlink_metadata(real.as_str()).await.ok();
+            if existing.as_ref().is_some_and(|m| m.file_type().is_dir()) {
+                return Err(crate::i18n::t("目标是目录，无法写入文件", "The target is a directory; cannot write a file").to_string());
+            }
+            // 先写同目录临时文件，最终 rename 替换目标：
+            // 目标文件在最后一次 rename 前保持原样，中途断连不会留下半个文件
+            let temp = temp_path(&real);
             let mut dst = sftp
-                .create(&remote)
+                .create(temp.as_str())
                 .await
-                .map_err(|e| format!("{}: {e}", crate::i18n::t("创建远程文件失败", "Failed to create the remote file")))?;
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("创建远程临时文件失败", "Failed to create the remote temporary file")))?;
             let count = copy_with_progress(
                 &mut src,
                 &mut dst,
@@ -444,14 +454,24 @@ pub async fn sftp_upload(
             )
             .await;
             if count.is_err() {
-                // 取消/失败时先清理半成品远端文件，并直接返回原始错误，
-                // 不被 close 的失败阻断/掩盖
-                let _ = sftp.remove_file(&remote).await;
+                // 取消/失败时清理临时文件（原目标文件未被改动），
+                // 并直接返回原始错误，不被 close 的失败阻断/掩盖
+                let _ = sftp.remove_file(temp.as_str()).await;
                 return count;
+            }
+            if let Some(meta) = &existing {
+                // 沿用原文件权限（best-effort：部分服务端不支持 fsetstat 时忽略）
+                let _ = dst
+                    .set_metadata(FileAttributes {
+                        permissions: meta.permissions,
+                        ..Default::default()
+                    })
+                    .await;
             }
             dst.close()
                 .await
                 .map_err(|e| format!("{}: {e}", crate::i18n::t("关闭远程文件失败", "Failed to close the remote file")))?;
+            replace_with_temp(sftp, temp.as_str(), &real).await?;
             count
         })
     })
@@ -689,6 +709,23 @@ fn temp_path(path: &str) -> String {
     )
 }
 
+/// 用临时文件原子替换目标：多数服务端 rename 直接覆盖；个别实现拒绝已存在目标时
+/// 退化为「先删后改名」。第二次改名仍失败时**保留临时文件**（此时原文件可能已删除，
+/// 临时文件是新内容唯一副本），并在错误里给出其路径供手工恢复。
+async fn replace_with_temp(sftp: &SftpSession, temp: &str, path: &str) -> Result<(), String> {
+    if sftp.rename(temp, path).await.is_ok() {
+        return Ok(());
+    }
+    let _ = sftp.remove_file(path).await;
+    sftp.rename(temp, path).await.map_err(|e| {
+        format!(
+            "{}: {e}（{}: {temp}）",
+            crate::i18n::t("替换目标文件失败", "Failed to replace the target file"),
+            crate::i18n::t("新内容已保留在临时文件", "the new content is kept in the temporary file")
+        )
+    })
+}
+
 /// 原子写入：先写同目录临时文件，再 rename 覆盖目标。
 /// 直接截断写入时中途断连会留下半个文件，rename 是原子替换，失败也不会破坏原文件。
 async fn write_atomic(
@@ -739,18 +776,8 @@ async fn write_atomic(
     }
 
     // 多数服务端的 rename 直接覆盖目标；个别实现会拒绝已存在的目标，
-    // 此时退化为「先删后改名」（不再原子，但保证保存成功）。
-    if sftp.rename(temp.as_str(), path).await.is_err() {
-        let _ = sftp.remove_file(path).await;
-        if let Err(e) = sftp.rename(temp.as_str(), path).await {
-            let _ = sftp.remove_file(temp.as_str()).await;
-            return Err(format!(
-            "{}: {e}",
-            crate::i18n::t("替换目标文件失败", "Failed to replace the target file")
-        ));
-        }
-    }
-    Ok(())
+    // 此时退化为「先删后改名」（不再原子，但保证保存成功）；最终失败时保留临时文件供恢复。
+    replace_with_temp(sftp, temp.as_str(), path).await
 }
 
 /// 读取远端文本文件（供中间区内置编辑器打开）：

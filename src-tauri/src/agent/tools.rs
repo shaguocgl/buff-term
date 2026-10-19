@@ -289,10 +289,18 @@ pub(crate) fn tools_schema() -> serde_json::Value {
     ])
 }
 
-pub(crate) fn parse_args(raw: &str) -> serde_json::Value {
-    match serde_json::from_str::<serde_json::Value>(raw) {
-        Ok(v) if v.is_object() => v,
-        _ => serde_json::json!({ "command": raw.trim() }),
+/// 解析工具调用参数：空串 → 空对象（无参数工具如 resource_usage）；合法 JSON 对象 → 原样；
+/// 其余（截断的 JSON、裸字符串等）→ 错误。此前会把原文包成 {"command": raw}，
+/// 模型输出被截断的 read_file 参数就会被当成 shell 命令送到远端执行。
+pub(crate) fn parse_args(raw: &str) -> Result<serde_json::Value, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(v) if v.is_object() => Ok(v),
+        Ok(_) => Err(t("工具参数必须是 JSON 对象", "Tool arguments must be a JSON object").to_string()),
+        Err(e) => Err(format!("{}: {e}", t("工具参数不是合法 JSON", "Tool arguments are not valid JSON"))),
     }
 }
 
@@ -500,5 +508,21 @@ mod tests {
     fn infer_tool_name_infers_update_task_plan_from_goal() {
         let args = serde_json::json!({"goal": "部署 nginx", "pending": ["启动服务"]});
         assert_eq!(infer_tool_name("", &args), "update_task_plan");
+    }
+
+    #[test]
+    fn parse_args_accepts_empty_and_objects() {
+        assert_eq!(parse_args("").unwrap(), serde_json::json!({}));
+        assert_eq!(parse_args("  ").unwrap(), serde_json::json!({}));
+        assert_eq!(parse_args(r#"{"command":"df -h"}"#).unwrap(), serde_json::json!({"command":"df -h"}));
+    }
+
+    /// 回归：截断 / 裸字符串参数此前会被包成 {"command": raw} 当 shell 命令执行
+    #[test]
+    fn parse_args_rejects_malformed_instead_of_treating_as_command() {
+        assert!(parse_args(r#"{"path": "/etc/ho"#).is_err());
+        assert!(parse_args(r#""df -h""#).is_err());
+        assert!(parse_args("rm -rf /tmp/x").is_err());
+        assert!(parse_args("[1,2]").is_err());
     }
 }

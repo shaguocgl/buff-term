@@ -64,29 +64,32 @@ jobs:
           releaseBody: |
             ## 升级内容
 
-            ### 中英文双语界面
+            ### SFTP 文件传输安全
 
-            - **侧边栏一键切换中 / 英**：语言按钮位于侧边栏顶部（主题切换按钮旁），点击即时生效，无需重启。
-            - **整个软件同步切换**：全部界面文字与提示、弹窗、终端内提示、后端错误文案、邮件通知都按当前语言显示。
-            - **AI 提示词跟随语言**：Agent 系统提示词、工具描述、任务台账、历史摘要、趋势分析输出，以及 AI 巡检报告与一键整改步骤，全部按当前语言生成；切换语言后 AI 的下一句回答即改用新语言，无需重开会话。
-            - 新增**英文版 README**（README.en.md），与中文版互链。
+            - **上传不再损坏原文件**：上传改为先写同目录临时文件、完成后原子替换目标；中途取消或断连不会截断 / 删除已存在的远端文件。
+            - **覆盖写失败可恢复**：内置编辑器保存与上传共用替换逻辑，最终替换失败时保留临时文件并在错误中给出路径，新旧内容不会同时丢失。
+            - **覆盖时保留文件属性**：上传沿用原文件权限、跟随符号链接写入真实目标、目录目标直接拒绝。
 
-            ### 英文界面排版修复
+            ### AI Agent 稳定性
 
-            - 归属地（国家 / 城市）随界面语言显示，英文界面不再出现中文地名。
-            - 修复英文文案更长导致的排版问题：监控信息卡标签与数值重叠、侧边栏「检查更新」行换行、终端工具栏 Disconnect 溢出按钮、AI 配置 Set default 溢出按钮、聊天底部安全级别文案被截断。
+            - **修复过期审批导致对话静默终止**：流式响应期间收到残留的审批 / 继续回执不再结束本轮，避免界面卡在「执行中」且回答丢失。
+            - **修复异常参数被当作命令执行**：模型输出截断或非法的工具参数不再被猜测为 shell 命令在远端执行，改为回填错误让模型重发；工具卡片在模型漏填名称时显示兜底名。
 
-            ### 其他
+            ### 终端命令拦截
 
-            - 工具定位更新为「**面向 AI 的 SSH 工具与 MCP 服务器**」，侧边栏副标题改为「AI 加持 · SSH + MCP」。
-            - 监控信息卡改为自适应网格布局，标签列按最长标签自动对齐，数值过长时省略显示。
+            - **折行长命令不再漏判**：超过终端宽度自动换行的命令，拦截判定读取完整逻辑行，`rm -rf …` 等前缀不再因换行丢失。
+            - **审计记录完整命令**：拦截审计改为记录审批弹窗中展示的完整命令，历史回放、Tab 补全、Ctrl-C 取消场景不再记成残片。
+
+            ### 终端输入
+
+            - **修复非 ASCII 键盘双写**：德语 `ä`、俄语 `ж` 等非 IME 单键字符不再被发送两次。
 
             ### English highlights
 
-            - **Bilingual UI (Chinese / English)** with a one-click language switch in the sidebar: every label, dialog, terminal message, backend error and email follows the selected language.
-            - **AI prompts follow the language** — agent system prompt, tool descriptions, task plan, history digest, trend output, inspection reports and remediation steps. The agent switches language from its next reply, no need to restart the chat.
-            - Fixed English layout issues caused by longer strings (monitoring info card, sidebar update row, terminal toolbar, AI model row, chat security selector).
-            - Geo location (country / city) now follows the UI language.
+            - **Safer SFTP uploads**: uploads go to a same-directory temp file and atomically replace the target — cancelling or disconnecting mid-upload no longer truncates or deletes the existing remote file. If the final replace fails, the temp file is kept and its path is reported for recovery. Overwriting preserves permissions, follows symlinks to the real target, and rejects directory targets.
+            - **Agent stability**: stale approve/continue messages can no longer silently end a streaming turn (which left the UI busy and dropped the reply); malformed tool-call arguments are bounced back to the model instead of being executed as shell commands.
+            - **Terminal guard**: wrapped long commands are reconstructed across rows so dangerous prefixes can't slip past interception, and audit entries now record the exact command shown in the approval dialog (history replay, tab completion, Ctrl-C included).
+            - **Input fix**: non-ASCII keyboard-layout characters (ä, ж, …) are no longer sent twice.
 
             ## 安装包
 

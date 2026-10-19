@@ -155,6 +155,9 @@ pub struct GuardEngine {
     /// （如 confcon → conf），此标记使这些“过期输入”不再拼进弹窗命令。
     tab_again: bool,
     request_id: String,
+    /// Holding 期间弹窗展示的命令原文：审计必须记录用户实际看到的命令，
+    /// 不能事后用本地行缓冲重建（历史回放时本地行可能为空）。
+    pending_command: String,
     matched: Vec<String>,
 }
 
@@ -172,6 +175,7 @@ impl GuardEngine {
             held_input: Vec::new(),
             tab_again: false,
             request_id: String::new(),
+            pending_command: String::new(),
             matched: Vec::new(),
         }
     }
@@ -215,6 +219,7 @@ impl GuardEngine {
         self.accumulated.clear();
         self.held_input.clear();
         self.tab_again = false;
+        self.pending_command.clear();
         self.matched.clear();
         self.state = GuardState::Known;
     }
@@ -463,6 +468,7 @@ impl GuardEngine {
             self.request_id = uuid::Uuid::new_v4().to_string();
             self.matched = matched.clone();
             self.held_input.clear();
+            self.pending_command = text.clone();
             out.approval = Some(ApprovalRequest {
                 request_id: self.request_id.clone(),
                 command: text,
@@ -506,6 +512,7 @@ impl GuardEngine {
                 self.request_id = uuid::Uuid::new_v4().to_string();
                 self.matched = matched.clone();
                 self.held_input.clear();
+                self.pending_command = display.clone();
                 out.approval = Some(ApprovalRequest {
                     request_id: self.request_id.clone(),
                     command: display,
@@ -559,6 +566,7 @@ impl GuardEngine {
             self.request_id = uuid::Uuid::new_v4().to_string();
             self.matched = matched.clone();
             self.held_input.clear();
+            self.pending_command = display.clone();
             out.approval = Some(ApprovalRequest {
                 request_id: self.request_id.clone(),
                 command: display,
@@ -579,7 +587,7 @@ impl GuardEngine {
         if self.state != GuardState::Holding || self.request_id != request_id {
             return out;
         }
-        let command = self.current_command();
+        let command = std::mem::take(&mut self.pending_command);
         let matched = std::mem::take(&mut self.matched);
         if allow {
             out.forward.push(b'\r');
@@ -609,7 +617,7 @@ impl GuardEngine {
         if self.state != GuardState::Holding {
             return out;
         }
-        let command = self.current_command();
+        let command = std::mem::take(&mut self.pending_command);
         let matched = std::mem::take(&mut self.matched);
         out.forward.push(0x03);
         out.forward.extend_from_slice(&self.held_input);
@@ -626,12 +634,6 @@ impl GuardEngine {
             timed_out: false,
         });
         out
-    }
-
-    fn current_command(&self) -> String {
-        let mut full: Vec<u8> = self.accumulated.clone();
-        full.extend_from_slice(&self.line);
-        String::from_utf8_lossy(&full).to_string()
     }
 }
 
@@ -1516,5 +1518,42 @@ mod tests {
         let out = g.process(b"\r");
         let approval = out.approval.expect("拼接判定应命中 cat 规则");
         assert_eq!(approval.command, "cat logtail.conf", "display={}", approval.command);
+    }
+
+    /// 审计记录的命令必须与弹窗展示的一致（历史回放时本地行为空，此前审计记成空串）
+    #[test]
+    fn audit_records_displayed_command_after_history_replay() {
+        let mut g = GuardEngine::new(config(&["rm -rf"]));
+        let _ = g.process(b"\x1b[A");
+        g.on_output(b"\rroot@host:~# rm -rf /");
+        let req = g.process(b"\r").approval.unwrap();
+        let out = g.resolve(&req.request_id, false, false);
+        let audit = out.audit.unwrap();
+        assert_eq!(audit.command, req.command);
+        assert!(audit.command.contains("rm -rf /"), "{}", audit.command);
+    }
+
+    #[test]
+    fn audit_records_console_line_command_after_tab_completion() {
+        let mut g = GuardEngine::new(config(&["rm -rf"]));
+        let _ = g.process(b"rm -rf");
+        let _ = g.process(b"\t");
+        let req = g
+            .process_with_console_line(b"\r", Some("root@host:~# rm -rf /tmp"))
+            .approval
+            .unwrap();
+        assert_eq!(req.command, "rm -rf /tmp");
+        let out = g.resolve(&req.request_id, true, false);
+        assert_eq!(out.audit.unwrap().command, "rm -rf /tmp");
+    }
+
+    #[test]
+    fn ctrl_c_audit_records_displayed_command() {
+        let mut g = GuardEngine::new(config(&["rm -rf"]));
+        let _ = g.process(b"\x1b[A");
+        g.on_output(b"\rroot@host:~# rm -rf /");
+        let req = g.process(b"\r").approval.unwrap();
+        let out = g.process(b"\x03");
+        assert_eq!(out.audit.unwrap().command, req.command);
     }
 }

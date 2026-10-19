@@ -304,9 +304,26 @@ export default function TerminalView({
     const buf = term.buffer.active;
     // cursorY 是相对于视口顶部的行号，getLine 需要缓冲区绝对行号；
     // 终端滚动（如 cat 输出多行）后两者会偏移，必须加上 baseY。
-    const line = buf.getLine(buf.baseY + buf.cursorY);
-    if (!line) return null;
-    const text = line.translateToString(true).trimEnd();
+    const cursorRow = buf.baseY + buf.cursorY;
+    // 长命令会被 xterm 自动换行成多个视觉行（isWrapped），只取光标行会丢掉前面的
+    // 危险前缀（如 ↑ 回放的 `rm -rf /很长的路径…`），需向前/向后拼出完整逻辑行。
+    const MAX_WRAPPED_ROWS = 64;
+    let start = cursorRow;
+    while (start > 0 && cursorRow - start < MAX_WRAPPED_ROWS && buf.getLine(start)?.isWrapped) {
+      start -= 1;
+    }
+    let end = cursorRow;
+    while (end + 1 < buf.length && end - start < MAX_WRAPPED_ROWS && buf.getLine(end + 1)?.isWrapped) {
+      end += 1;
+    }
+    let text = '';
+    for (let row = start; row <= end; row += 1) {
+      const line = buf.getLine(row);
+      if (!line) break;
+      // 非末行保留整行宽度（换行边界处的空格是真实字符），末行再去尾部空白
+      text += line.translateToString(row === end);
+    }
+    text = text.trimEnd();
     return text || null;
   }, []);
 
@@ -581,7 +598,10 @@ export default function TerminalView({
       ) {
         return;
       }
-      if (event.key.length === 1) {
+      // 只直发 ASCII 可打印字符，与 onData 的「忽略单字节补发」过滤条件对齐；
+      // 非 ASCII 单键字符（德语 ä、俄语 ж 等非 IME 输入）交给 xterm onData 发送，否则会双写
+      const code = event.key.length === 1 ? event.key.charCodeAt(0) : 0;
+      if (code >= 0x20 && code <= 0x7e) {
         event.preventDefault();
         event.stopPropagation();
         sendInput(Array.from(new TextEncoder().encode(event.key)));

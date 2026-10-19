@@ -954,7 +954,11 @@ async fn run_agent_loop(
                         );
                     }
                 }
-                _ = rx.recv() => return Ok(()), // 用户点击停止
+                msg = rx.recv() => match msg {
+                    Some(Control::Cancel) | None => return Ok(()), // 用户点击停止
+                    // 过期的审批/继续回执，忽略（否则会静默终止本轮且不发 ai:done）
+                    Some(Control::Approve { .. }) | Some(Control::Continue { .. }) => {}
+                },
             }
             if done {
                 break;
@@ -1059,7 +1063,37 @@ async fn run_agent_loop(
                 return Ok(());
             }
             let started = Instant::now();
-            let args = parse_args(&acc.args);
+            let args = match parse_args(&acc.args) {
+                Ok(args) => args,
+                Err(msg) => {
+                    // 参数不可解析：不猜测、不执行，回填错误让模型重发，并留审计
+                    let raw_args = serde_json::json!({ "raw": truncate(&acc.args, 500) });
+                    let tool_name = if acc.name.trim().is_empty() { "unknown" } else { acc.name.as_str() };
+                    // 工具卡片展示用兜底名（模型漏填 name 时前端不至于空白标题）
+                    let display = ToolCallAcc { id: acc.id.clone(), name: tool_name.to_string(), args: acc.args.clone() };
+                    let _ = insert_audit(
+                        db,
+                        AuditEntry {
+                            session_id,
+                            host,
+                            tool_name,
+                            args: &raw_args,
+                            permission_mode: permission_mode.as_str(),
+                            approval: "auto",
+                            status: "error",
+                            result: Some(msg.clone()),
+                            duration_ms: started.elapsed().as_millis() as u64,
+                        },
+                    );
+                    emit_tool_state(app, session_id, &display, &raw_args, "error", Some(msg.clone()), None, None);
+                    history.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": acc.id,
+                        "content": format!("{}: {msg}", t("执行失败", "Execution failed")),
+                    }));
+                    continue;
+                }
+            };
 
             // 统一规范化工具名：审批判定与实际执行必须使用同一套规范名，
             // 否则模型用别名（exec/shell/run）或空名调用 exec_command 时可绕过审批门。
