@@ -58,6 +58,18 @@ pub struct ContextUsage {
     pub warning: Option<String>,
 }
 
+impl ContextUsage {
+    /// 按校准系数把本地粗估折算为展示值（系数为 1 时原样返回）
+    pub(crate) fn calibrated(mut self, factor: f64) -> Self {
+        if factor != 1.0 {
+            self.used_tokens = ((self.used_tokens as f64) * factor).round() as usize;
+            self.history_tokens = ((self.history_tokens as f64) * factor).round() as usize;
+            self.calibrated = true;
+        }
+        self
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ContextView {
     pub messages: Vec<Value>,

@@ -64,32 +64,35 @@ jobs:
           releaseBody: |
             ## 升级内容
 
-            ### SFTP 文件传输安全
+            ### AI Agent 会话一致性
 
-            - **上传不再损坏原文件**：上传改为先写同目录临时文件、完成后原子替换目标；中途取消或断连不会截断 / 删除已存在的远端文件。
-            - **覆盖写失败可恢复**：内置编辑器保存与上传共用替换逻辑，最终替换失败时保留临时文件并在错误中给出路径，新旧内容不会同时丢失。
-            - **覆盖时保留文件属性**：上传沿用原文件权限、跟随符号链接写入真实目标、目录目标直接拒绝。
+            - **清空会话不再被旧数据写回**：修复点击清空时，正在收尾的对话把旧历史与任务台账写回的竞态，清空后的会话保持干净。
+            - **删除主机同步停止 AI 对话**：删除主机会立即取消该主机上正在运行的 Agent，并清空其历史与任务台账。
+            - **首条回复更快**：发送消息前的主机快照改为后台采集，不再阻塞首个模型请求（此前每条消息都要先等待一次采集，慢主机上最多 25 秒）。
+            - **结束状态更可靠**：对话结束事件改为在历史写回之后统一下发；在轮次上限确认处点击停止，不会再把紧接着发送的新一轮误标为已结束。
 
-            ### AI Agent 稳定性
+            ### 工具调用与审批
 
-            - **修复过期审批导致对话静默终止**：流式响应期间收到残留的审批 / 继续回执不再结束本轮，避免界面卡在「执行中」且回答丢失。
-            - **修复异常参数被当作命令执行**：模型输出截断或非法的工具参数不再被猜测为 shell 命令在远端执行，改为回填错误让模型重发；工具卡片在模型漏填名称时显示兜底名。
+            - **审批倒计时与后台一致**：工具审批与「继续执行」确认改为固定截止时间，过期回执不再重置 600 秒计时。
+            - **未知工具直接拒绝**：模型调用不存在的工具时直接回填完整的可用工具列表（补上了此前遗漏的 update_task_plan），全部审核模式下也不再先弹出一次无效的审批卡片。
+            - **工具名统一规范**：模型使用别名（如 shell、exec）调用工具时，历史记录与工具卡片统一显示规范名（如 exec_command）。
 
-            ### 终端命令拦截
+            ### 趋势分析与用量
 
-            - **折行长命令不再漏判**：超过终端宽度自动换行的命令，拦截判定读取完整逻辑行，`rm -rf …` 等前缀不再因换行丢失。
-            - **审计记录完整命令**：拦截审计改为记录审批弹窗中展示的完整命令，历史回放、Tab 补全、Ctrl-C 取消场景不再记成残片。
+            - **修复负载趋势误报**：load 指标不再被外推为「约 N 天后达到 90%」；CPU / 内存的外推文案不再显示成「90%%」。
+            - **不再丢失末尾用量**：流式响应末尾未换行的数据块中携带的 usage 也会被采信，上下文用量可显示平台实测值。
 
-            ### 终端输入
+            ### 其他
 
-            - **修复非 ASCII 键盘双写**：德语 `ä`、俄语 `ж` 等非 IME 单键字符不再被发送两次。
+            - **Agent 后端重构**：主循环拆分为请求、流式解析、审批判定、工具执行等独立模块，Agent 模块单元测试由 44 个增至 80 个。
 
             ### English highlights
 
-            - **Safer SFTP uploads**: uploads go to a same-directory temp file and atomically replace the target — cancelling or disconnecting mid-upload no longer truncates or deletes the existing remote file. If the final replace fails, the temp file is kept and its path is reported for recovery. Overwriting preserves permissions, follows symlinks to the real target, and rejects directory targets.
-            - **Agent stability**: stale approve/continue messages can no longer silently end a streaming turn (which left the UI busy and dropped the reply); malformed tool-call arguments are bounced back to the model instead of being executed as shell commands.
-            - **Terminal guard**: wrapped long commands are reconstructed across rows so dangerous prefixes can't slip past interception, and audit entries now record the exact command shown in the approval dialog (history replay, tab completion, Ctrl-C included).
-            - **Input fix**: non-ASCII keyboard-layout characters (ä, ж, …) are no longer sent twice.
+            - **Conversation consistency**: clearing a chat can no longer be undone by a finishing run writing its stale history or task plan back; deleting a host now stops its running agent and clears its history and task plan.
+            - **Faster first reply**: the per-message host snapshot now runs in the background instead of delaying the first model request (by up to 25s on slow hosts).
+            - **Approvals & tools**: approval and continue prompts use a fixed deadline that matches the on-card countdown; unknown tools are rejected up front with the full tool list (now including update_task_plan); tool aliases are shown and recorded under their canonical names.
+            - **Fixes**: load average is no longer extrapolated to "90%", CPU/memory extrapolations no longer print "90%%", and usage reported in an unterminated final stream line is no longer dropped.
+            - **Refactor**: the agent loop is split into focused modules; agent unit tests grew from 44 to 80.
 
             ## 安装包
 

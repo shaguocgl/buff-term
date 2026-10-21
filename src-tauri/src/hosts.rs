@@ -171,8 +171,8 @@ pub fn delete_host(
     agents: State<'_, crate::agent::AgentManager>,
     id: String,
 ) -> Result<(), String> {
-    // 先清理该主机的 AI 会话历史（借用 id），再删除主机（move id）
-    agents.clear_history(&id);
+    // 先取消该主机上正在运行的 agent 循环并作废其写回、清空历史与台账（借用 id），再删除主机（move id）
+    agents.reset_host(&id);
     delete(&db, id)?;
     Ok(())
 }

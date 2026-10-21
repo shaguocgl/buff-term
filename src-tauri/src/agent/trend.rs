@@ -80,7 +80,9 @@ fn granularity_label(granularity: &str) -> &'static str {
 
 /// 格式化单个标量指标（cpu/mem/load）的趋势文本，供模型阅读。
 /// `granularity` 决定是否先按小时/天聚合再做回归和展示（见 `bucket_seconds`）。
-fn format_scalar_trend(label: &str, unit: &str, points: &[(f64, f64)], window_h: f64, granularity: &str) -> String {
+/// `threshold`：告警阈值（与 unit 同单位）：百分比指标为 Some(90.0)；
+/// load 等没有固定上限的指标为 None，不做外推。
+fn format_scalar_trend(label: &str, unit: &str, points: &[(f64, f64)], window_h: f64, granularity: &str, threshold: Option<f64>) -> String {
     let en = crate::i18n::is_en();
     if points.is_empty() {
         return if en {
@@ -144,18 +146,20 @@ fn format_scalar_trend(label: &str, unit: &str, points: &[(f64, f64)], window_h:
         } else {
             format!("趋势斜率: +{:.2}{}/天（持续上升）\n", slope_per_day, unit)
         });
-        // 外推到 90% 的天数
-        if latest < 90.0 && slope_per_day > 0.0 {
-            let days = (90.0 - latest) / slope_per_day;
-            if days > 0.0 && days < 365.0 {
-                out.push_str(&if en {
-                    format!("extrapolation: at the current rate, reaches 90%{unit} in about {days:.1} days\n")
-                } else {
-                    format!(
-                        "线性外推: 按当前增速，约 {:.1} 天后达到 90%{}\n",
-                        days, unit,
-                    )
-                });
+        // 外推到告警阈值的天数（仅百分比类指标有固定阈值）
+        if let Some(threshold) = threshold {
+            if latest < threshold {
+                let days = (threshold - latest) / slope_per_day;
+                if days > 0.0 && days < 365.0 {
+                    out.push_str(&if en {
+                        format!("extrapolation: at the current rate, reaches {threshold:.0}{unit} in about {days:.1} days\n")
+                    } else {
+                        format!(
+                            "线性外推: 按当前增速，约 {:.1} 天后达到 {:.0}{}\n",
+                            days, threshold, unit,
+                        )
+                    });
+                }
             }
         }
     } else {
@@ -292,11 +296,11 @@ pub(crate) fn format_metric_trend(metric: &str, rows: &[HostMetric], window_h: f
     match metric {
         "cpu" => {
             let points: Vec<(f64, f64)> = rows.iter().map(|r| (r.ts as f64, r.cpu_percent)).collect();
-            format_scalar_trend("cpu_percent", "%", &points, window_h, granularity)
+            format_scalar_trend("cpu_percent", "%", &points, window_h, granularity, Some(90.0))
         }
         "mem" => {
             let points: Vec<(f64, f64)> = rows.iter().map(|r| (r.ts as f64, r.mem_percent)).collect();
-            format_scalar_trend("mem_percent", "%", &points, window_h, granularity)
+            format_scalar_trend("mem_percent", "%", &points, window_h, granularity, Some(90.0))
         }
         "load" => {
             let points: Vec<(f64, f64)> = rows.iter().map(|r| (r.ts as f64, r.load1)).collect();
@@ -306,6 +310,7 @@ pub(crate) fn format_metric_trend(metric: &str, rows: &[HostMetric], window_h: f
                 &points,
                 window_h,
                 granularity,
+                None,
             )
         }
         "disk" => format_disk_trend(rows, window_h, granularity),
@@ -364,14 +369,14 @@ mod tests {
 
     #[test]
     fn format_scalar_trend_reports_insufficient_data() {
-        let out = format_scalar_trend("cpu_percent", "%", &[], 168.0, "minute");
+        let out = format_scalar_trend("cpu_percent", "%", &[], 168.0, "minute", Some(90.0));
         assert!(out.contains("数据不足"));
     }
 
     #[test]
     fn format_scalar_trend_reports_few_samples_as_unreliable() {
         let points: Vec<(f64, f64)> = (0..3).map(|i| (i as f64 * 3600.0, 10.0 + i as f64)).collect();
-        let out = format_scalar_trend("cpu_percent", "%", &points, 24.0, "minute");
+        let out = format_scalar_trend("cpu_percent", "%", &points, 24.0, "minute", Some(90.0));
         assert!(out.contains("样本不足"));
     }
 
@@ -379,15 +384,33 @@ mod tests {
     fn format_scalar_trend_flags_upward_extrapolation() {
         // 每小时 +1%，从 50% 起步，应触发“持续上升”和“按当前增速”外推文案
         let points: Vec<(f64, f64)> = (0..10).map(|i| (i as f64 * 3600.0, 50.0 + i as f64)).collect();
-        let out = format_scalar_trend("disk_percent", "%", &points, 10.0, "minute");
+        let out = format_scalar_trend("disk_percent", "%", &points, 10.0, "minute", Some(90.0));
         assert!(out.contains("持续上升"));
         assert!(out.contains("按当前增速"));
     }
 
     #[test]
+    fn load_trend_does_not_extrapolate_to_percent_threshold() {
+        // load 没有固定上限：threshold 为 None 时只报“持续上升”，不外推到某个百分比
+        let points: Vec<(f64, f64)> = (0..10).map(|i| (i as f64 * 3600.0, 1.0 + 0.5 * i as f64)).collect();
+        let out = format_scalar_trend("load1 (1分钟)", "", &points, 10.0, "minute", None);
+        assert!(out.contains("持续上升"));
+        assert!(!out.contains("天后达到"));
+    }
+
+    #[test]
+    fn percent_extrapolation_prints_single_percent_sign() {
+        // unit 本身已是 "%"：阈值 90 与 unit 拼接后应只出现一个 %，而不是 "90%%"
+        let points: Vec<(f64, f64)> = (0..10).map(|i| (i as f64 * 3600.0, 50.0 + i as f64)).collect();
+        let out = format_scalar_trend("cpu_percent", "%", &points, 10.0, "minute", Some(90.0));
+        assert!(out.contains("天后达到 90%"));
+        assert!(!out.contains("90%%"));
+    }
+
+    #[test]
     fn format_scalar_trend_flags_stable_series() {
         let points: Vec<(f64, f64)> = (0..10).map(|i| (i as f64 * 3600.0, 30.0)).collect();
-        let out = format_scalar_trend("cpu_percent", "%", &points, 10.0, "minute");
+        let out = format_scalar_trend("cpu_percent", "%", &points, 10.0, "minute", Some(90.0));
         assert!(out.contains("平稳"));
     }
 
@@ -424,7 +447,7 @@ mod tests {
     fn format_scalar_trend_hour_granularity_aggregates_dense_samples() {
         // 模拟每分钟一个样本、共 10 小时的密集数据；按小时聚合后应只剩 10 个桶。
         let points: Vec<(f64, f64)> = (0..600).map(|i| (i as f64 * 60.0, 50.0)).collect();
-        let out = format_scalar_trend("cpu_percent", "%", &points, 10.0, "hour");
+        let out = format_scalar_trend("cpu_percent", "%", &points, 10.0, "hour", Some(90.0));
         assert!(out.contains("按小时聚合均值"));
         assert!(out.contains("样本数: 10"));
     }
@@ -433,7 +456,7 @@ mod tests {
     fn format_scalar_trend_day_granularity_aggregates_dense_samples() {
         // 模拟每小时一个样本、共 10 天的数据；按天聚合后应剩 10 个桶。
         let points: Vec<(f64, f64)> = (0..240).map(|i| (i as f64 * 3600.0, 50.0)).collect();
-        let out = format_scalar_trend("cpu_percent", "%", &points, 240.0, "day");
+        let out = format_scalar_trend("cpu_percent", "%", &points, 240.0, "day", Some(90.0));
         assert!(out.contains("按天聚合均值"));
         assert!(out.contains("样本数: 10"));
     }

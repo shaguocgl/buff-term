@@ -341,8 +341,8 @@ export const agentContinue = (sessionId: number, allow: boolean) =>
   invoke<void>('agent_continue', { sessionId, allow });
 export const agentCancel = (sessionId: number) =>
   invoke<void>('agent_cancel', { sessionId });
-export const agentReset = (sessionId: number, hostId: string) =>
-  invoke<void>('agent_reset', { sessionId, hostId });
+export const agentReset = (hostId: string) =>
+  invoke<void>('agent_reset', { hostId });
 export const getHistory = (hostId: string) =>
   invoke<HistoryEntry[]>('get_history', { hostId });
 export const getTaskPlan = (hostId: string) =>

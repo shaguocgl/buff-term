@@ -19,7 +19,10 @@ pub(crate) fn system_prompt(
     // 审批规则的说明必须与后端实际判定一致，避免误导模型：
     // - all：全部需要批准；smart：只读自动执行，写/危险命令需批准；none：直接执行
     // 提示词语言跟随界面语言：中文界面用中文提示词，英文界面用英文提示词
-    let approval_rule = match (permission_mode, is_en()) {
+    let en = is_en();
+    let catalog = tool_catalog(en);
+    let names = tool_names(en);
+    let approval_rule = match (permission_mode, en) {
         (crate::models::PermissionMode::All, false) => {
             "所有 exec_command 都会经过用户批准，获批后才执行，请先说明意图。".to_string()
         }
@@ -59,9 +62,7 @@ pub(crate) fn system_prompt(
              Capabilities are currently provided by the {} platform, and the configured underlying \
              model is {}.\n\
              Currently connected server: {} ({}@{}:{})\n\
-             Available tools: exec_command (run a command), read_file (read a file), list_dir (list a \
-             directory), resource_usage (resource usage), query_history (query historical metric \
-             trends), update_task_plan (update the task plan).\n\
+             Available tools: {catalog}.\n\
              Rules:\n\
              1. {}\n\
              2. Command output may be truncated; answer only from the information you have and never \
@@ -73,8 +74,7 @@ pub(crate) fn system_prompt(
                 that you are driven by {} with the configured model {}, and that you are buffTerm; do \
                 not claim to be any other AI assistant (such as ChatGPT, Claude, Gemini, …) and do not \
                 invent version numbers or vendor information.\n\
-             6. Tool call conventions: the tool name must be one of exec_command, read_file, list_dir, \
-                resource_usage, query_history, update_task_plan; every tool call must include a \
+             6. Tool call conventions: the tool name must be one of {names}; every tool call must include a \
                 non-empty name field, never invent new tool names, and put parameters in arguments (a \
                 JSON object).\n\
              7. When the user asks about changes — \"how has it been lately\", \"is anything wrong\", \
@@ -108,7 +108,7 @@ pub(crate) fn system_prompt(
         "你是 buffTerm，运行在用户本地的 SSH 管理工具中，帮助用户管理远程服务器。\n\
          当前由 {} 平台提供能力，当前配置的底层模型是 {}。\n\
          当前连接的服务器：{}（{}@{}:{}）\n\
-         可用工具：exec_command（执行命令）、read_file（读文件）、list_dir（列目录）、resource_usage（资源占用）、query_history（查询历史指标趋势）、update_task_plan（更新任务台账）。\n\
+         可用工具：{catalog}。\n\
          规则：\n\
          1. {}\n\
          2. 命令输出可能被截断，只基于已有信息回答，不要编造。\n\
@@ -117,7 +117,7 @@ pub(crate) fn system_prompt(
          5. 身份说明：当用户询问“你是什么模型/你由谁开发”时，如实回答你由 {} 驱动、配置的模型为 {}，
             以及你是 buffTerm；不要声称自己是任何其他 AI 助手（如 ChatGPT、Claude、Gemini 等），
             也不要编造版本号或开发厂商信息。\n\
-         6. 工具调用约定：工具名称必须是以下之一——exec_command、read_file、list_dir、resource_usage、query_history、update_task_plan；
+         6. 工具调用约定：工具名称必须是以下之一——{names}；
             每次工具调用都必须包含完整的 name 字段且不能为空，不要发明新工具名；参数放入 arguments（JSON 对象）。\n\
          7. 当用户询问“最近怎么样”、“有没有异常”、“是不是变慢了”等涉及变化的问题时，优先调用 query_history 查看趋势，
             而不是只调用 resource_usage 看当下值。趋势比绝对值更有诊断价值——一个从 30% 涨到 78% 的磁盘比一个稳定在 78% 的磁盘更紧急。
@@ -337,16 +337,159 @@ pub(crate) fn infer_tool_name<'a>(name: &'a str, args: &serde_json::Value) -> &'
     }
 }
 
+/// Agent 可调用的工具集合。模型给出的原始工具名只在 `resolve` 处解析一次，
+/// 之后审批、执行、审计都用同一个值，避免用别名/空名绕过审批。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tool {
+    /// 在远程服务器上执行 shell 命令
+    ExecCommand,
+    /// 读取远程服务器上的文件内容
+    ReadFile,
+    /// 列出远程服务器上的目录内容
+    ListDir,
+    /// 查看服务器磁盘、内存、负载和占用最高的进程
+    ResourceUsage,
+    /// 查询当前服务器的历史指标趋势
+    QueryHistory,
+    /// 创建或更新本地任务台账（不访问远程主机）
+    UpdateTaskPlan,
+}
+
+impl Tool {
+    /// 全部工具，顺序即系统提示词与错误消息里的展示顺序
+    const ALL: [Tool; 6] = [
+        Tool::ExecCommand,
+        Tool::ReadFile,
+        Tool::ListDir,
+        Tool::ResourceUsage,
+        Tool::QueryHistory,
+        Tool::UpdateTaskPlan,
+    ];
+
+    /// 与模型约定、写回历史的规范工具名
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Tool::ExecCommand => "exec_command",
+            Tool::ReadFile => "read_file",
+            Tool::ListDir => "list_dir",
+            Tool::ResourceUsage => "resource_usage",
+            Tool::QueryHistory => "query_history",
+            Tool::UpdateTaskPlan => "update_task_plan",
+        }
+    }
+
+    /// 工具清单里跟在名字后面的用途说明
+    fn summary(self, en: bool) -> &'static str {
+        match (self, en) {
+            (Tool::ExecCommand, false) => "执行命令",
+            (Tool::ExecCommand, true) => "run a command",
+            (Tool::ReadFile, false) => "读文件",
+            (Tool::ReadFile, true) => "read a file",
+            (Tool::ListDir, false) => "列目录",
+            (Tool::ListDir, true) => "list a directory",
+            (Tool::ResourceUsage, false) => "资源占用",
+            (Tool::ResourceUsage, true) => "resource usage",
+            (Tool::QueryHistory, false) => "查询历史指标趋势",
+            (Tool::QueryHistory, true) => "query historical metric trends",
+            (Tool::UpdateTaskPlan, false) => "更新任务台账",
+            (Tool::UpdateTaskPlan, true) => "update the task plan",
+        }
+    }
+
+    /// 把模型给出的原始工具名解析为 Tool：先按参数形态补全空名，再归一化别名；
+    /// 无法识别的名字返回 None，由调用方按未知工具处理。
+    pub(crate) fn resolve(raw_name: &str, args: &serde_json::Value) -> Option<Tool> {
+        let normalized = normalize_tool(infer_tool_name(raw_name, args));
+        Tool::ALL
+            .iter()
+            .copied()
+            .find(|tool| tool.as_str() == normalized)
+    }
+}
+
+/// 「名字（用途说明）」清单：供系统提示词和未知工具错误消息共用，
+/// 保证两处列出的工具永远一致（此前错误消息里漏了 update_task_plan）。
+pub(crate) fn tool_catalog(en: bool) -> String {
+    Tool::ALL
+        .iter()
+        .map(|tool| {
+            if en {
+                format!("{} ({})", tool.as_str(), tool.summary(true))
+            } else {
+                format!("{}（{}）", tool.as_str(), tool.summary(false))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(if en { ", " } else { "、" })
+}
+
+/// 「工具名称必须是以下之一」清单：只列规范名，不带用途说明。
+pub(crate) fn tool_names(en: bool) -> String {
+    Tool::ALL
+        .iter()
+        .map(|tool| tool.as_str())
+        .collect::<Vec<_>>()
+        .join(if en { ", " } else { "、" })
+}
+
+/// 模型调用了无法识别的工具名时回填给它的错误消息：列出全部可用工具，引导其改用重试。
+pub(crate) fn unknown_tool_message(name: &str) -> String {
+    let en = is_en();
+    let catalog = tool_catalog(en);
+    if en {
+        format!("Unknown tool: {name}. Available tools: {catalog}. Please retry with these tools.")
+    } else {
+        format!("未知工具: {name}。可用工具：{catalog}。请改用这些工具重试。")
+    }
+}
+
+/// `query_history` 工具的实现：查询本地指标库并格式化为趋势文本（纯本地查询，不访问远程主机）。
+fn query_history(db: &Db, host: &Host, args: &serde_json::Value) -> Result<String, String> {
+    let metric = args.get("metric").and_then(|v| v.as_str()).unwrap_or("cpu");
+    let window_h = args
+        .get("window_hours")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(168.0);
+    let window_h = window_h.clamp(1.0, 2160.0);
+    let granularity = args
+        .get("granularity")
+        .and_then(|v| v.as_str())
+        .filter(|g| matches!(*g, "minute" | "hour" | "day"))
+        .unwrap_or(if window_h <= 6.0 {
+            "minute"
+        } else if window_h <= 48.0 {
+            "hour"
+        } else {
+            "day"
+        });
+    let since = now().saturating_sub((window_h * 3600.0) as u64);
+    // 查询上限按窗口大小动态计算，覆盖最小采样间隔（60s）下窗口内可能出现的
+    // 全部行数；同时设硬上限（5 万行）保护内存/性能，超过时保留最新样本，
+    // 日粒度/小时粒度的趋势聚合不受影响
+    let limit = (((window_h * 3600.0 / 60.0) as u64).saturating_add(500)).min(50_000) as u32;
+    let rows = db
+        .list_metrics(&host.id, since, limit)
+        .map_err(|e| {
+            format!(
+                "{}: {e}",
+                t("查询历史指标失败", "Failed to query historical metrics")
+            )
+        })?;
+    Ok(format_metric_trend(metric, &rows, window_h, granularity))
+}
+
+/// 在远程服务器上执行已解析的工具调用。`update_task_plan` 由 Agent 在本地处理，
+/// 永远不会走到这里（防御性返回错误）；未知工具在调用前的 `Tool::resolve` 处就被拒绝。
 pub(crate) async fn execute_tool(
     db: &Db,
     russh: &RusshManager,
     host: &Host,
-    name: &str,
+    tool: Tool,
     args: &serde_json::Value,
     cancel: &CancellationToken,
 ) -> Result<String, String> {
-    match name {
-        "exec_command" => {
+    let (command, timeout_secs): (String, u64) = match tool {
+        Tool::ExecCommand => {
             let command = args
                 .get("command")
                 .and_then(|c| c.as_str())
@@ -356,109 +499,150 @@ pub(crate) async fn execute_tool(
                 .and_then(|t| t.as_u64())
                 .unwrap_or(30)
                 .clamp(1, 600);
-            let out = russh
-                .exec_cancellable(host, command, std::time::Duration::from_secs(timeout), cancel)
-                .await?;
-            Ok(sanitize(&format_exec_output(&out)))
+            (command.to_string(), timeout)
         }
-        "read_file" => {
+        Tool::ReadFile => {
             let path = args
                 .get("path")
                 .and_then(|p| p.as_str())
                 .ok_or_else(|| t("缺少 path 参数", "Missing path parameter").to_string())?;
-            let out = russh
-                .exec_cancellable(
-                    host,
-                    &format!("cat -- {}", shq(path)),
-                    std::time::Duration::from_secs(15),
-                    cancel,
-                )
-                .await?;
-            Ok(sanitize(&format_exec_output(&out)))
+            (format!("cat -- {}", shq(path)), 15)
         }
-        "list_dir" => {
+        Tool::ListDir => {
             let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
-            let out = russh
-                .exec_cancellable(
-                    host,
-                    &format!("ls -lah -- {}", shq(path)),
-                    std::time::Duration::from_secs(15),
-                    cancel,
-                )
-                .await?;
-            Ok(sanitize(&format_exec_output(&out)))
+            (format!("ls -lah -- {}", shq(path)), 15)
         }
-        "resource_usage" => {
+        Tool::ResourceUsage => {
             let script = if is_en() {
                 "echo '-- Disk --'; df -h; echo; echo '-- Memory --'; (free -h 2>/dev/null || vm_stat); echo; echo '-- Load --'; uptime; echo; echo '-- TOP processes --'; (ps aux --sort=-%mem 2>/dev/null || ps aux) | head -8"
             } else {
                 "echo '-- 磁盘 --'; df -h; echo; echo '-- 内存 --'; (free -h 2>/dev/null || vm_stat); echo; echo '-- 负载 --'; uptime; echo; echo '-- TOP 进程 --'; (ps aux --sort=-%mem 2>/dev/null || ps aux) | head -8"
             };
-            let out = russh
-                .exec_cancellable(host, script, std::time::Duration::from_secs(25), cancel)
-                .await?;
-            Ok(sanitize(&format_exec_output(&out)))
+            (script.to_string(), 25)
         }
-        "query_history" => {
-            let metric = args.get("metric").and_then(|v| v.as_str()).unwrap_or("cpu");
-            let window_h = args
-                .get("window_hours")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(168.0);
-            let window_h = window_h.clamp(1.0, 2160.0);
-            let granularity = args
-                .get("granularity")
-                .and_then(|v| v.as_str())
-                .filter(|g| matches!(*g, "minute" | "hour" | "day"))
-                .unwrap_or(if window_h <= 6.0 {
-                    "minute"
-                } else if window_h <= 48.0 {
-                    "hour"
-                } else {
-                    "day"
-                });
-            let since = now().saturating_sub((window_h * 3600.0) as u64);
-            // 查询上限按窗口大小动态计算，覆盖最小采样间隔（60s）下窗口内可能出现的
-            // 全部行数；同时设硬上限（5 万行）保护内存/性能，超过时保留最新样本，
-            // 日粒度/小时粒度的趋势聚合不受影响
-            let limit =
-                (((window_h * 3600.0 / 60.0) as u64).saturating_add(500)).min(50_000) as u32;
-            let rows = db
-                .list_metrics(&host.id, since, limit)
-                .map_err(|e| {
-                    format!(
-                        "{}: {e}",
-                        t("查询历史指标失败", "Failed to query historical metrics")
-                    )
-                })?;
-            Ok(format_metric_trend(metric, &rows, window_h, granularity))
+        Tool::QueryHistory => return query_history(db, host, args),
+        Tool::UpdateTaskPlan => {
+            return Err(t(
+                "update_task_plan 由 Agent 在本地处理，不在远程主机上执行",
+                "update_task_plan is handled locally by the agent and never runs on the remote host",
+            )
+            .to_string())
         }
-        _ => {
-            let effective = infer_tool_name(name, args);
-            let normalized = normalize_tool(effective);
-            if normalized != name {
-                return Box::pin(execute_tool(db, russh, host, normalized, args, cancel)).await;
-            }
-            eprintln!("[agent] {}: {name}, args: {args}", t("未知工具调用", "Unknown tool call"));
-            Err(format!(
-                "{}: {name}。{}",
-                t("未知工具", "Unknown tool"),
-                t(
-                    "可用工具：exec_command（执行命令）、read_file（读文件）、\
-                     list_dir（列目录）、resource_usage（资源占用）、query_history（查询历史指标趋势）。\
-                     请改用这些工具重试。",
-                    "Available tools: exec_command (run a command), read_file (read a file), \
-                     list_dir (list a directory), resource_usage (resource usage), \
-                     query_history (query historical metric trends). Please retry with these tools."
-                )
-            ))
-        }
-    }
+    };
+    let out = russh
+        .exec_cancellable(
+            host,
+            &command,
+            std::time::Duration::from_secs(timeout_secs),
+            cancel,
+        )
+        .await?;
+    Ok(sanitize(&format_exec_output(&out)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{AiProvider, AuthType, Host, PermissionMode};
+
+    fn fixture_host() -> Host {
+        Host {
+            id: "h1".to_string(),
+            name: "web".to_string(),
+            address: "10.0.0.1".to_string(),
+            port: 22,
+            username: "root".to_string(),
+            auth_type: AuthType::Password,
+            key_path: None,
+            notes: None,
+            created_at: 0,
+        }
+    }
+
+    fn fixture_provider() -> AiProvider {
+        AiProvider {
+            id: "p1".to_string(),
+            name: "DeepSeek".to_string(),
+            base_url: "https://x".to_string(),
+            protocol: "openai-compatible".to_string(),
+            enabled: true,
+            created_at: 0,
+            models: vec![],
+        }
+    }
+
+    #[test]
+    fn tool_resolve_normalizes_aliases_and_infers_empty_names() {
+        assert_eq!(
+            Tool::resolve("shell", &serde_json::json!({"command": "ls"})),
+            Some(Tool::ExecCommand)
+        );
+        assert_eq!(
+            Tool::resolve("", &serde_json::json!({"command": "rm -rf /"})),
+            Some(Tool::ExecCommand)
+        );
+        assert_eq!(
+            Tool::resolve("ls", &serde_json::json!({})),
+            Some(Tool::ListDir)
+        );
+        assert_eq!(
+            Tool::resolve("", &serde_json::json!({})),
+            Some(Tool::ResourceUsage)
+        );
+        assert_eq!(
+            Tool::resolve("bash", &serde_json::json!({"command": "ls"})),
+            None
+        );
+        assert_eq!(
+            Tool::resolve("", &serde_json::json!({"foo": "bar"})),
+            None
+        );
+    }
+
+    #[test]
+    fn tool_catalog_and_names_match_prompt_text() {
+        assert_eq!(
+            tool_catalog(false),
+            "exec_command（执行命令）、read_file（读文件）、list_dir（列目录）、resource_usage（资源占用）、query_history（查询历史指标趋势）、update_task_plan（更新任务台账）"
+        );
+        assert_eq!(
+            tool_catalog(true),
+            "exec_command (run a command), read_file (read a file), list_dir (list a directory), resource_usage (resource usage), query_history (query historical metric trends), update_task_plan (update the task plan)"
+        );
+        assert_eq!(
+            tool_names(false),
+            "exec_command、read_file、list_dir、resource_usage、query_history、update_task_plan"
+        );
+        assert_eq!(
+            tool_names(true),
+            "exec_command, read_file, list_dir, resource_usage, query_history, update_task_plan"
+        );
+    }
+
+    #[test]
+    fn unknown_tool_message_lists_every_tool() {
+        // 此前错误消息里漏了 update_task_plan，模型被纠正后仍不知道该工具存在
+        let msg = unknown_tool_message("bash");
+        for tool in Tool::ALL {
+            assert!(msg.contains(tool.as_str()), "缺少 {}", tool.as_str());
+        }
+    }
+
+    #[test]
+    fn system_prompt_mentions_every_tool() {
+        let host = fixture_host();
+        let provider = fixture_provider();
+        let prompt = system_prompt(&host, &provider, "m", PermissionMode::Smart);
+        for tool in Tool::ALL {
+            assert!(prompt.contains(tool.as_str()), "缺少 {}", tool.as_str());
+        }
+        assert!(prompt.contains(
+            "可用工具：exec_command（执行命令）、read_file（读文件）、list_dir（列目录）、resource_usage（资源占用）、query_history（查询历史指标趋势）、update_task_plan（更新任务台账）。"
+        ));
+        assert!(prompt.contains(
+            "工具名称必须是以下之一——exec_command、read_file、list_dir、resource_usage、query_history、update_task_plan；"
+        ));
+    }
 
     #[test]
     fn infer_tool_name_keeps_nonempty_name() {

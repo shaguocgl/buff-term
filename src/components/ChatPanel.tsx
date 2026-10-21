@@ -875,7 +875,7 @@ function ChatPanel({
             title={t('chat.clearTitle')}
             onClick={() => {
               // 后端 agent_reset 会同时停止运行中的循环并清空历史
-              agentReset(sessionId, hostId).catch(() => {});
+              agentReset(hostId).catch(() => {});
               setMessages([]);
               activeAssistantId.current = null;
               hasSentRef.current = false;
