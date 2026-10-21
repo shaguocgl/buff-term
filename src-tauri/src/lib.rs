@@ -3,6 +3,7 @@ mod ai;
 mod agent;
 mod audit;
 mod credentials;
+mod cwd;
 mod db;
 mod guard;
 mod hosts;
@@ -78,6 +79,11 @@ pub fn run() {
             let _ = db.prune_audit_logs(audit_cutoff);
             // 上次异常退出遗留的「运行中」巡检/整改标记为已取消
             let _ = db.mark_stale_running_cancelled();
+            // 回收上次运行（含崩溃/强杀）残留的 agent 输出归档目录：
+            // 仍被进程持有的目录经 .live 文件锁跳过，后台线程不拖慢启动
+            let _ = std::thread::Builder::new()
+                .name("archive-sweep".into())
+                .spawn(crate::agent::archive_startup_sweep);
             app.manage(db);
             app.manage(inspection::InspectionManager::default());
             app.manage(remediation::RemediationManager::default());
@@ -191,6 +197,7 @@ pub fn run() {
             session::close_session,
             session::session_input,
             session::session_resize,
+            session::session_cwd,
             guard::get_terminal_guard_settings,
             guard::save_terminal_guard_settings,
             guard::list_terminal_rules,
@@ -208,10 +215,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            // 退出时关闭 MCP 服务（停止监听端口），SSH 连接随进程退出自然释放
+            // 退出时关闭 MCP 服务（停止监听端口），SSH 连接随进程退出自然释放；
+            // agent 归档目录同步清理——Tauri 退出最终 process::exit，Drop 不可靠
             if let tauri::RunEvent::Exit = event {
                 let manager = app.state::<mcp::McpServiceManager>();
                 mcp::stop_service(&manager);
+                app.state::<AgentManager>().cleanup_archives();
             }
         });
 }

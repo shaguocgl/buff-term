@@ -2049,6 +2049,139 @@ input::placeholder {
   border-color: var(--accent);
 }
 
+/* 顶栏左侧：当前主机名 + 连接信息（上传目标属于哪台机器一眼可见） */
+.sftp-host {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  color: var(--text);
+}
+
+.sftp-host > svg {
+  flex: none;
+  color: var(--accent);
+}
+
+.sftp-host-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sftp-host-addr {
+  font-size: 11px;
+  color: var(--faint);
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 当前目录面包屑：与上传目标 cwd 保持一致；双击或点铅笔切到路径输入 */
+.sftp-crumbbar {
+  display: flex;
+  align-items: center;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+}
+
+.sftp-crumb {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.sftp-crumb-item {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.sftp-crumb-sep {
+  color: var(--faint);
+  margin: 0 1px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.sftp-crumb-seg {
+  border: none;
+  background: none;
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  cursor: pointer;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sftp-crumb-seg:hover {
+  background: var(--panel-3);
+  color: var(--text);
+}
+
+.sftp-crumb-seg.current {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.sftp-edit-path {
+  flex: none;
+  margin-left: auto;
+}
+
+/* 目录树行：左侧留出自适应缩进，chevron 固定宽度占位让文件名对齐 */
+.sftp-chevron {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+button.sftp-chevron:hover {
+  background: var(--panel-3);
+  color: var(--text);
+}
+
+.sftp-row.selected {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.sftp-row.selected:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.sftp-row.selected .sftp-name {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 树内提示行（加载中/错误/空目录）：比普通 status 更小更靠左 */
+.sftp-tree-note {
+  padding: 4px 0;
+  text-align: left;
+  font-size: 11.5px;
+}
+
 /* 传输任务进度条（传输进行中不锁定目录浏览） */
 .sftp-transfers {
   display: flex;

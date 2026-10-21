@@ -2,6 +2,8 @@ use crate::db::Db;
 use crate::guard::{GuardConfig, GuardEngine, TerminalGuardApproval};
 use crate::models::Host;
 use crate::russh::{do_connect, ClientHandler};
+use crate::cwd::{self, CwdState, CwdTracker};
+use tokio_util::sync::CancellationToken;
 use russh::client::Handle;
 use russh::{ChannelMsg, ChannelWriteHalf};
 use std::collections::HashMap;
@@ -46,6 +48,10 @@ pub struct Session {
     /// 远端回显高优先级通道（read loop → 守护消费者），
     /// 与 guard_tx 分离，避免 Enter 同步窗口内回显被输入队列阻塞
     echo_tx: mpsc::UnboundedSender<Vec<u8>>,
+    /// 守护消费者里的 CwdTracker 更新、session_cwd 命令读取：
+    /// 远端工作目录 / oldpwd / home / pushd 栈。跟踪独立于终端守护开关，
+    /// 跟不上下游终端（ssh/su/解析失败）时 cwd=None——面板宁可不跟随也不指错目录
+    cwd: Arc<Mutex<CwdState>>,
 }
 
 /// 终端数据帧首字节：原始字节流
@@ -147,18 +153,43 @@ impl SessionManager {
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
+        let cwd_state = Arc::new(Mutex::new(CwdState::default()));
+        let handle = Arc::new(handle);
         self.sessions.lock().unwrap().insert(
             id,
             Session {
                 host: host.clone(),
                 out: out.clone(),
-                handle: Arc::new(handle),
+                handle: handle.clone(),
                 write_half: write_half.clone(),
                 resize_tx,
                 guard_tx,
                 echo_tx,
+                cwd: cwd_state.clone(),
             },
         );
+
+        // 探测远端 $HOME 作为跟踪基准：登录 shell 的初始目录即 home。
+        // 一次只读 exec，走会话自身连接的一条新 channel；失败不阻塞会话建立
+        {
+            let cwd_probe = cwd_state.clone();
+            let handle_probe = handle.clone();
+            tokio::spawn(async move {
+                if let Ok(out) = crate::russh::exec_on(
+                    &handle_probe,
+                    "printf %s \"$HOME\"",
+                    std::time::Duration::from_secs(10),
+                    &CancellationToken::new(),
+                )
+                .await
+                {
+                    let home = out.stdout.trim();
+                    if !home.is_empty() && home.starts_with('/') {
+                        cwd_probe.lock().unwrap().set_home(home.to_string());
+                    }
+                }
+            });
+        }
 
         let write_resize = write_half.clone();
         tokio::spawn(async move {
@@ -242,8 +273,12 @@ impl SessionManager {
         let host_id = host.id.clone();
         let host_label = format!("{} ({})", host.name, host.label_address());
         let session_id_guard = id;
+        let cwd_for_guard = cwd_state.clone();
         tokio::spawn(async move {
             let mut guard = GuardEngine::new(GuardConfig::default());
+            // cwd 跟踪独立于守护开关：命令行重建只为「打开文件面板时
+            // 跳到终端当前目录」服务，与危险命令拦截无关
+            let mut cwd_tracker = CwdTracker::default();
             loop {
                 // 主队列（按键/审批）与回显通道并行等待；回显到达立即喂状态机
                 let msg = tokio::select! {
@@ -290,6 +325,17 @@ impl SessionManager {
                         }
                         guard.set_config(config);
                         guard.set_passthrough(passthrough);
+                        // 透传（全屏应用）期间输入不是 shell 命令，丢弃本地行；
+                        // 其余输入喂给 cwd 跟踪器：回车提交出的命令逐条应用
+                        if passthrough {
+                            cwd_tracker.reset();
+                        } else {
+                            for cmd in
+                                cwd_tracker.on_input(&data, console_line.as_deref())
+                            {
+                                cwd::apply_command(&cmd, &mut cwd_for_guard.lock().unwrap());
+                            }
+                        }
                         let outcome =
                             guard.process_with_console_line(&data, console_line.as_deref());
                         if !outcome.forward.is_empty() {
@@ -388,6 +434,15 @@ impl SessionManager {
 
     pub fn host(&self, id: u32) -> Option<Host> {
         self.sessions.lock().unwrap().get(&id).map(|s| s.host.clone())
+    }
+
+    /// 该会话当前跟踪到的远端工作目录；未知（尚未探测/上下文已切换）返回 None
+    pub fn session_cwd(&self, id: u32) -> Option<String> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(&id)
+            .and_then(|s| s.cwd.lock().unwrap().cwd.clone())
     }
 
     /// 取该主机任一存活会话的 SSH 连接（后台监控采集复用终端会话自身连接，
@@ -552,4 +607,11 @@ pub fn session_resize(
     rows: u16,
 ) -> Result<(), String> {
     state.resize(id, cols, rows)
+}
+
+/// 查询终端会话当前跟踪到的远端工作目录；未知时返回 null，
+/// 由文件面板在打开时把目录定位到这里（用户跟随）
+#[tauri::command]
+pub fn session_cwd(state: State<'_, SessionManager>, id: u32) -> Option<String> {
+    state.session_cwd(id)
 }

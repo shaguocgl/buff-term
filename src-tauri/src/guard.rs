@@ -640,7 +640,7 @@ impl GuardEngine {
 /// 从前端 xterm 光标行（含提示符，如 `root@host:~# cat docker-compose.yml`）
 /// 提取命令部分：取第一个提示符标记（# $ % >）之后的文本。命令中的同类字符
 /// 通常出现在提示符之后，首个标记即提示符结尾。
-fn extract_command_from_console_line(line: &str) -> String {
+pub(crate) fn extract_command_from_console_line(line: &str) -> String {
     let t = line.trim();
     if let Some(pos) = t.find(['#', '$', '%', '>']) {
         let rest = t[pos + 1..].trim_start();
@@ -655,7 +655,7 @@ fn extract_command_from_console_line(line: &str) -> String {
 /// 补全/历史只会扩展本地输入）。不一致说明提示符启发式把命令截断了
 /// （无标记提示符 + 命令含 # $ % >），回退本地追踪行参与判定，避免危险前缀
 /// 被截掉导致漏判。本地行为空（历史回放等）时无法校验，直接信任前端行。
-fn console_line_consistent(extracted: &str, local: &[u8]) -> bool {
+pub(crate) fn console_line_consistent(extracted: &str, local: &[u8]) -> bool {
     let local = String::from_utf8_lossy(local).trim().to_string();
     if local.is_empty() {
         return true;

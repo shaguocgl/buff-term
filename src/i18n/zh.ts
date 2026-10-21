@@ -331,6 +331,10 @@ export const zh = {
   'sftp.newFolderLabel': '文件夹名称',
   'sftp.newNameLabel': '新名称',
   'sftp.newFolderPlaceholder': '例如 logs',
+  'sftp.rootDir': '根目录',
+  'sftp.editPath': '编辑路径',
+  'sftp.expand': '展开',
+  'sftp.collapse': '折叠',
 
   // ---------- 内置文件编辑器 ----------
   'editor.sensitive': '敏感',

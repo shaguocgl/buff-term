@@ -1,5 +1,8 @@
 mod approval;
+mod archive;
 mod context;
+mod context_policy;
+mod memory;
 mod run;
 mod stream;
 mod tools;
@@ -40,6 +43,10 @@ struct HostConversation {
     history: Vec<serde_json::Value>,
     /// 结构化任务台账：跨压缩窗口保存目标/进度/失败尝试，永不裁剪
     plan: Option<TaskPlan>,
+    /// 本会话独占的大输出归档：reset 时整体替换，旧引用对新会话立刻失效
+    archive: Arc<archive::OutputArchive>,
+    /// 已提交的压缩记忆（摘要检查点 + 回退标记）：随历史同锁写回、随 reset 清空
+    memory: memory::ContextMemory,
     /// 该主机的历史代数：每次 reset 递增，让正在收尾的循环写回时被拒
     generation: u64,
     /// 同一主机同一时刻只允许一个 agent 循环，否则两个会话各自读副本→整段写回会互相覆盖历史
@@ -71,13 +78,28 @@ struct RunLease<'a> {
     token: u64,
     /// 登记时看到的主机代数；reset 后代数递增，本租约的写回随之作废
     generation: u64,
+    /// 创建会话时绑定的输出归档：reset 后新会话拿到新实例，
+    /// 本租约仍可读写旧归档收尾，但新旧引用互不可见
+    archive: Arc<archive::OutputArchive>,
 }
 
 pub enum Control {
-    Approve { tool_call_id: String, allow: bool },
+    Approve {
+        tool_call_id: String,
+        allow: bool,
+    },
     /// 达到工具轮次上限后，用户选择是否继续执行下一批
-    Continue { allow: bool },
+    Continue {
+        allow: bool,
+    },
     Cancel,
+}
+
+/// 启动时回收残留的归档目录：上次运行（含崩溃/强杀）留下的归档经
+/// .live 文件锁识别——仍被进程持有的目录锁拿不到会跳过，锁拿得到即
+/// 无主、安全删除。请在后台线程调用：目录多/大时逐个删除可能耗时。
+pub(crate) fn archive_startup_sweep() {
+    archive::sweep_stale_archives();
 }
 
 impl AgentManager {
@@ -112,6 +134,16 @@ impl AgentManager {
             .and_then(|conv| conv.plan.clone())
     }
 
+    /// 取该主机已提交的压缩记忆（摘要检查点 + 回退标记）副本
+    fn memory(&self, host_id: &str) -> memory::ContextMemory {
+        self.conversations
+            .lock()
+            .unwrap()
+            .get(host_id)
+            .map(|conv| conv.memory.clone())
+            .unwrap_or_default()
+    }
+
     /// 注入系统提示/用量估算的台账文本块：空台账返回 None。
     fn plan_block(&self, host_id: &str) -> Option<String> {
         self.plan(host_id)
@@ -132,6 +164,10 @@ impl AgentManager {
             conv.generation += 1;
             conv.history.clear();
             conv.plan = None;
+            // 归档与压缩记忆一并作废：新会话拿到全新实例，
+            // 旧 run 持有的引用随其释放由私有临时目录自动清理
+            conv.archive = Arc::new(archive::OutputArchive::default());
+            conv.memory = memory::ContextMemory::default();
             conv.active.as_ref().map(|run| run.control.clone())
         };
         // 锁外发送：try_send 不阻塞，但保持「锁内只改状态」的惯例
@@ -165,9 +201,34 @@ impl AgentManager {
                 host_id: host_id.to_string(),
                 token,
                 generation: conv.generation,
+                archive: conv.archive.clone(),
             },
             rx,
         ))
+    }
+
+    /// 进程退出前显式清理所有会话的归档目录：Tauri 的 run() 最终走
+    /// process::exit，Drop 的后台线程清理不可靠。收集全部归档后在专用
+    /// 线程上同步删除并用通道做有界等待；超时残留由下次启动的清扫兜底
+    /// （.live 文件锁随进程退出由操作系统释放，清扫据此判定无主）。
+    pub(crate) fn cleanup_archives(&self) {
+        let archives: Vec<Arc<archive::OutputArchive>> = self
+            .conversations
+            .lock()
+            .unwrap()
+            .values()
+            .map(|conv| conv.archive.clone())
+            .collect();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let _ = std::thread::Builder::new()
+            .name("archive-shutdown".into())
+            .spawn(move || {
+                for archive in &archives {
+                    archive.cleanup_now();
+                }
+                let _ = done_tx.send(());
+            });
+        let _ = done_rx.recv_timeout(Duration::from_secs(5));
     }
 
     /// 等待上一个循环释放（停止/清空后旧循环退出需要少许时间），
@@ -226,9 +287,14 @@ impl<'a> RunLease<'a> {
         Some(f(conv))
     }
 
-    /// 循环结束时把历史写回该主机；返回 false 表示期间发生过 reset，写回被丢弃。
-    fn commit_history(&self, history: Vec<serde_json::Value>) -> bool {
-        self.with_current(|conv| conv.history = history).is_some()
+    /// 循环结束时把历史与压缩记忆原子写回该主机；
+    /// 返回 false 表示期间发生过 reset，写回被丢弃。
+    fn commit_run(&self, history: Vec<serde_json::Value>, memory: memory::ContextMemory) -> bool {
+        self.with_current(|conv| {
+            conv.history = history;
+            conv.memory = memory;
+        })
+        .is_some()
     }
 
     /// 更新该主机的任务台账；返回 false 表示期间发生过 reset，更新被丢弃。
@@ -446,6 +512,9 @@ async fn chat(
     spawn_metric_snapshot(app, &host);
 
     let mut history = agents.history(&host.id);
+    // 已提交的压缩记忆作为本轮工作副本；循环里的摘要尝试只改副本，
+    // 结束时与历史一起经租约原子写回
+    let conv_memory = agents.memory(&host.id);
     // 上次对话被中断时历史里可能留下没有 tool 结果的 assistant.tool_calls，
     // 先补齐占位结果，否则 OpenAI 兼容平台会直接拒绝本次请求（400）
     repair_dangling_tool_calls(&mut history);
@@ -478,9 +547,11 @@ async fn chat(
         },
         rx,
         history,
+        conv_memory,
     );
     let outcome = run.run().await;
-    lease.commit_history(run.into_history());
+    let (history, run_memory) = run.into_state();
+    lease.commit_run(history, run_memory);
     outcome
 }
 
@@ -623,8 +694,19 @@ pub fn agent_reset(agents: State<'_, AgentManager>, host_id: String) -> Result<(
 }
 
 /// 把多模态数组 content 拆成纯文本 + 图片列表，供前端恢复气泡展示。
-/// 纯字符串 content 原样返回，不额外挂 images 字段。
+/// 纯字符串 content 原样返回；tool 消息经 display_text 展示投影
+/// （与 ai:tool 事件同一口径）：正常路径下 tool 消息已是有界预览，
+/// 但归档失败时历史里保留完整捕获，展示层必须再压一道，
+/// 避免把多 MB 文本塞进 IPC/气泡。
 fn history_entry_for_display(mut msg: serde_json::Value) -> serde_json::Value {
+    if msg["role"].as_str() == Some("tool") {
+        if let Some(text) = msg["content"].as_str() {
+            if text.chars().count() > context_policy::TOOL_DISPLAY_MAX_CHARS {
+                msg["content"] = serde_json::json!(archive::display_text(text));
+            }
+        }
+        return msg;
+    }
     let Some(parts) = msg["content"].as_array() else {
         return msg;
     };
@@ -684,6 +766,7 @@ pub fn get_context_usage(
 ) -> Result<ContextUsage, String> {
     let history = agents.history(&host_id);
     let plan_block = agents.plan_block(&host_id);
+    let conv_memory = agents.memory(&host_id);
     let tools = tools_schema();
     // 校准系数同时参与预算判定与展示折算，保证「圆环显示」与「压缩时机」一致
     let factor = agents.calibration_factor(&model);
@@ -694,6 +777,7 @@ pub fn get_context_usage(
         context_window,
         session_id,
         factor,
+        Some(&conv_memory),
     )?;
     Ok(view.usage.calibrated(factor))
 }
@@ -747,10 +831,13 @@ mod tests {
     fn reset_host_cancels_run_and_voids_its_writes() {
         let agents = AgentManager::default();
         let (lease, mut rx) = agents.try_acquire_run("h1", 1).unwrap();
-        assert!(lease.commit_history(vec![serde_json::json!({
-            "role": "user",
-            "content": "a"
-        })]));
+        assert!(lease.commit_run(
+            vec![serde_json::json!({
+                "role": "user",
+                "content": "a"
+            })],
+            memory::ContextMemory::default()
+        ));
         assert_eq!(
             agents.history("h1"),
             vec![serde_json::json!({"role": "user", "content": "a"})]
@@ -758,10 +845,13 @@ mod tests {
         agents.reset_host("h1");
         assert!(matches!(rx.try_recv(), Ok(Control::Cancel)));
         // reset 之后旧租约的写回全部被拒
-        assert!(!lease.commit_history(vec![serde_json::json!({
-            "role": "user",
-            "content": "b"
-        })]));
+        assert!(!lease.commit_run(
+            vec![serde_json::json!({
+                "role": "user",
+                "content": "b"
+            })],
+            memory::ContextMemory::default()
+        ));
         assert!(agents.history("h1").is_empty());
         assert!(!lease.set_plan(TaskPlan {
             goal: "x".to_string(),
@@ -775,10 +865,13 @@ mod tests {
         let agents = AgentManager::default();
         {
             let (lease, _rx) = agents.try_acquire_run("h1", 1).unwrap();
-            assert!(lease.commit_history(vec![serde_json::json!({
-                "role": "user",
-                "content": "a"
-            })]));
+            assert!(lease.commit_run(
+                vec![serde_json::json!({
+                    "role": "user",
+                    "content": "a"
+                })],
+                memory::ContextMemory::default()
+            ));
             assert!(lease.set_plan(TaskPlan {
                 goal: "x".to_string(),
                 ..Default::default()
@@ -789,11 +882,52 @@ mod tests {
         assert!(agents.plan("h1").is_none());
         // 新一轮对话照常写回
         let (lease, _rx) = agents.try_acquire_run("h1", 2).unwrap();
-        assert!(lease.commit_history(vec![serde_json::json!({
-            "role": "user",
-            "content": "b"
-        })]));
+        assert!(lease.commit_run(
+            vec![serde_json::json!({
+                "role": "user",
+                "content": "b"
+            })],
+            memory::ContextMemory::default()
+        ));
         assert_eq!(agents.history("h1").len(), 1);
+    }
+
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(fut)
+    }
+
+    /// reset 作废旧租约的同时把归档与压缩记忆整体换掉：
+    /// 新会话拿到新归档实例，旧引用、旧检查点、旧历史写回全部失效。
+    #[test]
+    fn reset_host_replaces_archive_and_memory() {
+        let agents = AgentManager::default();
+        let (old_lease, _rx) = agents.try_acquire_run("h1", 1).unwrap();
+        let old_archive = old_lease.archive.clone();
+        let saved = block_on(old_archive.save("old capture".to_string())).unwrap();
+        let mem = memory::ContextMemory {
+            compacted_through: 4,
+            ..Default::default()
+        };
+        assert!(old_lease.commit_run(
+            vec![serde_json::json!({"role": "user", "content": "a"})],
+            mem
+        ));
+        drop(old_lease);
+
+        agents.reset_host("h1");
+        assert_eq!(agents.memory("h1").compacted_through, 0);
+
+        let (new_lease, _rx) = agents.try_acquire_run("h1", 2).unwrap();
+        assert!(
+            !Arc::ptr_eq(&old_archive, &new_lease.archive),
+            "reset 后新会话必须拿到全新归档"
+        );
+        // 旧 output:<id> 引用对新会话归档不可见（reset 后引用即过期）
+        assert!(block_on(new_lease.archive.read(&saved.reference, 0, 10)).is_err());
+        // 旧租约的写回被拒已在 reset_host_cancels_run_and_voids_its_writes 覆盖
     }
 
     #[test]

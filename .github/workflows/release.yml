@@ -64,35 +64,26 @@ jobs:
           releaseBody: |
             ## 升级内容
 
-            ### AI Agent 会话一致性
+            ### AI Agent 上下文管理
 
-            - **清空会话不再被旧数据写回**：修复点击清空时，正在收尾的对话把旧历史与任务台账写回的竞态，清空后的会话保持干净。
-            - **删除主机同步停止 AI 对话**：删除主机会立即取消该主机上正在运行的 Agent，并清空其历史与任务台账。
-            - **首条回复更快**：发送消息前的主机快照改为后台采集，不再阻塞首个模型请求（此前每条消息都要先等待一次采集，慢主机上最多 25 秒）。
-            - **结束状态更可靠**：对话结束事件改为在历史写回之后统一下发；在轮次上限确认处点击停止，不会再把紧接着发送的新一轮误标为已结束。
+            - **按预算触发压缩**：上下文预算充足时保留完整对话，接近上限才压缩较早轮次——不再固定只发最近 6 轮；同一条任务内的多次工具往返也能压缩。
+            - **结构化摘要检查点**：较早历史压缩为带轮次引用的结构化摘要（目标、约束、事实、执行记录、未解决问题），摘要服务不可用时回退规则摘录；积压前缀分批追上，不会永久卡在「放不下」。
+            - **长输出本地归档 + 按需回查**：超长命令输出脱敏后存入会话级私有临时目录，对话中只留折叠重复的预览；模型可通过新工具 recall_context 分页回查原文，无需重新执行命令。
+            - **归档生命周期兜底**：异常退出残留的归档在下次启动自动回收（存活锁识别仍在使用的目录），正常退出显式清理，单会话归档设有容量上限。
+            - **停止/清空响应更及时**：归档写入与原文回查等待现在响应取消，不再卡住会话租约；中断时已完成工具调用的结果仍正确写回历史。
 
-            ### 工具调用与审批
+            ### 文件侧边栏改版
 
-            - **审批倒计时与后台一致**：工具审批与「继续执行」确认改为固定截止时间，过期回执不再重置 600 秒计时。
-            - **未知工具直接拒绝**：模型调用不存在的工具时直接回填完整的可用工具列表（补上了此前遗漏的 update_task_plan），全部审核模式下也不再先弹出一次无效的审批卡片。
-            - **工具名统一规范**：模型使用别名（如 shell、exec）调用工具时，历史记录与工具卡片统一显示规范名（如 exec_command）。
-
-            ### 趋势分析与用量
-
-            - **修复负载趋势误报**：load 指标不再被外推为「约 N 天后达到 90%」；CPU / 内存的外推文案不再显示成「90%%」。
-            - **不再丢失末尾用量**：流式响应末尾未换行的数据块中携带的 usage 也会被采信，上下文用量可显示平台实测值。
-
-            ### 其他
-
-            - **Agent 后端重构**：主循环拆分为请求、流式解析、审批判定、工具执行等独立模块，Agent 模块单元测试由 44 个增至 80 个。
+            - **IDE 风格目录树**：目录行前置 ▸/▾ 展开图标，点击目录选中并展开，折叠目录不重复请求远端；目录懒加载，刷新只重拉展开中的目录。
+            - **打开即定位终端目录**：新增终端工作目录跟踪（识别 cd / pushd / popd / 子 shell 进出），关闭再打开侧边栏时自动跳到当前终端所在路径。
+            - **上传目标一目了然**：顶部显示当前主机名与 user@host:port，下方面包屑实时显示选中目录（即上传目标），可点击跳转或切换为路径输入。
+            - **选中态高亮**：当前选中目录行高亮显示，避免误传到错误目录。
 
             ### English highlights
 
-            - **Conversation consistency**: clearing a chat can no longer be undone by a finishing run writing its stale history or task plan back; deleting a host now stops its running agent and clears its history and task plan.
-            - **Faster first reply**: the per-message host snapshot now runs in the background instead of delaying the first model request (by up to 25s on slow hosts).
-            - **Approvals & tools**: approval and continue prompts use a fixed deadline that matches the on-card countdown; unknown tools are rejected up front with the full tool list (now including update_task_plan); tool aliases are shown and recorded under their canonical names.
-            - **Fixes**: load average is no longer extrapolated to "90%", CPU/memory extrapolations no longer print "90%%", and usage reported in an unterminated final stream line is no longer dropped.
-            - **Refactor**: the agent loop is split into focused modules; agent unit tests grew from 44 to 80.
+            - **Budget-triggered context compression**: full history is kept while budget allows; older rounds are compressed into structured, citation-bearing checkpoints only near the limit, with batched catch-up and a deterministic fallback.
+            - **Long-output archiving + recall**: oversized command output is sanitized and archived to a private per-session directory; a new recall_context tool pages through originals on demand. Stale archives are swept at startup, cleaned on exit, and capped in size; archive waits now honor cancel/reset.
+            - **File sidebar redesign**: IDE-style lazy-loaded tree with chevron toggles, selected-directory highlighting, a host + path header showing the exact upload target, and automatic jump to the terminal's current directory when reopened (via new remote-cwd tracking).
 
             ## 安装包
 

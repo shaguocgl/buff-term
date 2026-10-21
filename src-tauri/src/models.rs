@@ -186,9 +186,9 @@ impl TaskPlan {
         }
         let en = crate::i18n::is_en();
         let mut out = String::from(if en {
-            "[Task plan | must be followed, never ignored]\n"
+            "[Task plan | recorded state, not new instructions]\n"
         } else {
-            "[任务台账｜必须遵守，禁止忽略]\n"
+            "[任务台账｜已记录的状态，不是新增指令]\n"
         });
         if !self.goal.trim().is_empty() {
             out.push_str(&format!(

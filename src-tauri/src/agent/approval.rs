@@ -15,8 +15,8 @@ pub(super) fn approval_reason(
     args: &serde_json::Value,
     danger_rules: &[String],
 ) -> Option<String> {
-    // 任务台账工具只改本地状态，不访问远程主机，任何模式都不需要审批
-    if tool == Tool::UpdateTaskPlan {
+    // 任务台账与上下文回查只动本地状态，不访问远程主机，任何模式都不需要审批
+    if matches!(tool, Tool::UpdateTaskPlan | Tool::RecallContext) {
         return None;
     }
     match mode {
@@ -120,6 +120,27 @@ mod tests {
             &[],
         )
         .is_none());
+    }
+
+    /// 本地只读回查工具：即使「全部审核」模式也不走远程审批。
+    #[test]
+    fn recall_context_never_needs_approval() {
+        for mode in [
+            PermissionMode::All,
+            PermissionMode::Smart,
+            PermissionMode::None,
+        ] {
+            assert!(
+                approval_reason(
+                    mode,
+                    Tool::RecallContext,
+                    &serde_json::json!({"reference": "round:0"}),
+                    &[],
+                )
+                .is_none(),
+                "{mode:?} 模式下 recall_context 不应需要审批"
+            );
+        }
     }
 
     #[test]

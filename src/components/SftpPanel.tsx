@@ -1,7 +1,9 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import {
   onSftpProgress,
+  sessionCwd,
   sftpCancelTransfer,
   sftpDelete,
   sftpDownload,
@@ -15,10 +17,12 @@ import type { SftpProgressPayload } from '../api';
 import { useT, type TFunc } from '../i18n';
 import type { Host, SftpEntry } from '../types';
 import { fmtError } from '../utils/errors';
-import { baseName, formatBytes, formatMtime, joinPath } from '../utils/remote';
+import { baseName, formatBytes, formatMtime, joinPath, parentPath } from '../utils/remote';
 import ConfirmModal from './ConfirmModal';
 import PromptModal from './PromptModal';
 import {
+  ChevronDownIcon,
+  ChevronRightIcon,
   DownloadIcon,
   FileEditIcon,
   FileIcon,
@@ -26,6 +30,7 @@ import {
   FolderPlusIcon,
   PencilIcon,
   RefreshIcon,
+  ServerIcon,
   TrashIcon,
   UploadIcon,
   XIcon,
@@ -33,8 +38,10 @@ import {
 
 interface Props {
   host: Host;
-  /** 面板隐藏时保持挂载（传输任务继续），仅隐藏显示 */
+  /** 面板隐藏时保持挂载（传输任务与目录展开状态不重置），仅隐藏显示 */
   hidden?: boolean;
+  /** 该主机当前终端会话 id：面板从隐藏切到可见时，把目录定位到该终端的 cwd */
+  terminalSessionId: number | null;
   /** 悬浮按钮「在内置编辑器中打开」：在中间区打开该文件 */
   onOpenFile: (path: string) => void;
   onClose: () => void;
@@ -52,6 +59,13 @@ interface Transfer {
 interface UploadItem {
   local: string;
   remote: string;
+}
+
+/** 目录节点的懒加载缓存：entries 缺失表示尚未加载 */
+interface DirNode {
+  entries?: SftpEntry[];
+  loading?: boolean;
+  error?: string;
 }
 
 /** 批量上传并发上限：避免一次性打开过多 SFTP 通道把连接打满 */
@@ -105,16 +119,34 @@ function overwriteBody(
   return lines.join('\n');
 }
 
-function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
+/** 路径 → 祖先目录链（含自身）：/a/b/c → ["/", "/a", "/a/b", "/a/b/c"] */
+function ancestorsOf(path: string): string[] {
+  const out = ['/'];
+  let cur = '';
+  for (const seg of path.split('/').filter(Boolean)) {
+    cur += `/${seg}`;
+    out.push(cur);
+  }
+  return out;
+}
+
+function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClose }: Props) {
   const t = useT();
+  // 当前选中的目录：上传/新建/删除等操作的目标目录；树中只有目录行可选中
   const [cwd, setCwd] = useState('/');
-  const [entries, setEntries] = useState<SftpEntry[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // 已加载目录缓存与展开集合：懒加载——展开时才请求 sftp_list
+  const [nodes, setNodes] = useState<Record<string, DirNode>>({});
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(['/']));
   const [busy, setBusy] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState<SftpEntry | null>(null);
+  // 确认/输入弹窗记住操作所在的目录行：用户可选中别的目录，弹窗仍作用于触发它的那一级
+  const [confirmDelete, setConfirmDelete] = useState<{
+    dir: string;
+    entry: SftpEntry;
+  } | null>(null);
   const [promptState, setPromptState] = useState<
-    { kind: 'mkdir' } | { kind: 'rename'; entry: SftpEntry } | null
+    | { kind: 'mkdir'; dir: string }
+    | { kind: 'rename'; dir: string; entry: SftpEntry }
+    | null
   >(null);
   // 传输任务独立于 busy：传输期间不锁定浏览/刷新
   const [transfers, setTransfers] = useState<Record<string, Transfer>>({});
@@ -123,11 +155,14 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
     conflicts: UploadItem[];
     rest: UploadItem[];
   } | null>(null);
+  // 顶部地址区：面包屑（可点击跳转）与直接输入两种形态，编辑态显示输入框
+  const [editingPath, setEditingPath] = useState(false);
   const [pathInput, setPathInput] = useState('/');
-  // 目录请求序号：快速连续切换目录时忽略过期响应，避免旧目录覆盖新目录
-  const loadSeqRef = useRef(0);
+  // 每个目录的加载序号：同一目录的快速重载丢弃过期响应，不同目录并发互不影响
+  const loadSeqRef = useRef<Map<string, number>>(new Map());
   // 当前目录的最新值：批量上传结束时据此判断用户是否还停留在目标目录
   const cwdRef = useRef(cwd);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     cwdRef.current = cwd;
@@ -160,48 +195,182 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
     };
   }, []);
 
-  const load = useCallback(
+  /** 加载某个目录的子项；per-path 序号丢弃同一目录的过期响应 */
+  const loadDir = useCallback(
     async (path: string) => {
-      const seq = ++loadSeqRef.current;
-      setLoading(true);
-      setError(null);
+      const seq = (loadSeqRef.current.get(path) ?? 0) + 1;
+      loadSeqRef.current.set(path, seq);
+      setNodes((prev) => ({
+        ...prev,
+        [path]: { ...prev[path], loading: true, error: undefined },
+      }));
       try {
         const list = await sftpList(host.id, path);
-        if (seq !== loadSeqRef.current) return; // 已有更新的请求，丢弃过期响应
-        setEntries(list);
-        setCwd(path);
-        setPathInput(path);
+        if (loadSeqRef.current.get(path) !== seq) return;
+        setNodes((prev) => ({
+          ...prev,
+          [path]: { entries: list, loading: false },
+        }));
       } catch (e) {
-        if (seq !== loadSeqRef.current) return;
-        setError(fmtError(e));
-      } finally {
-        if (seq === loadSeqRef.current) setLoading(false);
+        if (loadSeqRef.current.get(path) !== seq) return;
+        setNodes((prev) => ({
+          ...prev,
+          [path]: { loading: false, error: fmtError(e) },
+        }));
       }
     },
-    // 只依赖 host.id：同一主机的 Host 对象引用可能随标签增删而变化，
-    // 若依赖整个对象会导致 load 重建 → 挂载 effect 重跑 → 目录被重置回 /
     [host.id],
   );
 
   useEffect(() => {
-    load('/');
-  }, [load]);
+    void loadDir('/');
+  }, [loadDir]);
+
+  const nodesRef = useRef(nodes);
+  useEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
+
+  /** 未加载过才请求：展开/定位路径上的祖先目录复用缓存 */
+  const ensureLoaded = useCallback(
+    (path: string) => {
+      const node = nodesRef.current[path];
+      if (!node || (node.entries === undefined && !node.loading)) {
+        void loadDir(path);
+      }
+    },
+    [loadDir],
+  );
+
+  /** 展开/折叠某个目录：展开时懒加载子项 */
+  const toggleDir = useCallback(
+    (path: string) => {
+      const wasOpen = expanded.has(path);
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        if (wasOpen) next.delete(path);
+        else next.add(path);
+        return next;
+      });
+      if (!wasOpen) ensureLoaded(path);
+    },
+    [expanded, ensureLoaded],
+  );
+
+  /** 把某路径定位到树中：展开并加载其全部祖先，选中该目录并滚动到可见 */
+  const reveal = useCallback(
+    async (path: string) => {
+      const chain = ancestorsOf(path);
+      const ancestors = chain.slice(0, -1);
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        ancestors.forEach((p) => next.add(p));
+        return next;
+      });
+      await Promise.all(ancestors.map(ensureLoaded));
+      setCwd(path);
+      requestAnimationFrame(() => {
+        bodyRef.current
+          ?.querySelector(`[data-path="${CSS.escape(path)}"]`)
+          ?.scrollIntoView({ block: 'nearest' });
+      });
+    },
+    [ensureLoaded],
+  );
+
+  // 面板由隐藏切到可见时，把目录定位到「当前终端」的工作目录
+  const wasHiddenRef = useRef(true);
+  useEffect(() => {
+    if (hidden) {
+      wasHiddenRef.current = true;
+      return;
+    }
+    if (!wasHiddenRef.current) return;
+    wasHiddenRef.current = false;
+    if (terminalSessionId == null) return;
+    void sessionCwd(terminalSessionId)
+      .then((dir) => {
+        // 仅接受合法的绝对路径；cwd 未知/跟踪失败时保持当前目录
+        if (dir && dir.startsWith('/')) void reveal(dir);
+      })
+      .catch(() => {});
+  }, [hidden, terminalSessionId, reveal]);
+
+  /** 选中目录行：已选中且展开时再点折叠（根目录恒展开）；否则选中并展开 */
+  const onDirClick = useCallback(
+    (path: string) => {
+      setCwd(path);
+      if (path !== '/' && cwdRef.current === path && expanded.has(path)) {
+        setExpanded((prev) => {
+          const next = new Set(prev);
+          next.delete(path);
+          return next;
+        });
+        return;
+      }
+      if (!expanded.has(path)) {
+        setExpanded((prev) => {
+          const next = new Set(prev);
+          next.add(path);
+          return next;
+        });
+        ensureLoaded(path);
+      }
+    },
+    [expanded, ensureLoaded],
+  );
+
+  /** 操作后清理某目录及其子树的缓存/展开态（删除/重命名目录时用） */
+  const purgeTree = useCallback((path: string) => {
+    setNodes((prev) => {
+      const next = { ...prev };
+      for (const key of Object.keys(next)) {
+        if (key === path || key.startsWith(`${path}/`)) delete next[key];
+      }
+      return next;
+    });
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      let touched = false;
+      for (const p of next) {
+        if (p === path || p.startsWith(`${path}/`)) {
+          next.delete(p);
+          touched = true;
+        }
+      }
+      return touched ? next : prev;
+    });
+    if (cwdRef.current === path || cwdRef.current.startsWith(`${path}/`)) {
+      setCwd(parentPath(path));
+    }
+  }, []);
+
+  /** 刷新：重拉根目录与所有展开中的目录（折叠目录的缓存随之废弃） */
+  const refresh = useCallback(() => {
+    for (const p of expanded) void loadDir(p);
+    if (!expanded.has('/')) void loadDir('/');
+  }, [expanded, loadDir]);
 
   const run = async (
+    dir: string,
     action: () => Promise<{ ok: boolean; text: string }>,
     then: () => void,
   ) => {
     setBusy(true);
-    setError(null);
+    const setErr = (error: string) =>
+      setNodes((prev) => ({
+        ...prev,
+        [dir]: { ...prev[dir], error },
+      }));
     try {
       const res = await action();
       if (res.ok) {
         then();
       } else {
-        setError(res.text || t('sftp.opFailed'));
+        setErr(res.text || t('sftp.opFailed'));
       }
     } catch (e) {
-      setError(fmtError(e));
+      setErr(fmtError(e));
     } finally {
       setBusy(false);
     }
@@ -240,10 +409,9 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
   };
 
   // 批量上传：按 UPLOAD_CONCURRENCY 限流并发，失败逐条累加提示，
-  // 全部结束后若用户仍在目标目录则刷新一次列表
+  // 全部结束后若用户仍在目标目录则刷新该目录的子项
   const uploadMany = async (items: UploadItem[]) => {
     const target = cwd;
-    setError(null);
     const failures: string[] = [];
     await mapLimit(items, UPLOAD_CONCURRENCY, async (item) => {
       const err = await startTransfer('upload', item.local, item.remote);
@@ -251,14 +419,18 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
       failures.push(
         `${baseName(item.local)}${t('sftp.uploadFailedItemSep')}${err}`,
       );
-      setError(
-        t('sftp.uploadFailed', {
-          n: failures.length,
-          list: failures.join(t('sftp.uploadFailedListSep')),
-        }),
-      );
+      setNodes((prev) => ({
+        ...prev,
+        [target]: {
+          ...prev[target],
+          error: t('sftp.uploadFailed', {
+            n: failures.length,
+            list: failures.join(t('sftp.uploadFailedListSep')),
+          }),
+        },
+      }));
     });
-    if (cwdRef.current === target) load(target);
+    if (cwdRef.current === target) void loadDir(target);
   };
 
   const cancelTransfer = async (id: string) => {
@@ -296,30 +468,29 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
     void uploadMany(items);
   };
 
-  const handleDownload = async (entry: SftpEntry) => {
+  const handleDownload = async (dir: string, entry: SftpEntry) => {
     const dest = await save({ defaultPath: entry.name });
     if (!dest) return;
-    setError(null);
-    const err = await startTransfer('download', dest, joinPath(cwd, entry.name));
-    if (err) setError(err);
+    const err = await startTransfer('download', dest, joinPath(dir, entry.name));
+    if (err) {
+      setNodes((prev) => ({
+        ...prev,
+        [dir]: { ...prev[dir], error: err },
+      }));
+    }
   };
 
-  const handleDelete = (entry: SftpEntry) => {
-    setConfirmDelete(entry);
-  };
-
-  const doDelete = async (entry: SftpEntry) => {
+  const doDelete = async (dir: string, entry: SftpEntry) => {
     setConfirmDelete(null);
-    const remote = joinPath(cwd, entry.name);
-    await run(() => sftpDelete(host.id, remote), () => load(cwd));
-  };
-
-  const handleMkdir = () => {
-    setPromptState({ kind: 'mkdir' });
-  };
-
-  const handleRename = (entry: SftpEntry) => {
-    setPromptState({ kind: 'rename', entry });
+    const remote = joinPath(dir, entry.name);
+    await run(
+      dir,
+      () => sftpDelete(host.id, remote),
+      () => {
+        if (entry.is_dir) purgeTree(remote);
+        void loadDir(dir);
+      },
+    );
   };
 
   const submitPrompt = (value: string) => {
@@ -327,15 +498,176 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
     setPromptState(null);
     if (!p) return;
     if (p.kind === 'mkdir') {
-      void run(() => sftpMkdir(host.id, joinPath(cwd, value)), () => load(cwd));
-    } else if (p.kind === 'rename' && value !== p.entry.name) {
       void run(
-        () =>
-          sftpRename(host.id, joinPath(cwd, p.entry.name), joinPath(cwd, value)),
-        () => load(cwd),
+        p.dir,
+        () => sftpMkdir(host.id, joinPath(p.dir, value)),
+        () => loadDir(p.dir),
+      );
+    } else if (p.kind === 'rename' && value !== p.entry.name) {
+      const from = joinPath(p.dir, p.entry.name);
+      const to = joinPath(p.dir, value);
+      void run(
+        p.dir,
+        () => sftpRename(host.id, from, to),
+        () => {
+          if (p.entry.is_dir) {
+            purgeTree(from);
+            purgeTree(to);
+          }
+          void loadDir(p.dir);
+        },
       );
     }
   };
+
+  /** 递归渲染目录行及其展开子级 */
+  const renderRows = (dir: string, depth: number): ReactNode[] => {
+    const node = nodes[dir];
+    const rows: ReactNode[] = [];
+    const indent = depth * 14;
+    if (node?.loading) {
+      rows.push(
+        <div
+          key={`${dir}-loading`}
+          className="sftp-status sftp-tree-note"
+          style={{ paddingLeft: 34 + indent }}
+        >
+          {t('common.loading')}
+        </div>,
+      );
+    }
+    if (node?.error) {
+      rows.push(
+        <div
+          key={`${dir}-error`}
+          className="sftp-status err sftp-tree-note"
+          style={{ paddingLeft: 34 + indent }}
+        >
+          {node.error}
+        </div>,
+      );
+    }
+    for (const entry of node?.entries ?? []) {
+      const full = joinPath(dir, entry.name);
+      const isExpanded = expanded.has(full);
+      const isSelected = entry.is_dir && cwd === full;
+      rows.push(
+        <div
+          key={full}
+          data-path={full}
+          className={`sftp-row${isSelected ? ' selected' : ''}`}
+          style={{ paddingLeft: 12 + indent }}
+          onClick={() => {
+            if (entry.is_dir) onDirClick(full);
+          }}
+          onDoubleClick={() => {
+            if (!entry.is_dir) onOpenFile(full);
+          }}
+        >
+          {entry.is_dir ? (
+            <button
+              className="sftp-chevron"
+              title={isExpanded ? t('sftp.collapse') : t('sftp.expand')}
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleDir(full);
+              }}
+            >
+              {isExpanded ? (
+                <ChevronDownIcon size={12} />
+              ) : (
+                <ChevronRightIcon size={12} />
+              )}
+            </button>
+          ) : (
+            <span className="sftp-chevron" />
+          )}
+          {entry.is_dir ? <FolderIcon size={15} /> : <FileIcon size={15} />}
+          <span
+            className={`sftp-name${entry.is_dir ? '' : ' plain'}`}
+            title={entry.is_dir ? full : entry.name}
+          >
+            {entry.name}
+          </span>
+          {entry.is_symlink && (
+            <span className="sftp-link-badge" title={t('sftp.symlink')}>link</span>
+          )}
+          <span className="sftp-size">
+            {entry.is_dir ? '—' : formatBytes(entry.size)}
+          </span>
+          <span className="sftp-mtime">{formatMtime(entry.mtime)}</span>
+          <div className="sftp-row-actions">
+            {!entry.is_dir && (
+              <button
+                className="icon-btn"
+                title={t('sftp.openInEditor')}
+                disabled={busy}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenFile(full);
+                }}
+              >
+                <FileEditIcon size={13} />
+              </button>
+            )}
+            {!entry.is_dir && (
+              <button
+                className="icon-btn"
+                title={t('sftp.download')}
+                disabled={busy}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleDownload(dir, entry);
+                }}
+              >
+                <DownloadIcon size={13} />
+              </button>
+            )}
+            <button
+              className="icon-btn"
+              title={t('sftp.rename')}
+              disabled={busy}
+              onClick={(e) => {
+                e.stopPropagation();
+                setPromptState({ kind: 'rename', dir, entry });
+              }}
+            >
+              <PencilIcon size={13} />
+            </button>
+            <button
+              className="icon-btn danger"
+              title={t('common.delete')}
+              disabled={busy}
+              onClick={(e) => {
+                e.stopPropagation();
+                setConfirmDelete({ dir, entry });
+              }}
+            >
+              <TrashIcon size={13} />
+            </button>
+          </div>
+        </div>,
+      );
+      if (entry.is_dir && isExpanded) {
+        rows.push(...renderRows(full, depth + 1));
+      }
+    }
+    if (node?.entries && node.entries.length === 0) {
+      rows.push(
+        <div
+          key={`${dir}-empty`}
+          className="sftp-status sftp-tree-note"
+          style={{ paddingLeft: 34 + indent }}
+        >
+          {t('sftp.empty')}
+        </div>,
+      );
+    }
+    return rows;
+  };
+
+  const rootNode = nodes['/'];
+  const crumbs = ancestorsOf(cwd);
 
   return (
     <aside
@@ -346,27 +678,23 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
       }}
     >
       <div className="sftp-header">
-        <input
-          className="sftp-path-input"
-          value={pathInput}
-          title={cwd}
-          spellCheck={false}
-          onChange={(e) => setPathInput(e.target.value)}
-          onFocus={() => setPathInput(cwd)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              const target = pathInput.trim();
-              if (target && target.startsWith('/')) load(target);
-              else setPathInput(cwd);
-            } else if (e.key === 'Escape') {
-              setPathInput(cwd);
-              (e.target as HTMLInputElement).blur();
-            }
-          }}
-          onBlur={() => setPathInput(cwd)}
-        />
+        <div
+          className="sftp-host"
+          title={`${host.name} (${host.username}@${host.address}:${host.port})`}
+        >
+          <ServerIcon size={13} />
+          <span className="sftp-host-name">{host.name}</span>
+          <span className="sftp-host-addr">
+            {host.username}@{host.address}:{host.port}
+          </span>
+        </div>
         <div className="sftp-actions">
-          <button className="icon-btn" title={t('common.refresh')} onClick={() => load(cwd)} disabled={busy}>
+          <button
+            className="icon-btn"
+            title={t('common.refresh')}
+            onClick={refresh}
+            disabled={busy}
+          >
             <RefreshIcon size={14} />
           </button>
           <button
@@ -377,13 +705,74 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
           >
             <UploadIcon size={14} />
           </button>
-          <button className="icon-btn" title={t('sftp.newFolder')} onClick={handleMkdir} disabled={busy}>
+          <button
+            className="icon-btn"
+            title={t('sftp.newFolder')}
+            onClick={() => setPromptState({ kind: 'mkdir', dir: cwd })}
+            disabled={busy}
+          >
             <FolderPlusIcon size={14} />
           </button>
           <button className="icon-btn" title={t('common.close')} onClick={onClose}>
             <XIcon size={14} />
           </button>
         </div>
+      </div>
+
+      {/* 当前目录：面包屑形态默认展示，铅笔/双击切换到路径输入 */}
+      <div className="sftp-crumbbar">
+        {editingPath ? (
+          <input
+            className="sftp-path-input"
+            value={pathInput}
+            autoFocus
+            spellCheck={false}
+            onChange={(e) => setPathInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                const target = pathInput.trim();
+                if (target && target.startsWith('/')) {
+                  void reveal(target);
+                  setEditingPath(false);
+                }
+              } else if (e.key === 'Escape') {
+                setEditingPath(false);
+              }
+            }}
+            onBlur={() => setEditingPath(false)}
+          />
+        ) : (
+          <div
+            className="sftp-crumb"
+            title={cwd}
+            onDoubleClick={() => {
+              setPathInput(cwd);
+              setEditingPath(true);
+            }}
+          >
+            {crumbs.map((seg, i) => (
+              <span key={seg} className="sftp-crumb-item">
+                {i > 0 && <span className="sftp-crumb-sep">/</span>}
+                <button
+                  className={`sftp-crumb-seg${i === crumbs.length - 1 ? ' current' : ''}`}
+                  onClick={() => void reveal(seg)}
+                >
+                  {seg === '/' ? t('sftp.rootDir') : baseName(seg)}
+                </button>
+              </span>
+            ))}
+            <button
+              className="icon-btn sftp-edit-path"
+              title={t('sftp.editPath')}
+              onClick={() => {
+                setPathInput(cwd);
+                setEditingPath(true);
+              }}
+            >
+              <PencilIcon size={12} />
+            </button>
+          </div>
+        )}
       </div>
 
       {Object.values(transfers).length > 0 && (
@@ -436,89 +825,26 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
         </div>
       )}
 
-      <div className="sftp-body">
-        {loading && <div className="sftp-status">{t('common.loading')}</div>}
-        {!loading && error && <div className="sftp-status err">{error}</div>}
-        {!loading && !error && (
-          <div className="sftp-list">
-            {cwd !== '/' && (
-              <div className="sftp-row" onClick={() => load(cwd.replace(/\/[^/]*$/, '') || '/')}>
-                <FolderIcon size={15} />
-                <span className="sftp-name">..</span>
-              </div>
-            )}
-            {entries.map((entry) => {
-              const full = joinPath(cwd, entry.name);
-              return (
-                <div
-                  key={entry.name}
-                  className="sftp-row"
-                  // 双击进入目录 / 打开文件；单击不再触发，文件的开合统一走悬浮按钮
-                  onDoubleClick={() => {
-                    if (entry.is_dir) load(full);
-                    else onOpenFile(full);
-                  }}
-                >
-                  {entry.is_dir ? <FolderIcon size={15} /> : <FileIcon size={15} />}
-                  <span
-                    className={`sftp-name${entry.is_dir ? '' : ' plain'}`}
-                    title={entry.is_dir ? t('sftp.openDir') : entry.name}
-                    onClick={() => {
-                      if (entry.is_dir) load(full);
-                    }}
-                  >
-                    {entry.name}
-                  </span>
-                  {entry.is_symlink && (
-                    <span className="sftp-link-badge" title={t('sftp.symlink')}>link</span>
-                  )}
-                  <span className="sftp-size">
-                    {entry.is_dir ? '—' : formatBytes(entry.size)}
-                  </span>
-                  <span className="sftp-mtime">{formatMtime(entry.mtime)}</span>
-                  <div className="sftp-row-actions">
-                    {!entry.is_dir && (
-                      <button
-                        className="icon-btn"
-                        title={t('sftp.openInEditor')}
-                        disabled={busy}
-                        onClick={() => onOpenFile(full)}
-                      >
-                        <FileEditIcon size={13} />
-                      </button>
-                    )}
-                    {!entry.is_dir && (
-                      <button
-                        className="icon-btn"
-                        title={t('sftp.download')}
-                        disabled={busy}
-                        onClick={() => handleDownload(entry)}
-                      >
-                        <DownloadIcon size={13} />
-                      </button>
-                    )}
-                    <button
-                      className="icon-btn"
-                      title={t('sftp.rename')}
-                      disabled={busy}
-                      onClick={() => handleRename(entry)}
-                    >
-                      <PencilIcon size={13} />
-                    </button>
-                    <button
-                      className="icon-btn danger"
-                      title={t('common.delete')}
-                      disabled={busy}
-                      onClick={() => handleDelete(entry)}
-                    >
-                      <TrashIcon size={13} />
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-            {entries.length === 0 && <div className="sftp-status">{t('sftp.empty')}</div>}
-          </div>
+      <div className="sftp-body" ref={bodyRef}>
+        {/* 根目录行：恒展开，cwd=/ 时可被选中 */}
+        <div
+          data-path="/"
+          className={`sftp-row${cwd === '/' ? ' selected' : ''}`}
+          onClick={() => onDirClick('/')}
+        >
+          <span className="sftp-chevron">
+            <ChevronDownIcon size={12} />
+          </span>
+          <FolderIcon size={15} />
+          <span className="sftp-name" title="/">
+            /
+          </span>
+          <span className="sftp-size">—</span>
+          <span className="sftp-mtime" />
+        </div>
+        {renderRows('/', 1)}
+        {rootNode?.entries === undefined && !rootNode?.loading && !rootNode?.error && (
+          <div className="sftp-status">{t('common.loading')}</div>
         )}
       </div>
 
@@ -552,25 +878,29 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
       {confirmDelete && (
         <ConfirmModal
           title={
-            confirmDelete.is_dir
+            confirmDelete.entry.is_dir
               ? t('sftp.deleteDirTitle')
               : t('sftp.deleteFileTitle')
           }
           body={
-            confirmDelete.is_dir
-              ? t('sftp.deleteDirBody', { name: confirmDelete.name })
-              : t('sftp.deleteFileBody', { name: confirmDelete.name })
+            confirmDelete.entry.is_dir
+              ? t('sftp.deleteDirBody', { name: confirmDelete.entry.name })
+              : t('sftp.deleteFileBody', { name: confirmDelete.entry.name })
           }
           confirmText={t('common.delete')}
           danger
-          onConfirm={() => doDelete(confirmDelete)}
+          onConfirm={() => doDelete(confirmDelete.dir, confirmDelete.entry)}
           onCancel={() => setConfirmDelete(null)}
         />
       )}
       {promptState && (
         <PromptModal
           // key 按 kind 区分：新建/重命名切换时强制重建，避免输入框残留上一次的值
-          key={promptState.kind === 'rename' ? `rename-${promptState.entry.name}` : 'mkdir'}
+          key={
+            promptState.kind === 'rename'
+              ? `rename-${promptState.entry.name}`
+              : 'mkdir'
+          }
           title={
             promptState.kind === 'mkdir' ? t('sftp.newFolder') : t('sftp.rename')
           }
@@ -579,9 +909,13 @@ function SftpPanel({ host, hidden = false, onOpenFile, onClose }: Props) {
               ? t('sftp.newFolderLabel')
               : t('sftp.newNameLabel')
           }
-          initialValue={promptState.kind === 'rename' ? promptState.entry.name : ''}
+          initialValue={
+            promptState.kind === 'rename' ? promptState.entry.name : ''
+          }
           placeholder={
-            promptState.kind === 'mkdir' ? t('sftp.newFolderPlaceholder') : undefined
+            promptState.kind === 'mkdir'
+              ? t('sftp.newFolderPlaceholder')
+              : undefined
           }
           onOk={submitPrompt}
           onCancel={() => setPromptState(null)}

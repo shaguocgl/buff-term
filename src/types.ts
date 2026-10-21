@@ -116,6 +116,7 @@ export interface TaskPlan {
 export type CompressionStrategy =
   | 'none'
   | 'extractive'
+  | 'llm_summary'
   | 'reactive_reduce'
   | 'hard_reset';
 

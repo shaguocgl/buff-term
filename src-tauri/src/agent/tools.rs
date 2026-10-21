@@ -7,7 +7,7 @@ use crate::i18n::{is_en, t};
 use crate::models::{AiProvider, Host};
 use crate::russh::RusshManager;
 use crate::safety::{normalize_tool, sanitize};
-use crate::util::{format_exec_output, now, shq};
+use crate::util::{format_exec_output_full, now, shq};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) fn system_prompt(
@@ -142,7 +142,7 @@ pub(crate) fn system_prompt(
 }
 
 pub(crate) fn tools_schema() -> serde_json::Value {
-    serde_json::json!([
+    let mut tools = serde_json::json!([
         {
             "type": "function",
             "function": {
@@ -286,7 +286,13 @@ pub(crate) fn tools_schema() -> serde_json::Value {
                 }
             }
         },
-    ])
+    ]);
+    // 本地回查工具的 schema 由 context_policy 统一维护（模型可见文案的唯一出处）
+    tools
+        .as_array_mut()
+        .expect("tools schema is an array")
+        .push(super::context_policy::recall_context_schema());
+    tools
 }
 
 /// 解析工具调用参数：空串 → 空对象（无参数工具如 resource_usage）；合法 JSON 对象 → 原样；
@@ -299,21 +305,35 @@ pub(crate) fn parse_args(raw: &str) -> Result<serde_json::Value, String> {
     }
     match serde_json::from_str::<serde_json::Value>(trimmed) {
         Ok(v) if v.is_object() => Ok(v),
-        Ok(_) => Err(t("工具参数必须是 JSON 对象", "Tool arguments must be a JSON object").to_string()),
-        Err(e) => Err(format!("{}: {e}", t("工具参数不是合法 JSON", "Tool arguments are not valid JSON"))),
+        Ok(_) => Err(t(
+            "工具参数必须是 JSON 对象",
+            "Tool arguments must be a JSON object",
+        )
+        .to_string()),
+        Err(e) => Err(format!(
+            "{}: {e}",
+            t("工具参数不是合法 JSON", "Tool arguments are not valid JSON")
+        )),
     }
 }
 
 /// 模型漏填工具名（`name` 为空）时，根据参数形态推断真实工具：
-/// command → exec_command，path → read_file，metric/window_hours → query_history，
-/// 空对象（无法从参数形态判断）→ resource_usage（唯一不需要参数的工具，即使猜错，
-/// resource_usage 也是只读且无副作用的操作，代价可接受）。
+/// reference → recall_context，command → exec_command，path → read_file，
+/// metric/window_hours → query_history，空对象（无法从参数形态判断）→ resource_usage
+/// （唯一不需要参数的工具，即使猜错，resource_usage 也是只读且无副作用的操作，代价可接受）。
 /// 若 `name` 非空，原样返回。
 pub(crate) fn infer_tool_name<'a>(name: &'a str, args: &serde_json::Value) -> &'a str {
     if !name.trim().is_empty() {
         return name;
     }
     if args
+        .get("reference")
+        .and_then(|r| r.as_str())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+    {
+        "recall_context"
+    } else if args
         .get("command")
         .and_then(|c| c.as_str())
         .map(|s| !s.trim().is_empty())
@@ -353,17 +373,20 @@ pub(crate) enum Tool {
     QueryHistory,
     /// 创建或更新本地任务台账（不访问远程主机）
     UpdateTaskPlan,
+    /// 回查本会话的历史轮次/归档输出原文（本地只读，不访问远程主机）
+    RecallContext,
 }
 
 impl Tool {
     /// 全部工具，顺序即系统提示词与错误消息里的展示顺序
-    const ALL: [Tool; 6] = [
+    const ALL: [Tool; 7] = [
         Tool::ExecCommand,
         Tool::ReadFile,
         Tool::ListDir,
         Tool::ResourceUsage,
         Tool::QueryHistory,
         Tool::UpdateTaskPlan,
+        Tool::RecallContext,
     ];
 
     /// 与模型约定、写回历史的规范工具名
@@ -375,6 +398,7 @@ impl Tool {
             Tool::ResourceUsage => "resource_usage",
             Tool::QueryHistory => "query_history",
             Tool::UpdateTaskPlan => "update_task_plan",
+            Tool::RecallContext => "recall_context",
         }
     }
 
@@ -393,6 +417,8 @@ impl Tool {
             (Tool::QueryHistory, true) => "query historical metric trends",
             (Tool::UpdateTaskPlan, false) => "更新任务台账",
             (Tool::UpdateTaskPlan, true) => "update the task plan",
+            (Tool::RecallContext, false) => "回查上下文原文",
+            (Tool::RecallContext, true) => "recall original context",
         }
     }
 
@@ -521,10 +547,15 @@ pub(crate) async fn execute_tool(
             (script.to_string(), 25)
         }
         Tool::QueryHistory => return query_history(db, host, args),
-        Tool::UpdateTaskPlan => {
+        Tool::UpdateTaskPlan => return Err(t(
+            "update_task_plan 由 Agent 在本地处理，不在远程主机上执行",
+            "update_task_plan is handled locally by the agent and never runs on the remote host",
+        )
+        .to_string()),
+        Tool::RecallContext => {
             return Err(t(
-                "update_task_plan 由 Agent 在本地处理，不在远程主机上执行",
-                "update_task_plan is handled locally by the agent and never runs on the remote host",
+                "recall_context 由 Agent 在本地处理，不在远程主机上执行",
+                "recall_context is handled locally by the agent and never runs on the remote host",
             )
             .to_string())
         }
@@ -537,7 +568,8 @@ pub(crate) async fn execute_tool(
             cancel,
         )
         .await?;
-    Ok(sanitize(&format_exec_output(&out)))
+    // 返回完整格式化输出（不在此截断）：超长输出由 Agent 归档后回填有界预览
+    Ok(sanitize(&format_exec_output_full(&out)))
 }
 
 #[cfg(test)]
@@ -603,19 +635,19 @@ mod tests {
     fn tool_catalog_and_names_match_prompt_text() {
         assert_eq!(
             tool_catalog(false),
-            "exec_command（执行命令）、read_file（读文件）、list_dir（列目录）、resource_usage（资源占用）、query_history（查询历史指标趋势）、update_task_plan（更新任务台账）"
+            "exec_command（执行命令）、read_file（读文件）、list_dir（列目录）、resource_usage（资源占用）、query_history（查询历史指标趋势）、update_task_plan（更新任务台账）、recall_context（回查上下文原文）"
         );
         assert_eq!(
             tool_catalog(true),
-            "exec_command (run a command), read_file (read a file), list_dir (list a directory), resource_usage (resource usage), query_history (query historical metric trends), update_task_plan (update the task plan)"
+            "exec_command (run a command), read_file (read a file), list_dir (list a directory), resource_usage (resource usage), query_history (query historical metric trends), update_task_plan (update the task plan), recall_context (recall original context)"
         );
         assert_eq!(
             tool_names(false),
-            "exec_command、read_file、list_dir、resource_usage、query_history、update_task_plan"
+            "exec_command、read_file、list_dir、resource_usage、query_history、update_task_plan、recall_context"
         );
         assert_eq!(
             tool_names(true),
-            "exec_command, read_file, list_dir, resource_usage, query_history, update_task_plan"
+            "exec_command, read_file, list_dir, resource_usage, query_history, update_task_plan, recall_context"
         );
     }
 
@@ -637,10 +669,10 @@ mod tests {
             assert!(prompt.contains(tool.as_str()), "缺少 {}", tool.as_str());
         }
         assert!(prompt.contains(
-            "可用工具：exec_command（执行命令）、read_file（读文件）、list_dir（列目录）、resource_usage（资源占用）、query_history（查询历史指标趋势）、update_task_plan（更新任务台账）。"
+            "可用工具：exec_command（执行命令）、read_file（读文件）、list_dir（列目录）、resource_usage（资源占用）、query_history（查询历史指标趋势）、update_task_plan（更新任务台账）、recall_context（回查上下文原文）。"
         ));
         assert!(prompt.contains(
-            "工具名称必须是以下之一——exec_command、read_file、list_dir、resource_usage、query_history、update_task_plan；"
+            "工具名称必须是以下之一——exec_command、read_file、list_dir、resource_usage、query_history、update_task_plan、recall_context；"
         ));
     }
 
@@ -692,6 +724,84 @@ mod tests {
     fn infer_tool_name_infers_update_task_plan_from_goal() {
         let args = serde_json::json!({"goal": "部署 nginx", "pending": ["启动服务"]});
         assert_eq!(infer_tool_name("", &args), "update_task_plan");
+    }
+
+    /// recall_context 的解析链路：规范名、空名+reference 推断、
+    /// schema 里出现且与目录一致、不会在 resolve 处被误判为未知工具。
+    #[test]
+    fn recall_context_resolves_infers_and_appears_in_schema() {
+        assert_eq!(
+            Tool::resolve(
+                "recall_context",
+                &serde_json::json!({"reference": "round:0"})
+            ),
+            Some(Tool::RecallContext)
+        );
+        assert_eq!(
+            Tool::resolve("", &serde_json::json!({"reference": "output:abc"})),
+            Some(Tool::RecallContext),
+            "空名 + reference 参数应推断为 recall_context"
+        );
+        // reference 推断优先级高于其他形态
+        assert_eq!(
+            infer_tool_name(
+                "",
+                &serde_json::json!({"reference": "round:1", "path": "/x"})
+            ),
+            "recall_context"
+        );
+        let schema = tools_schema();
+        let schema_names: Vec<&str> = schema
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        for tool in Tool::ALL {
+            assert!(
+                schema_names.contains(&tool.as_str()),
+                "tools_schema 缺少 {}",
+                tool.as_str()
+            );
+        }
+    }
+
+    /// recall_context / update_task_plan 是本地工具：execute_tool 对它们直接报错，
+    /// 不会触达 SSH 执行层。
+    #[test]
+    fn local_only_tools_never_reach_remote_execute() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let path = std::env::temp_dir().join(format!(
+                "buffterm-tools-test-{}.sqlite",
+                uuid::Uuid::new_v4()
+            ));
+            let db = Db::open(&path).unwrap();
+            let russh = RusshManager::new();
+            let host = fixture_host();
+            let cancel = CancellationToken::new();
+            for tool in [Tool::RecallContext, Tool::UpdateTaskPlan] {
+                let err = execute_tool(
+                    &db,
+                    &russh,
+                    &host,
+                    tool,
+                    &serde_json::json!({"reference": "round:0"}),
+                    &cancel,
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    err.contains("本地") || err.contains("locally"),
+                    "{} 应报本地工具错误: {err}",
+                    tool.as_str()
+                );
+            }
+            drop(db);
+            let _ = std::fs::remove_file(&path);
+        });
     }
 
     #[test]

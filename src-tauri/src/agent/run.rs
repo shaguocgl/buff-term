@@ -3,7 +3,9 @@
 //! 审批判定在 approval.rs，流式解析在 stream.rs。
 
 use super::approval::approval_reason;
+use super::archive;
 use super::context::{build_context_view, CompressionStrategy};
+use super::memory::{self, ContextMemory, SummaryCheckpoint};
 use super::stream::{SseDecoder, SseEvent, StreamReply, ToolCallAcc};
 use super::tools::{execute_tool, parse_args, tools_schema, unknown_tool_message, Tool};
 use super::{
@@ -15,7 +17,7 @@ use crate::i18n::{is_en, t};
 use crate::models::{AuditLog, Host, PermissionMode, TaskPlan};
 use crate::russh::RusshManager;
 use crate::safety::sanitize;
-use crate::util::{extract_error, now, truncate, truncate_output};
+use crate::util::{extract_error, now, truncate};
 use futures_util::StreamExt;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -24,9 +26,6 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-
-/// 单条 tool 消息回填给模型的最大字符数（超出部分头尾保留）
-const TOOL_RESULT_MAX_CHARS: usize = 8000;
 
 /// `AgentRun` 所需的只读上下文，聚合以避免函数参数过多（此前 13 个位置参数，
 /// 顺序稍有出错编译器也无法察觉）。字段全部是引用或已实现 Copy 的类型，
@@ -102,6 +101,12 @@ enum CallFlow {
     Next,
     /// 本调用未回填，由调用方为本调用及其后所有调用回填 note
     Interrupted {
+        /// 回填给模型的中断说明
+        note: &'static str,
+    },
+    /// 本调用已自行回填（命令已执行完的归档取消路径），
+    /// 由调用方为「其后」所有调用回填 note 并结束本轮
+    InterruptedAfter {
         /// 回填给模型的中断说明
         note: &'static str,
     },
@@ -226,12 +231,14 @@ fn assistant_tool_calls_message(content: &str, calls: &[PreparedCall]) -> Value 
     })
 }
 
-/// 追加一条 tool 结果消息：超长输出按头尾保留截断，避免单条结果打满上下文。
+/// 追加一条 tool 结果消息。content 在这里逐字保留：长输出在写入前已由
+/// store_tool_output 换成「有界预览 + 归档引用」，归档失败时完整原文留在
+/// canonical 历史里（发送视图仍可按预算裁剪，不回读这条消息本体）。
 fn push_tool_message(history: &mut Vec<Value>, tool_call_id: &str, content: &str) {
     history.push(serde_json::json!({
         "role": "tool",
         "tool_call_id": tool_call_id,
-        "content": truncate_output(content, TOOL_RESULT_MAX_CHARS),
+        "content": content,
     }));
 }
 
@@ -246,6 +253,27 @@ fn backfill_unanswered(history: &mut Vec<Value>, calls: &[PreparedCall], note: &
 /// 工具执行失败时回填给模型的 tool 消息文本。
 fn failure_note(msg: &str) -> String {
     format!("{}: {msg}", t("执行失败", "Execution failed"))
+}
+
+/// 摘要不可用时的模型可见回退说明：改用确定性规则摘录，原文仍可回查。
+fn summary_fallback_warning() -> String {
+    t(
+        "摘要不可用，正在使用规则摘录的上下文。原始证据仍可通过 recall_context 回查。",
+        "Summary unavailable; rule-extracted context is being used. \
+         Original evidence remains available through recall_context.",
+    )
+    .to_string()
+}
+
+/// 归档等待被中断时的说明：命令已真实执行完成，按归档失败口径
+/// 把完整捕获留在 canonical 历史，不丢已产生的输出证据。
+fn archive_interrupted_note() -> String {
+    t(
+        "归档已中断；完整捕获已保留在会话历史中。",
+        "Archiving was interrupted; the complete capture is retained \
+         in conversation history.",
+    )
+    .to_string()
 }
 
 /// 等待 `fut` 完成；期间收到 Cancel 或控制通道关闭时返回 None。
@@ -332,8 +360,20 @@ impl RunCtx<'_> {
             ),
             ToolEvent::Denied { reason } => (ToolState::Denied, None, reason, None),
             ToolEvent::Running => (ToolState::Running, None, None, None),
-            ToolEvent::Result(output) => (ToolState::Result, Some(output), None, None),
-            ToolEvent::Error(output) => (ToolState::Error, Some(output), None, None),
+            // 事件 output 统一走展示投影：归档失败时写回历史的是完整捕获，
+            // 但 IPC/前端气泡必须始终有界（canonical 不丢，界面不炸）
+            ToolEvent::Result(output) => (
+                ToolState::Result,
+                Some(archive::display_text(&output)),
+                None,
+                None,
+            ),
+            ToolEvent::Error(output) => (
+                ToolState::Error,
+                Some(archive::display_text(&output)),
+                None,
+                None,
+            ),
         };
         let _ = self.app.emit(
             "ai:tool",
@@ -397,16 +437,29 @@ pub(super) struct AgentRun<'a> {
     rx: mpsc::Receiver<Control>,
     /// 本轮历史副本（含中断回填），结束时经租约校验代数后写回
     history: Vec<Value>,
+    /// 本轮压缩记忆工作副本（启动时克隆自会话；摘要尝试只改副本，
+    /// 结束时与历史一起经租约原子写回，中途取消不产生半提交状态）
+    memory: ContextMemory,
 }
 
 impl<'a> AgentRun<'a> {
-    pub(super) fn new(ctx: RunCtx<'a>, rx: mpsc::Receiver<Control>, history: Vec<Value>) -> Self {
-        AgentRun { ctx, rx, history }
+    pub(super) fn new(
+        ctx: RunCtx<'a>,
+        rx: mpsc::Receiver<Control>,
+        history: Vec<Value>,
+        memory: ContextMemory,
+    ) -> Self {
+        AgentRun {
+            ctx,
+            rx,
+            history,
+            memory,
+        }
     }
 
-    /// 取出本轮累积的历史副本（含未提交的中断回填），供调用方写回
-    pub(super) fn into_history(self) -> Vec<Value> {
-        self.history
+    /// 取出本轮累积的历史副本与压缩记忆（含未提交的中断回填），供调用方写回
+    pub(super) fn into_state(self) -> (Vec<Value>, ContextMemory) {
+        (self.history, self.memory)
     }
 
     /// 主循环：每轮一次模型请求 + 依次执行其工具调用，直到模型给出最终回复、
@@ -464,9 +517,16 @@ impl<'a> AgentRun<'a> {
                 } else {
                     self.handle_tool_call(call).await
                 };
-                if let CallFlow::Interrupted { note } = flow {
-                    backfill_unanswered(&mut self.history, &calls[i..], note);
-                    return Ok(RunOutcome::Cancelled);
+                match flow {
+                    CallFlow::Interrupted { note } => {
+                        backfill_unanswered(&mut self.history, &calls[i..], note);
+                        return Ok(RunOutcome::Cancelled);
+                    }
+                    CallFlow::InterruptedAfter { note } => {
+                        backfill_unanswered(&mut self.history, &calls[i + 1..], note);
+                        return Ok(RunOutcome::Cancelled);
+                    }
+                    CallFlow::Next => {}
                 }
             }
         }
@@ -522,6 +582,31 @@ impl<'a> AgentRun<'a> {
         // 首次尝试携带 stream_options.include_usage；平台拒绝时去掉并记住，后续请求不再带。
         let mut include_usage = !ctx.agents.usage_unsupported(ctx.model);
         let mut usage_param_retried = false;
+
+        // 视图请求压缩新前缀时，本轮至多一次辅助摘要：成功安装检查点，
+        // 失败/被跳过则记录 attempted + warning 走确定性摘录回退；
+        // 已折叠边界总是推进到请求的切点（identical 前缀不会重复请求）。
+        let factor = ctx.agents.calibration_factor(ctx.model);
+        let requested = build_context_view(
+            &self.history,
+            plan_block.as_deref(),
+            &tools,
+            ctx.context_window,
+            ctx.session_id,
+            factor,
+            Some(&self.memory),
+        )?
+        .compact_through;
+        if let Some(cutoff) = requested {
+            if memory::needs_summary(&self.memory, Some(cutoff))
+                && self.attempt_summary(cutoff).await.is_none()
+            {
+                // 等待摘要期间被中断：不再发正常模型请求
+                return Ok(None);
+            }
+            self.memory.compacted_through = self.memory.compacted_through.max(cutoff);
+        }
+
         // 发送前构建视图；平台报上下文超限时按 50% 窗口重试一次。
         let (resp, mut usage, raw_estimate) = loop {
             // 校准系数同时参与预算判定与展示折算，保证「圆环显示」与「压缩时机」一致
@@ -533,6 +618,7 @@ impl<'a> AgentRun<'a> {
                 effective_window,
                 ctx.session_id,
                 factor,
+                Some(&self.memory),
             )?;
             let mut usage = view.usage;
             let raw_estimate = usage.used_tokens;
@@ -585,6 +671,9 @@ impl<'a> AgentRun<'a> {
             }
             break (resp, usage, raw_estimate);
         };
+        // 本轮实际发送的压缩前缀可能深于摘要请求的切点（应急削减/降窗重试）：
+        // 折叠边界与「真正发送的视图」保持一致，不触发新的摘要请求。
+        self.memory.compacted_through = self.memory.compacted_through.max(usage.compressed_rounds);
 
         let Some(reply) = self.read_stream(resp).await? else {
             return Ok(None);
@@ -708,6 +797,37 @@ impl<'a> AgentRun<'a> {
             return CallFlow::Next;
         }
 
+        // 上下文回查工具：只读本机历史/归档，不审批、不触达远程主机，
+        // 必须在审批判定与 execute_tool 之前拦截（execute_tool 对它直接报错）。
+        // 本地 IO 走了 spawn_blocking，但等待本身也要响应取消——磁盘/杀毒
+        // 扫描卡住时不能让「停止」失效、让旧 run 一直占着租约。
+        if tool == Tool::RecallContext {
+            match until_cancelled(
+                &mut self.rx,
+                archive::recall_context(&self.history, &ctx.lease.archive, args),
+            )
+            .await
+            {
+                Some(Ok(text)) => {
+                    ctx.emit_tool(call, args, ToolEvent::Result(text.clone()));
+                    push_tool_message(&mut self.history, &call.id, &text);
+                }
+                Some(Err(err)) => {
+                    ctx.emit_tool(call, args, ToolEvent::Error(err.clone()));
+                    push_tool_message(&mut self.history, &call.id, &failure_note(&err));
+                }
+                None => {
+                    return CallFlow::Interrupted {
+                        note: t(
+                            "用户已中断，该工具未执行",
+                            "Interrupted by the user; this tool was not executed",
+                        ),
+                    };
+                }
+            }
+            return CallFlow::Next;
+        }
+
         // 判定是否需要审批，审批原因随 request 事件下发给审批卡片展示
         let approval = match approval_reason(ctx.permission_mode, tool, args, ctx.danger_rules) {
             None => "auto",
@@ -768,16 +888,54 @@ impl<'a> AgentRun<'a> {
         };
         match result {
             Ok(output) => {
+                // 大输出先归档再回填：历史里只存有界预览 + output:<id> 引用；
+                // 归档失败时完整捕获留在历史（不丢数据），附一句说明。
+                // 事件经 emit_tool 的展示投影压到有界，多 MB 原文不进 IPC；
+                // 审计与历史同口径保留 stored 原文。
+                // 归档等待经 until_cancelled：磁盘/杀毒卡住时「停止」立即生效，
+                // 旧 run 不会为等一个 spawn_blocking 把租约一直占住。
+                let stored = match until_cancelled(
+                    &mut self.rx,
+                    archive::store_tool_output(&ctx.lease.archive, output.clone()),
+                )
+                .await
+                {
+                    Some(stored) => stored,
+                    None => {
+                        // 命令已在远端真实执行完毕，只是归档等待被中断：
+                        // 按归档失败口径把完整捕获留在历史、照常审计并下发
+                        // 结果事件，本调用自行回填后由调用方为剩余调用回填。
+                        // 后台 spawn_blocking 可能仍写完文件——它属于旧会话
+                        // 归档实例，随其生命周期清理，引用进不了新会话。
+                        let stored = format!("{output}\n{}", archive_interrupted_note());
+                        ctx.audit(
+                            tool.as_str(),
+                            args,
+                            approval,
+                            "executed",
+                            Some(stored.clone()),
+                            started,
+                        );
+                        ctx.emit_tool(call, args, ToolEvent::Result(stored.clone()));
+                        push_tool_message(&mut self.history, &call.id, &stored);
+                        return CallFlow::InterruptedAfter {
+                            note: t(
+                                "用户已中断，该工具未执行",
+                                "Interrupted by the user; this tool was not executed",
+                            ),
+                        };
+                    }
+                };
                 ctx.audit(
                     tool.as_str(),
                     args,
                     approval,
                     "executed",
-                    Some(output.clone()),
+                    Some(stored.clone()),
                     started,
                 );
-                ctx.emit_tool(call, args, ToolEvent::Result(output.clone()));
-                push_tool_message(&mut self.history, &call.id, &output);
+                ctx.emit_tool(call, args, ToolEvent::Result(stored.clone()));
+                push_tool_message(&mut self.history, &call.id, &stored);
             }
             Err(err) => {
                 ctx.audit(
@@ -793,6 +951,63 @@ impl<'a> AgentRun<'a> {
             }
         }
         CallFlow::Next
+    }
+
+    /// 为压缩前缀尝试一次辅助摘要：源构建按预算只取能放得下的最长前缀
+    /// [start, end)，成功安装的检查点只覆盖到 end——积压前缀跨轮分批推进；
+    /// 一轮都放不下或请求失败时记录 attempted + warning（视图改用确定性
+    /// 摘录回退）。返回值 None 表示等待期间被中断——上层直接终止本轮，
+    /// 不再发正常模型请求。
+    async fn attempt_summary(&mut self, cutoff: usize) -> Option<()> {
+        let ctx = self.ctx;
+        let factor = ctx.agents.calibration_factor(ctx.model);
+        let Some(source) = memory::build_summary_source(
+            &self.history,
+            self.memory.checkpoint.as_ref(),
+            cutoff,
+            ctx.context_window,
+            factor,
+        ) else {
+            // 连一轮源材料都放不进摘要输入预算：跳过 API，明确回退；
+            // 前缀标记为已尝试，之后每轮请求不会重复构造放不下的包络
+            self.memory.attempted_through = self.memory.attempted_through.max(cutoff);
+            self.memory.warning = Some(summary_fallback_warning());
+            return Some(());
+        };
+        let through = source.through_round;
+        let result = until_cancelled(
+            &mut self.rx,
+            memory::request_summary(
+                ctx.client,
+                ctx.url,
+                ctx.api_key,
+                ctx.model,
+                &source,
+                ctx.context_window,
+            ),
+        )
+        .await?;
+        match result {
+            Ok(document) => {
+                self.memory.checkpoint = Some(SummaryCheckpoint {
+                    through_round: through,
+                    document,
+                });
+                self.memory.attempted_through = self.memory.attempted_through.max(through);
+                self.memory.warning = None;
+            }
+            Err(err) => {
+                eprintln!(
+                    "[agent] {}: {err}",
+                    t("上下文摘要请求失败", "Context summary request failed")
+                );
+                // 只标到本次实际尝试的覆盖端点：前缀继续增长时会以
+                // 更大的候选区间重试，而不是整段永久放弃
+                self.memory.attempted_through = self.memory.attempted_through.max(through);
+                self.memory.warning = Some(summary_fallback_warning());
+            }
+        }
+        Some(())
     }
 
     /// 发出审批请求并等待用户决定：超时按拒绝处理，中断时补一条 denied
@@ -969,6 +1184,7 @@ fn is_unsupported_stream_options_error(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn acc(id: &str, name: &str, args: &str) -> ToolCallAcc {
         ToolCallAcc {
@@ -1204,5 +1420,197 @@ mod tests {
             let got = wait_for_control(&mut rx, Duration::from_secs(60), |_| None::<()>).await;
             assert!(matches!(got, Waited::Cancelled));
         });
+    }
+
+    // ---------- 辅助摘要请求的取消 ----------
+
+    fn block_on_all<F: Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(fut)
+    }
+
+    fn one_round_history() -> Vec<Value> {
+        vec![
+            serde_json::json!({"role": "system", "content": "sys"}),
+            serde_json::json!({"role": "user", "content": "任务"}),
+            serde_json::json!({"role": "assistant", "content": "好"}),
+        ]
+    }
+
+    /// until_cancelled 包住整个摘要请求：服务端收到请求但迟迟不回时取消立即
+    /// 返回，不会等到 SUMMARY_TIMEOUT_SECS 超时。回环服务经显式放行信号退出
+    /// 并 join——不留悬挂线程。
+    #[test]
+    fn summary_request_cancelled_while_waiting() {
+        block_on_all(async {
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/chat/completions", server.server_addr());
+            // got：服务端确认收到请求；release：测试放行服务端退出（有界等待）
+            let (got_tx, got_rx) = std::sync::mpsc::channel::<()>();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let handle = std::thread::spawn(move || {
+                let req = server.recv().unwrap();
+                let _ = got_tx.send(());
+                let _ = release_rx.recv_timeout(Duration::from_secs(10));
+                let _ = req.respond(tiny_http::Response::from_string("{}"));
+            });
+            let source =
+                memory::build_summary_source(&one_round_history(), None, 1, 128_000, 1.0).unwrap();
+            let (tx, mut rx) = mpsc::channel(8);
+            let client = reqwest::Client::new();
+            let request = until_cancelled(
+                &mut rx,
+                memory::request_summary(&client, &url, "k", "m", &source, 128_000),
+            );
+            tokio::pin!(request);
+            // 服务端确认收到请求后再取消：测的是「等待响应中」而不是连接失败。
+            // 与 request 并发等待 got 信号（future 必须被轮询才会发请求）——
+            // 服务端在放行前不会响应，request 不可能先完成
+            let got =
+                tokio::task::spawn_blocking(move || got_rx.recv_timeout(Duration::from_secs(5)));
+            tokio::pin!(got);
+            tokio::select! {
+                _ = &mut request => panic!("summary request completed before release"),
+                res = &mut got => {
+                    res.unwrap()
+                        .expect("loopback server must receive the request");
+                }
+            }
+            tx.send(Control::Cancel).await.unwrap();
+            let out = request.await;
+            assert!(out.is_none(), "等待响应期间取消必须立即返回");
+            let _ = release_tx.send(());
+            handle.join().expect("loopback server thread must exit");
+        });
+    }
+
+    /// 响应头已收到、正文只发了一部分就停住：read_bounded_body 必然停在
+    /// body 读取阶段（Content-Length 大于实发字节），此时取消立即返回。
+    /// 回环 socket 用原始 TcpListener：显式发送响应头 + 部分正文，
+    /// 之后等待放行信号退出并 join——不留悬挂线程。
+    #[test]
+    fn summary_body_read_cancelled_mid_stream() {
+        block_on_all(async {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/x", listener.local_addr().unwrap());
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let handle = std::thread::spawn(move || {
+                let (mut sock, _) = listener.accept().unwrap();
+                sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                // 读完请求头（GET 无 body），再写响应头 + 部分正文
+                let mut buf = Vec::new();
+                let mut byte = [0u8; 1];
+                while !buf.ends_with(b"\r\n\r\n") && buf.len() < 8_192 {
+                    if sock.read(&mut byte).is_err() {
+                        break;
+                    }
+                    buf.push(byte[0]);
+                }
+                sock.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+                sock.write_all(&[b'x'; 128]).unwrap();
+                sock.flush().unwrap();
+                let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            });
+            let client = reqwest::Client::new();
+            let resp = client.get(&url).send().await.unwrap();
+            // 响应头已到 + Content-Length 4096 > 实发 128 →
+            // read_bounded_body 必然停在 body 读取阶段
+            assert_eq!(resp.status(), 200);
+            let (tx, mut rx) = mpsc::channel(8);
+            let reading = until_cancelled(&mut rx, memory::read_bounded_body(resp));
+            tokio::pin!(reading);
+            tx.send(Control::Cancel).await.unwrap();
+            let out = reading.await;
+            assert!(out.is_none(), "body 读取期间取消必须立即返回");
+            let _ = release_tx.send(());
+            handle.join().expect("loopback socket thread must exit");
+        });
+    }
+
+    // ---------- 归档 IO 等待的取消 ----------
+
+    /// 归档写入被 IO 闸门挂住：等待本身经 until_cancelled，「停止」立即返回，
+    /// 不会为一个 spawn_blocking 的 JoinHandle 把租约一直占住。
+    /// 闸门放行后后台任务自行收尾，不留悬挂等待。
+    #[test]
+    fn archive_save_wait_is_cancellable() {
+        block_on_all(async {
+            let archive = Arc::new(archive::OutputArchive::default());
+            let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+            archive.install_save_gate_for_test(gate_rx);
+            let (tx, mut rx) = mpsc::channel(8);
+            // 超过预览上限才会走归档路径
+            let output = "o".repeat(crate::agent::context_policy::TOOL_PREVIEW_MAX_CHARS + 1);
+            let waiting = until_cancelled(&mut rx, archive::store_tool_output(&archive, output));
+            tokio::pin!(waiting);
+            tx.send(Control::Cancel).await.unwrap();
+            assert!(waiting.await.is_none(), "归档写入卡住时取消必须立即返回");
+            let _ = gate_tx.send(());
+        });
+    }
+
+    /// 归档回查被 IO 闸门挂住：同样立即响应取消。
+    #[test]
+    fn archive_read_wait_is_cancellable() {
+        block_on_all(async {
+            let archive = Arc::new(archive::OutputArchive::default());
+            let saved = archive.save("x".repeat(100)).await.unwrap();
+            let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+            archive.install_read_gate_for_test(gate_rx);
+            let (tx, mut rx) = mpsc::channel(8);
+            let waiting = until_cancelled(&mut rx, archive.read(&saved.reference, 0, 10));
+            tokio::pin!(waiting);
+            tx.send(Control::Cancel).await.unwrap();
+            assert!(waiting.await.is_none(), "回查读取卡住时取消必须立即返回");
+            let _ = gate_tx.send(());
+        });
+    }
+
+    /// InterruptedAfter 语义：本调用（已执行的归档取消路径）已自行回填，
+    /// 调用方只为其后的调用回填——每个 tool_call 仍然恰好一条结果。
+    #[test]
+    fn interrupted_after_backfills_only_remaining_calls() {
+        let mut history = vec![serde_json::json!({
+            "role": "assistant", "content": "",
+            "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "exec_command", "arguments": "{}"}},
+                {"id": "c2", "type": "function", "function": {"name": "exec_command", "arguments": "{}"}},
+            ],
+        })];
+        let calls = [
+            PreparedCall {
+                id: "c1".to_string(),
+                name: "exec_command".to_string(),
+                raw_args: "{}".to_string(),
+                args: Ok(serde_json::json!({})),
+                tool: Some(Tool::ExecCommand),
+            },
+            PreparedCall {
+                id: "c2".to_string(),
+                name: "exec_command".to_string(),
+                raw_args: "{}".to_string(),
+                args: Ok(serde_json::json!({})),
+                tool: Some(Tool::ExecCommand),
+            },
+        ];
+        // c1 已执行的输出先回填（归档取消路径的口径）
+        push_tool_message(&mut history, "c1", "已执行的完整捕获");
+        backfill_unanswered(&mut history, &calls[1..], "用户已中断，该工具未执行");
+        let tool_msgs: Vec<&serde_json::Value> = history[1..]
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .collect();
+        assert_eq!(tool_msgs.len(), 2, "每个 tool_call 恰好一条结果");
+        assert_eq!(tool_msgs[0]["tool_call_id"], "c1");
+        assert_eq!(tool_msgs[0]["content"], "已执行的完整捕获");
+        assert_eq!(tool_msgs[1]["tool_call_id"], "c2");
+        assert_eq!(tool_msgs[1]["content"], "用户已中断，该工具未执行");
     }
 }

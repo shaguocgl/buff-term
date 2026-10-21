@@ -61,17 +61,41 @@ pub fn extract_error(text: &str, status: reqwest::StatusCode) -> String {
     )
 }
 
-/// 统一格式化命令输出：stderr 为空时用按到达顺序合并的 text（现有行为）；
-/// stderr 有内容时分开标注 stdout / stderr 两段。之后统一 trim +
-/// 超长截断（头 8000 + 尾 4000）+ 超时/退出码标记。
-pub fn format_exec_output(out: &ExecResult) -> String {
-    let mut text = if out.stderr.trim().is_empty() {
+/// 格式化命令输出的正文部分：stderr 为空时用按到达顺序合并的 text（现有行为）；
+/// stderr 有内容时分开标注 stdout / stderr 两段。
+fn exec_output_body(out: &ExecResult) -> String {
+    if out.stderr.trim().is_empty() {
         out.text.trim().to_string()
     } else if out.stdout.trim().is_empty() {
         format!("[stderr]\n{}", out.stderr.trim())
     } else {
         format!("{}\n[stderr]\n{}", out.stdout.trim(), out.stderr.trim())
-    };
+    }
+}
+
+/// 超时 / 非零退出码标记，追加在正文之后。
+fn exec_output_markers(out: &ExecResult) -> String {
+    let mut text = String::new();
+    if out.timed_out {
+        text.push_str(crate::i18n::t(
+            "\n[命令执行超时，输出可能不完整]",
+            "\n[command timed out; output may be incomplete]",
+        ));
+    }
+    if let Some(code) = out.exit_code {
+        if code != 0 {
+            text.push_str(&format!(
+                "\n[{}{code}]",
+                crate::i18n::t("退出码 ", "exit code ")
+            ));
+        }
+    }
+    text
+}
+
+/// 统一格式化命令输出：正文 trim + 超长截断（头 8000 + 尾 4000）+ 超时/退出码标记。
+pub fn format_exec_output(out: &ExecResult) -> String {
+    let mut text = exec_output_body(out);
     const MAX: usize = 12000;
     if text.chars().count() > MAX {
         let head: String = text.chars().take(8000).collect();
@@ -81,15 +105,15 @@ pub fn format_exec_output(out: &ExecResult) -> String {
             crate::i18n::t("输出过长，已截断", "output too long, truncated")
         );
     }
-    if out.timed_out {
-        text.push_str(crate::i18n::t("\n[命令执行超时，输出可能不完整]", "\n[command timed out; output may be incomplete]"));
-    }
-    if let Some(code) = out.exit_code {
-        if code != 0 {
-            text.push_str(&format!("\n[{}{code}]", crate::i18n::t("退出码 ", "exit code ")));
-        }
-    }
+    text.push_str(&exec_output_markers(out));
     text
+}
+
+/// 与 format_exec_output 相同的排版但不截断正文：供 Agent 归档完整捕获后
+/// 再自行生成有界预览。注意输出本身仍受 SSH 层 8MB 累积上限约束，
+/// 超出上限的部分在采集时已被丢弃、无法经此恢复。
+pub fn format_exec_output_full(out: &ExecResult) -> String {
+    format!("{}{}", exec_output_body(out), exec_output_markers(out))
 }
 
 /// 生成随机 token（两个 UUID 拼成 64 位 hex）。
@@ -167,6 +191,75 @@ mod tests {
     #[test]
     fn truncate_output_noop_when_short() {
         assert_eq!(truncate_output("short", 80), "short");
+    }
+
+    fn exec(text: &str, stderr: &str) -> ExecResult {
+        ExecResult {
+            text: text.to_string(),
+            stdout: text.to_string(),
+            stderr: stderr.to_string(),
+            exit_code: Some(0),
+            timed_out: false,
+        }
+    }
+
+    /// 传统行为保持：正文超 12000 字符按「头 8000 + 尾 4000」截断并带截断标记；
+    /// stderr 有内容时拆分 stdout/stderr 两段；超时/退出码标记追加在尾部。
+    #[test]
+    fn format_exec_output_keeps_legacy_bounds() {
+        let out = exec(&"A".repeat(20_000), "");
+        let text = format_exec_output(&out);
+        assert!(
+            text.chars().count() < 13_000,
+            "截断后应约 12000+标记: {}",
+            text.chars().count()
+        );
+        assert!(
+            text.contains("已截断") || text.contains("truncated"),
+            "{text}"
+        );
+        assert!(text.starts_with("AAAA"));
+        // 头 8000 + 尾 4000
+        assert!(text.chars().take(8_000).all(|c| c == 'A'));
+        let with_err = exec("ok", "warn");
+        let text = format_exec_output(&with_err);
+        assert!(text.contains("[stderr]") && text.contains("warn"), "{text}");
+        let mut timed = exec("ok", "");
+        timed.timed_out = true;
+        timed.exit_code = Some(137);
+        let text = format_exec_output(&timed);
+        assert!(
+            text.contains("超时") || text.contains("timed out"),
+            "{text}"
+        );
+        assert!(text.contains("137"), "{text}");
+    }
+
+    /// 完整版排版与截断版相同（stderr 拆分、超时/退出码标记），但正文一刀不截。
+    #[test]
+    fn format_exec_output_full_never_truncates_body() {
+        let body = format!(
+            "{}\nMIDDLE-MARK\n{}",
+            "H".repeat(10_000),
+            "T".repeat(10_000)
+        );
+        let out = exec(&body, "");
+        let text = format_exec_output_full(&out);
+        assert_eq!(text.trim(), body, "完整版必须逐字保留正文");
+        assert!(!text.contains("已截断"), "完整版不应有截断标记");
+        let with_err = exec(&body, "warn");
+        let text = format_exec_output_full(&with_err);
+        assert!(
+            text.contains("[stderr]") && text.contains("MIDDLE-MARK"),
+            "{text}"
+        );
+        let mut timed = exec("ok", "");
+        timed.timed_out = true;
+        let text = format_exec_output_full(&timed);
+        assert!(
+            text.contains("超时") || text.contains("timed out"),
+            "{text}"
+        );
     }
 
     #[test]

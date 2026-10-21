@@ -349,6 +349,10 @@ export const en: Dict = {
   'sftp.newFolderLabel': 'Folder name',
   'sftp.newNameLabel': 'New name',
   'sftp.newFolderPlaceholder': 'e.g. logs',
+  'sftp.rootDir': 'root',
+  'sftp.editPath': 'Edit path',
+  'sftp.expand': 'Expand',
+  'sftp.collapse': 'Collapse',
 
   // ---------- Built-in file editor ----------
   'editor.sensitive': 'Sensitive',

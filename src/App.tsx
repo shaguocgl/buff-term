@@ -1519,6 +1519,13 @@ function App() {
                   key={`sftp-${host.id}`}
                   host={host}
                   hidden={!sftpOpen || sftpPanelHost?.id !== host.id}
+                  terminalSessionId={
+                    activeTab?.kind === 'terminal' && activeTab.host.id === host.id
+                      ? activeTab.sessionId
+                      : panelTab?.host.id === host.id
+                        ? panelTab.sessionId
+                        : null
+                  }
                   onOpenFile={(path) => handleOpenFile(host, path)}
                   onClose={closePanel}
                 />
