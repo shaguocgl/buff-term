@@ -90,6 +90,7 @@ pub fn run() {
             app.manage(mcp::McpServiceManager::default());
             app.manage(mcp::ApprovalRegistry::default());
             app.manage(sftp::SftpTransferRegistry::default());
+            app.manage(sftp::SftpSessionManager::default());
             // 若上次退出前开启了 MCP 服务，启动时自动恢复
             let mcp_enabled = app
                 .state::<Arc<Db>>()

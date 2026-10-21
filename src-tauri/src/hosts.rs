@@ -169,10 +169,12 @@ pub fn update_host(db: State<'_, Arc<Db>>, host: Host) -> Result<(), String> {
 pub fn delete_host(
     db: State<'_, Arc<Db>>,
     agents: State<'_, crate::agent::AgentManager>,
+    sftp_sessions: State<'_, crate::sftp::SftpSessionManager>,
     id: String,
 ) -> Result<(), String> {
     // 先取消该主机上正在运行的 agent 循环并作废其写回、清空历史与台账（借用 id），再删除主机（move id）
     agents.reset_host(&id);
+    sftp_sessions.drop_host(&id);
     delete(&db, id)?;
     Ok(())
 }

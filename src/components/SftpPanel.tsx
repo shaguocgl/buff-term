@@ -71,6 +71,11 @@ interface DirNode {
 /** 批量上传并发上限：避免一次性打开过多 SFTP 通道把连接打满 */
 const UPLOAD_CONCURRENCY = 3;
 
+/** 目录加载成功后预取的直接子目录上限（常见下一次点击就近乎零等待） */
+const PREFETCH_LIMIT = 12;
+/** 预取全局并发：深层 reveal 会链式触发多次预取，按全局限流避免瞬时打满 */
+const PREFETCH_CONCURRENCY = 3;
+
 /** 覆盖确认弹窗里最多列出的冲突文件名 */
 const CONFLICT_PREVIEW = 8;
 
@@ -195,9 +200,11 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
     };
   }, []);
 
-  /** 加载某个目录的子项；per-path 序号丢弃同一目录的过期响应 */
+  /** 加载某个目录的子项；per-path 序号丢弃同一目录的过期响应。
+   *  prefetch=true（用户触发的加载）成功后，后台预取直接子目录——
+   *  下一次点击展开通常直接命中缓存，近乎零等待 */
   const loadDir = useCallback(
-    async (path: string) => {
+    async (path: string, prefetch = false) => {
       const seq = (loadSeqRef.current.get(path) ?? 0) + 1;
       loadSeqRef.current.set(path, seq);
       setNodes((prev) => ({
@@ -211,6 +218,7 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
           ...prev,
           [path]: { entries: list, loading: false },
         }));
+        if (prefetch) prefetchDirs(path, list);
       } catch (e) {
         if (loadSeqRef.current.get(path) !== seq) return;
         setNodes((prev) => ({
@@ -222,8 +230,43 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
     [host.id],
   );
 
+  /** 后台预取队列：全局最多 PREFETCH_CONCURRENCY 个在途请求；
+   *  入队路径去重，已缓存/加载中的跳过；预取本身不再触发下级预取 */
+  const prefetchQueueRef = useRef<string[]>([]);
+  const prefetchRunningRef = useRef(0);
+  const drainPrefetch = useCallback(() => {
+    while (
+      prefetchRunningRef.current < PREFETCH_CONCURRENCY &&
+      prefetchQueueRef.current.length > 0
+    ) {
+      const p = prefetchQueueRef.current.shift()!;
+      const n = nodesRef.current[p];
+      if (n && (n.entries !== undefined || n.loading)) continue;
+      prefetchRunningRef.current += 1;
+      void loadDir(p).finally(() => {
+        prefetchRunningRef.current -= 1;
+        drainPrefetch();
+      });
+    }
+  }, [loadDir]);
+
+  const prefetchDirs = useCallback(
+    (parent: string, entries: SftpEntry[]) => {
+      const queued = new Set(prefetchQueueRef.current);
+      const dirs = entries
+        .filter((e) => e.is_dir)
+        .slice(0, PREFETCH_LIMIT)
+        .map((e) => joinPath(parent, e.name))
+        .filter((p) => !queued.has(p));
+      if (dirs.length === 0) return;
+      prefetchQueueRef.current.push(...dirs);
+      drainPrefetch();
+    },
+    [drainPrefetch],
+  );
+
   useEffect(() => {
-    void loadDir('/');
+    void loadDir('/', true);
   }, [loadDir]);
 
   const nodesRef = useRef(nodes);
@@ -231,12 +274,12 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
     nodesRef.current = nodes;
   }, [nodes]);
 
-  /** 未加载过才请求：展开/定位路径上的祖先目录复用缓存 */
+  /** 未加载过才请求：展开/定位路径上的祖先目录复用缓存（属用户触发，带预取） */
   const ensureLoaded = useCallback(
     (path: string) => {
       const node = nodesRef.current[path];
       if (!node || (node.entries === undefined && !node.loading)) {
-        void loadDir(path);
+        void loadDir(path, true);
       }
     },
     [loadDir],
@@ -322,6 +365,10 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
 
   /** 操作后清理某目录及其子树的缓存/展开态（删除/重命名目录时用） */
   const purgeTree = useCallback((path: string) => {
+    // 预取队列里已删除/已改名的子树路径一并丢弃，避免加载出不存在的错误节点
+    prefetchQueueRef.current = prefetchQueueRef.current.filter(
+      (p) => p !== path && !p.startsWith(`${path}/`),
+    );
     setNodes((prev) => {
       const next = { ...prev };
       for (const key of Object.keys(next)) {
@@ -347,8 +394,8 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
 
   /** 刷新：重拉根目录与所有展开中的目录（折叠目录的缓存随之废弃） */
   const refresh = useCallback(() => {
-    for (const p of expanded) void loadDir(p);
-    if (!expanded.has('/')) void loadDir('/');
+    for (const p of expanded) void loadDir(p, true);
+    if (!expanded.has('/')) void loadDir('/', true);
   }, [expanded, loadDir]);
 
   const run = async (
@@ -430,7 +477,7 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
         },
       }));
     });
-    if (cwdRef.current === target) void loadDir(target);
+    if (cwdRef.current === target) void loadDir(target, true);
   };
 
   const cancelTransfer = async (id: string) => {
@@ -488,7 +535,7 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
       () => sftpDelete(host.id, remote),
       () => {
         if (entry.is_dir) purgeTree(remote);
-        void loadDir(dir);
+        void loadDir(dir, true);
       },
     );
   };
@@ -501,7 +548,7 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
       void run(
         p.dir,
         () => sftpMkdir(host.id, joinPath(p.dir, value)),
-        () => loadDir(p.dir),
+        () => loadDir(p.dir, true),
       );
     } else if (p.kind === 'rename' && value !== p.entry.name) {
       const from = joinPath(p.dir, p.entry.name);
@@ -514,7 +561,7 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
             purgeTree(from);
             purgeTree(to);
           }
-          void loadDir(p.dir);
+          void loadDir(p.dir, true);
         },
       );
     }

@@ -64,26 +64,24 @@ jobs:
           releaseBody: |
             ## 升级内容
 
-            ### AI Agent 上下文管理
+            ### SFTP 文件浏览提速
 
-            - **按预算触发压缩**：上下文预算充足时保留完整对话，接近上限才压缩较早轮次——不再固定只发最近 6 轮；同一条任务内的多次工具往返也能压缩。
-            - **结构化摘要检查点**：较早历史压缩为带轮次引用的结构化摘要（目标、约束、事实、执行记录、未解决问题），摘要服务不可用时回退规则摘录；积压前缀分批追上，不会永久卡在「放不下」。
-            - **长输出本地归档 + 按需回查**：超长命令输出脱敏后存入会话级私有临时目录，对话中只留折叠重复的预览；模型可通过新工具 recall_context 分页回查原文，无需重新执行命令。
-            - **归档生命周期兜底**：异常退出残留的归档在下次启动自动回收（存活锁识别仍在使用的目录），正常退出显式清理，单会话归档设有容量上限。
-            - **停止/清空响应更及时**：归档写入与原文回查等待现在响应取消，不再卡住会话租约；中断时已完成工具调用的结果仍正确写回历史。
+            - **持久 SFTP 浏览会话**：每个主机复用一条 SFTP 会话处理目录浏览类操作（列表/删除/新建/重命名/读写小文件），不再每次重建 channel 与子系统握手——点击目录的等待从约 4 个网络往返降为约 1 个。
+            - **目录预取**：展开一个目录后，后台限流预取直接子目录（上限 12 个、全局并发 3）——下一次点击子目录通常直接命中缓存，零网络等待。
+            - **符号链接并发解析**：目录内符号链接的目标类型判定由串行改为并发，链接密集目录（如 /usr/bin）加载明显加快。
 
-            ### 文件侧边栏改版
+            ### SFTP 可靠性
 
-            - **IDE 风格目录树**：目录行前置 ▸/▾ 展开图标，点击目录选中并展开，折叠目录不重复请求远端；目录懒加载，刷新只重拉展开中的目录。
-            - **打开即定位终端目录**：新增终端工作目录跟踪（识别 cd / pushd / popd / 子 shell 进出），关闭再打开侧边栏时自动跳到当前终端所在路径。
-            - **上传目标一目了然**：顶部显示当前主机名与 user@host:port，下方面包屑实时显示选中目录（即上传目标），可点击跳转或切换为路径输入。
-            - **选中态高亮**：当前选中目录行高亮显示，避免误传到错误目录。
+            - **会话与连接同寿命**：浏览会话持有 SSH 连接租约，连接池不再把「正在浏览」的连接误判为空闲而回收；失效时仅清除对应的旧会话，不影响并发重建的新会话。
+            - **失败自动重建**：操作失败后先探活区分「业务错误」与「会话已断」——业务错误（如文件不存在）原样返回不重试；会话断开则自动重建并重试一次。
+            - **上传预检修复**：文件存在性检查现在区分「确实不存在」与「查询失败」，连接异常时不再误判为不存在而跳过覆盖确认。
+            - **传输与浏览互不影响**：上传/下载仍走独立通道，大文件传输期间目录树保持响应。
+            - **删除主机即清会话**：删除主机时同步释放其缓存的浏览会话与连接租约。
 
             ### English highlights
 
-            - **Budget-triggered context compression**: full history is kept while budget allows; older rounds are compressed into structured, citation-bearing checkpoints only near the limit, with batched catch-up and a deterministic fallback.
-            - **Long-output archiving + recall**: oversized command output is sanitized and archived to a private per-session directory; a new recall_context tool pages through originals on demand. Stale archives are swept at startup, cleaned on exit, and capped in size; archive waits now honor cancel/reset.
-            - **File sidebar redesign**: IDE-style lazy-loaded tree with chevron toggles, selected-directory highlighting, a host + path header showing the exact upload target, and automatic jump to the terminal's current directory when reopened (via new remote-cwd tracking).
+            - **Faster SFTP browsing**: one persistent SFTP session per host serves all browse operations (list/delete/mkdir/rename/small reads+writes), removing per-click channel and subsystem handshakes (~4 RTTs → ~1); after expanding a directory, its immediate children are prefetched in the background (bounded queue, global concurrency 3) so the next click is often instant; symlink targets are now resolved concurrently.
+            - **More reliable SFTP sessions**: the cached session holds the SSH connection lease so the pool never reaps a connection mid-browse; failures are probed to distinguish business errors from dead sessions and rebuild once automatically; existence checks no longer mask query failures; transfers still run on independent channels; deleting a host releases its session.
 
             ## 安装包
 

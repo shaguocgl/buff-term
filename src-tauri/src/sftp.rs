@@ -117,13 +117,23 @@ pub fn sftp_cancel_transfer(
 pub async fn sftp_exists(
     db: State<'_, Arc<Db>>,
     russh: State<'_, RusshManager>,
+    manager: State<'_, SftpSessionManager>,
     host_id: String,
     path: String,
 ) -> Result<bool, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    with_sftp(&russh, &host, Duration::from_secs(20), |sftp| {
+    with_browse_sftp(&manager, &russh, &host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
-        Box::pin(async move { Ok(sftp.metadata(path.as_str()).await.is_ok()) })
+        Box::pin(async move {
+            match sftp.metadata(path.as_str()).await {
+                Ok(_) => Ok(true),
+                // 文件不存在是服务端 Status 响应——业务结果，返回 false
+                Err(russh_sftp::client::error::Error::Status(_)) => Ok(false),
+                // 会话级错误（closed/IO/timeout）不能吞成 false：
+                // 否则上传预检把「查不到」当成「不存在」，跳过覆盖确认
+                Err(e) => Err(format!("{}: {e}", crate::i18n::t("检查远端路径失败", "Failed to check the remote path"))),
+            }
+        })
     })
     .await
 }
@@ -198,6 +208,178 @@ where
     Ok(transferred)
 }
 
+/// 在已有 SSH 连接上建立一条 SFTP 会话：channel + subsystem + INIT 握手
+/// （共约 3 个 RTT，是每次临时会话的主要开销）。
+async fn open_sftp(
+    handle: &russh::client::Handle<crate::russh::ClientHandler>,
+) -> Result<SftpSession, String> {
+    let channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("打开 SFTP 通道失败", "Failed to open the SFTP channel")))?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("启动 SFTP 子系统失败", "Failed to start the SFTP subsystem")))?;
+    SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("初始化 SFTP 失败", "Failed to initialize SFTP")))
+}
+
+/// 浏览类短操作专用的持久 SFTP 会话池：每主机保留一条 SftpSession，
+/// 免去每次列表/stat 都要新开 channel + 启动 subsystem + INIT 握手的
+/// ~3 个 RTT——这是文件面板点击目录「响应一段时间」的最大来源。
+/// russh-sftp 的 &self API 内部按 request-id 多路复用，单会话即可并发
+/// 处理 list/stat 等短请求；文件传输仍走独立 channel（with_sftp），
+/// 保证大文件传输期间目录浏览依旧响应（与 electerm / Tabby 一致：
+/// 持久 SFTP session 专供浏览操作）。
+/// 底层 SSH 连接被池清理/断开后，会话内操作即报会话级错误——
+/// 由 with_browse_sftp 探测活性、失效重建。
+/// 浏览会话槽里的存活会话：持有连接租约——SFTP 会话活着，底层 SSH 连接
+/// 就不能被连接池淘汰（淘汰判定看 Arc::strong_count>1 与 channel permit，
+/// 只缓存 SftpSession 不持租约的话连接会被误判为空闲而关闭）。
+/// 会话被 invalidate/drop_host 移除时租约一并释放，连接恢复空闲淘汰语义。
+struct BrowseSession {
+    sftp: Arc<SftpSession>,
+    _lease: crate::russh::ConnLease,
+}
+
+/// 浏览会话槽：槽内最多一条可复用会话；tokio Mutex 把同主机建连串行化
+type SessionSlot = Arc<tokio::sync::Mutex<Option<BrowseSession>>>;
+
+#[derive(Default)]
+pub struct SftpSessionManager {
+    /// host_id → 会话槽
+    sessions: Mutex<HashMap<String, SessionSlot>>,
+}
+
+impl SftpSessionManager {
+    fn slot(&self, host_id: &str) -> SessionSlot {
+        self.sessions
+            .lock()
+            .unwrap()
+            .entry(host_id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// 取可复用会话：槽位为空则建立（通道/子系统失败清理旧连接重试一次，
+    /// 与 with_sftp 的建立策略一致）
+    async fn get_or_create(
+        &self,
+        russh: &RusshManager,
+        host: &Host,
+        timeout: Duration,
+    ) -> Result<Arc<SftpSession>, String> {
+        let slot = self.slot(&host.id);
+        let mut guard = slot.lock().await;
+        if let Some(entry) = guard.as_ref() {
+            return Ok(entry.sftp.clone());
+        }
+        for attempt in 0..2 {
+            let lease = russh.acquire(host).await?;
+            match tokio::time::timeout(timeout, open_sftp(&lease.handle)).await {
+                Ok(Ok(s)) => {
+                    let s = Arc::new(s);
+                    // 租约随会话存入槽位：SFTP 会话存活期间连接不可被淘汰
+                    *guard = Some(BrowseSession {
+                        sftp: s.clone(),
+                        _lease: lease,
+                    });
+                    return Ok(s);
+                }
+                Ok(Err(e)) => {
+                    russh.invalidate(&host.id, &lease.handle);
+                    if attempt == 0 {
+                        continue;
+                    }
+                    return Err(e);
+                }
+                Err(_) => {
+                    russh.invalidate(&host.id, &lease.handle);
+                    if attempt == 0 {
+                        continue;
+                    }
+                    return Err(crate::i18n::t("操作超时", "Operation timed out").to_string());
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    /// 会话失效：仅当槽位里仍是同一条会话才清（并发重建的新会话不受影响）。
+    /// try_lock 失败说明正在建连——新会话建立后即健康，无需处理
+    fn invalidate(&self, host_id: &str, session: &Arc<SftpSession>) {
+        let slot = self.sessions.lock().unwrap().get(host_id).cloned();
+        let Some(slot) = slot else { return };
+        let Ok(mut guard) = slot.try_lock() else { return };
+        if guard
+            .as_ref()
+            .is_some_and(|entry| Arc::ptr_eq(&entry.sftp, session))
+        {
+            *guard = None;
+        }
+    }
+
+    /// 主机删除/连接变更时整体作废
+    pub fn drop_host(&self, host_id: &str) {
+        self.sessions.lock().unwrap().remove(host_id);
+    }
+}
+
+/// 操作失败后探测会话活性：收到服务端任意响应（含 Status 业务错误，
+/// 如文件不存在）即视为会话健康；send 失败 / 超时 / 连接已关才算死。
+/// 探测目标用 "."（用户家目录 lstat，恒存在）
+async fn session_alive(sftp: &SftpSession) -> bool {
+    matches!(
+        tokio::time::timeout(Duration::from_secs(5), sftp.symlink_metadata(".")).await,
+        Ok(Ok(_)) | Ok(Err(russh_sftp::client::error::Error::Status(_)))
+    )
+}
+
+/// 浏览类操作入口：复用每主机的持久 SFTP 会话执行闭包。
+/// 业务错误（服务端 Status 响应）原样返回；会话死亡（探测无响应）或
+/// tokio 超时时作废会话并重建重试一次——重试后仍失败才报给前端。
+/// 与 with_sftp 相同的策略：业务级错误不重试，避免重复副作用。
+async fn with_browse_sftp<F, T>(
+    manager: &SftpSessionManager,
+    russh: &RusshManager,
+    host: &Host,
+    timeout: Duration,
+    f: F,
+) -> Result<T, String>
+where
+    F: for<'a> Fn(&'a SftpSession) -> Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>,
+{
+    for attempt in 0..2 {
+        let sftp = manager.get_or_create(russh, host, timeout).await?;
+        let result = tokio::time::timeout(timeout, f(&sftp)).await;
+        russh.touch(&host.id);
+        match result {
+            Ok(Ok(v)) => return Ok(v),
+            Ok(Err(msg)) => {
+                if session_alive(&sftp).await {
+                    // 会话健康：服务端明确拒绝（业务错误），不重试
+                    return Err(msg);
+                }
+                manager.invalidate(&host.id, &sftp);
+                if attempt == 0 {
+                    continue;
+                }
+                return Err(msg);
+            }
+            Err(_) => {
+                manager.invalidate(&host.id, &sftp);
+                if attempt == 0 {
+                    continue;
+                }
+                return Err(crate::i18n::t("操作超时", "Operation timed out").to_string());
+            }
+        }
+    }
+    unreachable!()
+}
+
 /// 通过 RusshManager 连接池执行 SFTP 操作：复用已有 SSH 连接，避免每次操作都重新
 /// TCP 握手 + 认证。通道打开 / SFTP 初始化失败时清理旧连接并重连重试一次
 /// （与 exec 的重连策略一致）；SFTP 操作本身的错误（文件不存在等）不重试。
@@ -215,22 +397,7 @@ where
         let lease = russh.acquire(host).await?;
 
         // 阶段一：打开通道 + 启动 SFTP 子系统（连接级操作，失败可重连重试）
-        let sftp_setup = async {
-            let channel = lease
-                .handle
-                .channel_open_session()
-                .await
-                .map_err(|e| format!("{}: {e}", crate::i18n::t("打开 SFTP 通道失败", "Failed to open the SFTP channel")))?;
-            channel
-                .request_subsystem(true, "sftp")
-                .await
-                .map_err(|e| format!("{}: {e}", crate::i18n::t("启动 SFTP 子系统失败", "Failed to start the SFTP subsystem")))?;
-            SftpSession::new(channel.into_stream())
-                .await
-                .map_err(|e| format!("{}: {e}", crate::i18n::t("初始化 SFTP 失败", "Failed to initialize SFTP")))
-        };
-
-        let sftp = match tokio::time::timeout(timeout, sftp_setup).await {
+        let sftp = match tokio::time::timeout(timeout, open_sftp(&lease.handle)).await {
             Ok(Ok(session)) => session,
             Ok(Err(e)) => {
                 // 通道/子系统初始化失败：连接可能已失效，清理后重连重试
@@ -272,6 +439,8 @@ where
 
 /// 读取目录为结构化条目：跳过 . / ..；符号链接用 stat（follow）解析目标
 /// 决定 is_dir / size，悬空链接按非目录处理（size 保留 lstat 值）。
+/// 链接解析并发发出（russh-sftp 按 request-id 在同一 SFTP 会话上多路复用），
+/// 不再逐链接串行等待——/usr/bin 这类链接密集目录省掉 N 个 RTT。
 /// 排序：目录优先，再按名称不区分大小写。
 async fn list_dir(sftp: &SftpSession, path: &str) -> Result<Vec<SftpEntry>, String> {
     let dir = sftp
@@ -279,6 +448,8 @@ async fn list_dir(sftp: &SftpSession, path: &str) -> Result<Vec<SftpEntry>, Stri
         .await
         .map_err(|e| format!("{}: {e}", crate::i18n::t("读取目录失败", "Failed to read the directory")))?;
     let mut entries = Vec::new();
+    // (entries 下标, 链接完整路径)：并发解析任务
+    let mut link_jobs: Vec<(usize, String)> = Vec::new();
     for entry in dir {
         let name = entry.file_name();
         if name == "." || name == ".." {
@@ -286,31 +457,38 @@ async fn list_dir(sftp: &SftpSession, path: &str) -> Result<Vec<SftpEntry>, Stri
         }
         let meta = entry.metadata();
         let is_symlink = meta.file_type().is_symlink();
-        let mut is_dir = meta.file_type().is_dir();
-        let mut size = meta.len();
+        let is_dir = meta.file_type().is_dir();
         if is_symlink {
             let joined = if path.ends_with('/') {
                 format!("{path}{name}")
             } else {
                 format!("{path}/{name}")
             };
-            if let Ok(target) = sftp.metadata(joined.as_str()).await {
-                is_dir = target.file_type().is_dir();
-                size = target.len();
-            } else {
-                is_dir = false;
-            }
+            link_jobs.push((entries.len(), joined));
         }
         entries.push(SftpEntry {
             name,
             is_dir,
             is_symlink,
-            size,
+            size: meta.len(),
             mtime: meta.mtime.unwrap_or(0) as u64,
             perms: format!("{}{}", file_type_char(&meta), permission_string(&meta)),
             user: attr_value(meta.user.as_deref(), meta.uid),
             group: attr_value(meta.group.as_deref(), meta.gid),
         });
+    }
+    // 并发解析所有链接目标；解析失败按悬空链接处理（非目录、保留 lstat size）
+    let targets =
+        futures_util::future::join_all(link_jobs.iter().map(|(_, p)| sftp.metadata(p)))
+            .await;
+    for ((idx, _), result) in link_jobs.iter().zip(targets) {
+        match result {
+            Ok(target) => {
+                entries[*idx].is_dir = target.file_type().is_dir();
+                entries[*idx].size = target.len();
+            }
+            Err(_) => entries[*idx].is_dir = false,
+        }
     }
     entries.sort_by(|a, b| {
         b.is_dir
@@ -324,13 +502,14 @@ async fn list_dir(sftp: &SftpSession, path: &str) -> Result<Vec<SftpEntry>, Stri
 pub async fn sftp_list(
     db: State<'_, Arc<Db>>,
     russh: State<'_, RusshManager>,
+    manager: State<'_, SftpSessionManager>,
     host_id: String,
     path: String,
 ) -> Result<Vec<SftpEntry>, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    with_sftp(&russh, &host, Duration::from_secs(20), |sftp| {
+    with_browse_sftp(&manager, &russh, &host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
-        Box::pin(async move { list_dir(&sftp, &path).await })
+        Box::pin(async move { list_dir(sftp, &path).await })
     })
     .await
 }
@@ -489,11 +668,12 @@ pub async fn sftp_upload(
 pub async fn sftp_delete(
     db: State<'_, Arc<Db>>,
     russh: State<'_, RusshManager>,
+    manager: State<'_, SftpSessionManager>,
     host_id: String,
     path: String,
 ) -> Result<SftpResult, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    with_sftp(&russh, &host, Duration::from_secs(20), |sftp| {
+    with_browse_sftp(&manager, &russh, &host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
         Box::pin(async move {
             // lstat：符号链接按链接本身删除，不跟随到目标目录
@@ -521,11 +701,12 @@ pub async fn sftp_delete(
 pub async fn sftp_mkdir(
     db: State<'_, Arc<Db>>,
     russh: State<'_, RusshManager>,
+    manager: State<'_, SftpSessionManager>,
     host_id: String,
     path: String,
 ) -> Result<SftpResult, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    with_sftp(&russh, &host, Duration::from_secs(20), |sftp| {
+    with_browse_sftp(&manager, &russh, &host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
         Box::pin(async move {
             sftp.create_dir(path)
@@ -542,12 +723,13 @@ pub async fn sftp_mkdir(
 pub async fn sftp_rename(
     db: State<'_, Arc<Db>>,
     russh: State<'_, RusshManager>,
+    manager: State<'_, SftpSessionManager>,
     host_id: String,
     from: String,
     to: String,
 ) -> Result<SftpResult, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    with_sftp(&russh, &host, Duration::from_secs(20), |sftp| {
+    with_browse_sftp(&manager, &russh, &host, Duration::from_secs(20), |sftp| {
         let from = from.clone();
         let to = to.clone();
         Box::pin(async move {
@@ -786,12 +968,13 @@ async fn write_atomic(
 pub async fn sftp_read_file(
     db: State<'_, Arc<Db>>,
     russh: State<'_, RusshManager>,
+    manager: State<'_, SftpSessionManager>,
     host_id: String,
     path: String,
 ) -> Result<SftpFileContent, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
     let sensitive = is_sensitive_remote_path(&path);
-    with_sftp(&russh, &host, Duration::from_secs(20), |sftp| {
+    with_browse_sftp(&manager, &russh, &host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
         Box::pin(async move {
             let real = resolve_link(sftp, &path).await;
@@ -859,6 +1042,7 @@ pub async fn sftp_read_file(
 pub async fn sftp_write_file(
     db: State<'_, Arc<Db>>,
     russh: State<'_, RusshManager>,
+    manager: State<'_, SftpSessionManager>,
     host_id: String,
     path: String,
     content: String,
@@ -896,7 +1080,7 @@ pub async fn sftp_write_file(
     }
     let total = bytes.len() as u64;
     let started = Instant::now();
-    let result = with_sftp(&russh, &host, Duration::from_secs(30), |sftp| {
+    let result = with_browse_sftp(&manager, &russh, &host, Duration::from_secs(30), |sftp| {
         let path = path.clone();
         let bytes = bytes.clone();
         Box::pin(async move {
