@@ -27,4 +27,9 @@ if (releaseTag && releaseTag !== expected) {
   throw new Error(`Tag must be ${expected}, got ${releaseTag}.`);
 }
 
+const notesFile = path.join(root, '.github', 'release-notes', `${expected}.md`);
+if (!fs.existsSync(notesFile) || !fs.readFileSync(notesFile, 'utf8').trim()) {
+  throw new Error(`Missing or empty release notes: ${notesFile}`);
+}
+
 console.log(`Version check passed: ${version}${releaseTag ? ` (${releaseTag})` : ''}`);
