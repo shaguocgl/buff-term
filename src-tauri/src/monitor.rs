@@ -6,6 +6,7 @@ use russh::client::Handle;
 use serde::Serialize;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Manager, State};
@@ -966,7 +967,7 @@ pub fn save_metric(
         .collect();
     let disks_json = serde_json::to_string(&disks).unwrap_or_else(|_| "[]".to_string());
     let top_json = serde_json::to_string(&top).unwrap_or_else(|_| "[]".to_string());
-    db.insert_metric(crate::models::NewMetric {
+    let result = db.insert_metric(crate::models::NewMetric {
         host_id,
         ts: snap.ts,
         cpu_percent: snap.cpu_percent,
@@ -977,7 +978,19 @@ pub fn save_metric(
         disks_json: &disks_json,
         top_json: &top_json,
         source,
-    })
+    });
+    // 启动时清理一次不够：应用长期不重启时每天再清一次 90 天前的指标。
+    static LAST_PRUNE: AtomicU64 = AtomicU64::new(0);
+    let current = now();
+    let last = LAST_PRUNE.load(Ordering::Relaxed);
+    if current.saturating_sub(last) > 24 * 3600
+        && LAST_PRUNE
+            .compare_exchange(last, current, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        let _ = db.prune_metrics(current.saturating_sub(90 * 24 * 3600));
+    }
+    result
 }
 
 #[cfg(test)]

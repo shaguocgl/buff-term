@@ -56,7 +56,7 @@ Grab the latest installer from [GitHub Releases](https://github.com/shaguocgl/bu
 ### MCP service
 
 - **buffTerm as an MCP server**: Streamable HTTP + JSON-RPC + token authentication, exposing the servers you select to external AI tools such as Codex and Claude Desktop
-- Three permission modes: read-only (write operations rejected) / guarded (dangerous commands need confirmation) / allow all
+- Three permission modes: read-only (only proven safe read-only commands; other commands and sensitive paths are rejected) / guarded (non-safe commands, sensitive paths or custom rules need confirmation) / allow all
 - Generates the external AI's MCP configuration JSON on start, with token rotation and revocation
 
 ### SSH and SFTP
@@ -77,10 +77,13 @@ Grab the latest installer from [GitHub Releases](https://github.com/shaguocgl/bu
 
 ### Security model
 
-- Three security levels: approve all / smart approval (read-only runs automatically, dangerous commands need approval) / allow all
+- Three security levels: approve all / smart approval (only proven safe simple read-only commands run automatically; other commands, interpreters, scripts, pipes and sensitive paths need approval) / allow all
 - Credential encryption: SSH passwords and key passphrases, AI API keys, MCP tokens and SMTP passwords are all encrypted with AES-256-GCM locally, with the master key in the system keychain; key passphrases are only used to decrypt the private key locally
 - Audit log: records time, host, source, command, approval method and result summary for AI Agent, terminal guard, MCP service, remediation and file editing
-- Output sanitization: AK/SK, keys, passwords and other secrets are filtered out of command output before it reaches the model; private keys and API keys never enter the model context
+- Output sanitization: AK/SK, keys, passwords and other secrets are filtered out of command output before it reaches the model; sensitive-path approval plus output redaction reduce the chance of private keys and API keys entering the model context
+- **Security boundary**: the terminal guard is a line-level, opt-in UX safeguard (off by default); it does not parse scripts, aliases or functions and is not a substitute for a least-privilege account. AI read-only/smart approval uses a default-deny allowlist: only simple read-only commands run automatically
+- **Data flows**: AI conversations and inspection results go to the model platform you configure; update checks contact GitHub; the monitor's public-IP/geolocation lookup contacts public geo services; configuration, credentials and audit data stay local (credentials encrypted)
+- **Logs**: runtime logs are written to the app log directory (`buffterm.log`) for troubleshooting; review or clean them if they contain sensitive environment details
 
 ### Monitoring, inspection and notifications
 

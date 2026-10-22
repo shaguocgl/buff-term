@@ -5,6 +5,7 @@ import {
   onSftpProgress,
   sessionCwd,
   sftpCancelTransfer,
+  sftpCheckSensitive,
   sftpDelete,
   sftpDownload,
   sftpExists,
@@ -44,6 +45,8 @@ interface Props {
   terminalSessionId: number | null;
   /** 悬浮按钮「在内置编辑器中打开」：在中间区打开该文件 */
   onOpenFile: (path: string) => void;
+  /** 全局 Toast：敏感路径/传输失败等关键错误需要在右下角明显提示 */
+  onNotify: (kind: 'success' | 'error' | 'info', message: string) => void;
   onClose: () => void;
 }
 
@@ -135,7 +138,14 @@ function ancestorsOf(path: string): string[] {
   return out;
 }
 
-function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClose }: Props) {
+function SftpPanel({
+  host,
+  hidden = false,
+  terminalSessionId,
+  onOpenFile,
+  onNotify,
+  onClose,
+}: Props) {
   const t = useT();
   // 当前选中的目录：上传/新建/删除等操作的目标目录；树中只有目录行可选中
   const [cwd, setCwd] = useState('/');
@@ -160,6 +170,8 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
     conflicts: UploadItem[];
     rest: UploadItem[];
   } | null>(null);
+  // 上传目标命中敏感路径时先做一次更强确认
+  const [sensitiveBatch, setSensitiveBatch] = useState<UploadItem[] | null>(null);
   // 顶部地址区：面包屑（可点击跳转）与直接输入两种形态，编辑态显示输入框
   const [editingPath, setEditingPath] = useState(false);
   const [pathInput, setPathInput] = useState('/');
@@ -414,10 +426,14 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
       if (res.ok) {
         then();
       } else {
-        setErr(res.text || t('sftp.opFailed'));
+        const message = res.text || t('sftp.opFailed');
+        setErr(message);
+        onNotify('error', message);
       }
     } catch (e) {
-      setErr(fmtError(e));
+      const message = fmtError(e);
+      setErr(message);
+      onNotify('error', message);
     } finally {
       setBusy(false);
     }
@@ -439,7 +455,7 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
     try {
       const res =
         kind === 'upload'
-          ? await sftpUpload(host.id, local, remote, id)
+          ? await sftpUpload(host.id, local, remote, id, true)
           : await sftpDownload(host.id, remote, local, id);
       return res.ok ? null : res.text || t('sftp.transferFailed');
     } catch (e) {
@@ -477,6 +493,15 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
         },
       }));
     });
+    if (failures.length > 0) {
+      onNotify(
+        'error',
+        t('sftp.uploadFailed', {
+          n: failures.length,
+          list: failures.join(t('sftp.uploadFailedListSep')),
+        }),
+      );
+    }
     if (cwdRef.current === target) void loadDir(target, true);
   };
 
@@ -488,22 +513,15 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
     }
   };
 
-  const handleUpload = async () => {
-    // 支持多选：一次可选中多个文件批量上传
-    const picked = await open({ multiple: true });
-    const locals = picked ? (Array.isArray(picked) ? picked : [picked]) : [];
-    if (locals.length === 0) return;
-    const items: UploadItem[] = locals.map((local) => ({
-      local,
-      remote: joinPath(cwd, baseName(local)),
-    }));
+  const beginUpload = async (items: UploadItem[]) => {
     // 上传前并发检查远端是否已存在：无冲突直接上传，有冲突先弹窗确认覆盖
     // （同样限流：每个检查都会独占一条 SFTP 通道）
     const checked = await mapLimit(items, UPLOAD_CONCURRENCY, async (item) => {
       try {
         return { item, exists: await sftpExists(host.id, item.remote) };
       } catch {
-        return { item, exists: false };
+        // 检查失败时按“已存在”处理，宁可多一次覆盖确认，也不静默覆盖
+        return { item, exists: true };
       }
     });
     const conflicts = checked.filter((c) => c.exists).map((c) => c.item);
@@ -515,6 +533,30 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
     void uploadMany(items);
   };
 
+  const handleUpload = async () => {
+    // 支持多选：一次可选中多个文件批量上传
+    const picked = await open({ multiple: true });
+    const locals = picked ? (Array.isArray(picked) ? picked : [picked]) : [];
+    if (locals.length === 0) return;
+    const items: UploadItem[] = locals.map((local) => ({
+      local,
+      remote: joinPath(cwd, baseName(local)),
+    }));
+    const sensitive = await mapLimit(items, UPLOAD_CONCURRENCY, async (item) => {
+      try {
+        return await sftpCheckSensitive(item.remote);
+      } catch {
+        // 无法判断时按敏感处理，先让用户确认
+        return true;
+      }
+    });
+    if (sensitive.some(Boolean)) {
+      setSensitiveBatch(items);
+      return;
+    }
+    void beginUpload(items);
+  };
+
   const handleDownload = async (dir: string, entry: SftpEntry) => {
     const dest = await save({ defaultPath: entry.name });
     if (!dest) return;
@@ -524,6 +566,8 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
         ...prev,
         [dir]: { ...prev[dir], error: err },
       }));
+      // 敏感本地路径/权限错误可能发生在下载开始前，面板内联文字容易被忽略。
+      onNotify('error', err);
     }
   };
 
@@ -532,7 +576,7 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
     const remote = joinPath(dir, entry.name);
     await run(
       dir,
-      () => sftpDelete(host.id, remote),
+      () => sftpDelete(host.id, remote, true),
       () => {
         if (entry.is_dir) purgeTree(remote);
         void loadDir(dir, true);
@@ -541,6 +585,9 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
   };
 
   const submitPrompt = (value: string) => {
+    // 重命名涉及敏感路径时，后端仍会要求 confirmed；前端在用户输入新名称
+    // 之后已经是一次明确操作，这里不额外拦截。
+
     const p = promptState;
     setPromptState(null);
     if (!p) return;
@@ -555,7 +602,7 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
       const to = joinPath(p.dir, value);
       void run(
         p.dir,
-        () => sftpRename(host.id, from, to),
+        () => sftpRename(host.id, from, to, true),
         () => {
           if (p.entry.is_dir) {
             purgeTree(from);
@@ -895,6 +942,20 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
         )}
       </div>
 
+      {sensitiveBatch && (
+        <ConfirmModal
+          title={t('sftp.sensitiveUploadTitle')}
+          body={t('sftp.sensitiveUploadBody', { n: sensitiveBatch.length })}
+          confirmText={t('common.confirm')}
+          danger
+          onConfirm={() => {
+            const items = sensitiveBatch;
+            setSensitiveBatch(null);
+            void beginUpload(items);
+          }}
+          onCancel={() => setSensitiveBatch(null)}
+        />
+      )}
       {overwriteBatch && (
         <ConfirmModal
           title={t('sftp.overwriteTitle')}
@@ -930,9 +991,12 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
               : t('sftp.deleteFileTitle')
           }
           body={
-            confirmDelete.entry.is_dir
+            (confirmDelete.entry.is_dir
               ? t('sftp.deleteDirBody', { name: confirmDelete.entry.name })
-              : t('sftp.deleteFileBody', { name: confirmDelete.entry.name })
+              : t('sftp.deleteFileBody', { name: confirmDelete.entry.name })) +
+            (confirmDelete.entry.sensitive
+              ? `\n\n${t('sftp.sensitiveDeleteWarning')}`
+              : '')
           }
           confirmText={t('common.delete')}
           danger
@@ -950,6 +1014,11 @@ function SftpPanel({ host, hidden = false, terminalSessionId, onOpenFile, onClos
           }
           title={
             promptState.kind === 'mkdir' ? t('sftp.newFolder') : t('sftp.rename')
+          }
+          hint={
+            promptState.kind === 'rename' && promptState.entry.sensitive
+              ? t('sftp.sensitiveRenameWarning')
+              : undefined
           }
           label={
             promptState.kind === 'mkdir'

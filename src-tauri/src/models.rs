@@ -362,6 +362,10 @@ pub struct AlertSettings {
     pub smtp_port: Option<u16>,
     pub smtp_username: Option<String>,
     pub smtp_password: Option<String>,
+    /// 仅用于读取时告知前端“已保存密码”；密码本身不再回传渲染进程。
+    /// skip 保证它不会被写进 settings JSON。
+    #[serde(default, skip)]
+    pub smtp_password_set: bool,
     pub smtp_from: Option<String>,
     pub smtp_to: Option<String>,
     /// starttls / ssl / none

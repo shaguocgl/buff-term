@@ -1,6 +1,6 @@
 [package]
 name = "buff-term"
-version = "1.4.4"
+version = "1.4.5"
 description = "桌面端 SSH 管理 + AI Agent 工具"
 authors = ["buffTerm"]
 edition = "2021"
@@ -19,10 +19,13 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-single-instance = "2"
 tauri-plugin-clipboard-manager = "2.3.3"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-log = "2"
+log = "0.4"
 tokio = { version = "1", features = ["time", "rt", "rt-multi-thread", "net", "sync", "fs", "io-util"] }
 # 已在依赖树中（russh/reqwest 间接引入），声明为直接依赖以使用 CancellationToken 取消远端命令
 tokio-util = "0.7"

@@ -1,6 +1,8 @@
 # 自研 AI Agent 与权限设计
 
 > buffTerm 内置的 AI Agent 编排层为**手写实现**（不依赖 LangChain / OpenAI Agents SDK / Vercel AI SDK 等框架）：SSE 流式解析 → 工具调用循环 → 审批拦截 → 审计留痕全部自研。本文档描述 Agent 运行时、审批与安全级别、工具集、审计与 AI 平台配置。
+>
+> **2026-10 安全策略更新**：`smart` 的自动执行已改为默认拒绝的安全只读白名单（`is_safe_readonly_command`），敏感路径、解释器、脚本、管道、重定向和未知命令都需要审批；下文旧图/判定代码为历史实现，以 `safety.rs` 为准。
 
 ## 4. AI Agent 运行时（agent.rs）——自研实现
 

@@ -432,6 +432,22 @@ impl SessionManager {
         }
     }
 
+    /// 关闭某主机的全部交互式终端会话。主机被删除或连接信息变更时调用，
+    /// 避免“已删除的主机仍有已认证会话可继续操作”。
+    pub async fn close_host(&self, app: &AppHandle, host_id: &str) {
+        let ids: Vec<u32> = {
+            let sessions = self.sessions.lock().unwrap();
+            sessions
+                .iter()
+                .filter(|(_, session)| session.host.id == host_id)
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        for id in ids {
+            let _ = self.close(app, id).await;
+        }
+    }
+
     pub fn host(&self, id: u32) -> Option<Host> {
         self.sessions.lock().unwrap().get(&id).map(|s| s.host.clone())
     }
@@ -588,7 +604,7 @@ fn load_guard_config(db: &Db, manager: &SessionManager) -> GuardConfig {
     let config = match (db.get_terminal_guard_settings(), db.list_terminal_rules()) {
         (Ok(settings), Ok(rules)) => GuardConfig::from_settings(&settings, &rules),
         _ => {
-            eprintln!(
+            log::warn!(
             "[guard] {}",
             crate::i18n::t("读取防护配置失败，本次输入不拦截", "failed to read guard settings; this input is not intercepted")
         );

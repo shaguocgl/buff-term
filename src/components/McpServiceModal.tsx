@@ -4,6 +4,7 @@ import {
   deleteMcpRule,
   getMcpService,
   listMcpRules,
+  revealMcpToken,
   rotateMcpToken,
   saveMcpService,
 } from '../api';
@@ -40,6 +41,7 @@ export default function McpServiceModal({ hosts, onClose }: Props) {
   const [hostIds, setHostIds] = useState<string[]>([]);
   const [permission, setPermission] = useState<Permission>('confirm');
   const [busy, setBusy] = useState(false);
+  const [revealing, setRevealing] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rules, setRules] = useState<McpRule[]>([]);
@@ -93,6 +95,20 @@ export default function McpServiceModal({ hosts, onClose }: Props) {
       setError(fmtError(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleReveal = async () => {
+    setRevealing(true);
+    setError(null);
+    try {
+      const token = await revealMcpToken();
+      setService((prev) => (prev ? { ...prev, token, token_set: true } : prev));
+      setCopied(false);
+    } catch (e) {
+      setError(fmtError(e));
+    } finally {
+      setRevealing(false);
     }
   };
 
@@ -267,6 +283,27 @@ export default function McpServiceModal({ hosts, onClose }: Props) {
             ) : (
               <p className="mcp-hint">{t('mcp.noRules')}</p>
             )}
+          </div>
+        )}
+
+        {running && service?.port && !service.token && service.token_set && (
+          <div className="mcp-config-block">
+            <div className="mcp-section-title">
+              <strong>
+                <KeyIcon size={14} /> {t('mcp.externalTitle')}
+              </strong>
+              <span className="mcp-status">
+                <i /> {t('mcp.running', { port: service.port })}
+              </span>
+            </div>
+            <button
+              className="btn secondary small"
+              onClick={() => void handleReveal()}
+              disabled={revealing}
+            >
+              {revealing ? t('mcp.revealing') : t('mcp.revealToken')}
+            </button>
+            <p className="mcp-hint">{t('mcp.revealHint')}</p>
           </div>
         )}
 

@@ -20,9 +20,10 @@ use tauri::{AppHandle, Manager, State};
 pub const PRESET_TERMINAL_RULES: &[&str] = &[
     // 删除
     "rm -rf", "rm -fr", "rm -r", "rm --recursive",
-    // 磁盘 / 分区 / 格式化
+    // 磁盘 / 分区 / 格式化 / 删除
     "mkfs", "fdisk", "parted", "pvremove", "vgremove", "lvremove",
     "dd if=", ">/dev/sd", "of=/dev/sd", "shred", "wipefs",
+    "unlink ", "truncate -s", "systemd-run", "nsenter",
     // 关机 / 重启
     "shutdown", "reboot", "poweroff", "halt", "init 0", "init 6",
     // 服务管理

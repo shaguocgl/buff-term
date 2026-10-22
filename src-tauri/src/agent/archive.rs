@@ -436,12 +436,12 @@ pub(crate) fn sweep_stale_archives() {
     }
 }
 
-/// 归档 IO 失败时随 tool 消息下发的说明：完整捕获留在 canonical 历史，没有丢。
+/// 归档失败时随 tool 消息下发的说明：为控制内存，只保留有界头尾摘录。
 fn archive_failed_warning() -> String {
     t(
-        "无法归档该输出；完整捕获已保留在会话历史中。",
-        "Could not archive this output; the complete capture is retained \
-         in conversation history.",
+        "无法归档该输出；会话历史中仅保留有界头尾摘录，完整输出已丢弃。",
+        "Could not archive this output; only a bounded head/tail excerpt is retained \
+         in conversation history and the full output was discarded.",
     )
     .to_string()
 }
@@ -602,11 +602,15 @@ pub(crate) async fn store_tool_output(archive: &Arc<OutputArchive>, output: Stri
             )
         }
         Err(err) => {
-            eprintln!(
+            log::warn!(
                 "[agent] {}: {err}",
                 t("输出归档失败", "Failed to archive output")
             );
-            format!("{output}\n{}", archive_failed_warning())
+            let excerpt = crate::util::truncate_output(
+                &output,
+                policy::ARCHIVE_FALLBACK_MAX_CHARS,
+            );
+            format!("{excerpt}\n{}", archive_failed_warning())
         }
     }
 }
@@ -1069,20 +1073,24 @@ mod tests {
                 page.text
             );
 
-            // 归档 IO 失败：完整捕获留在写回文本里，附归档失败说明；
-            // 展示投影仍把同一份文本压到 12000 以内（中段诊断在头尾投影中不可见
-            // 但 canonical 完整——这正是保留原文的意义）
+            // 归档 IO 失败：只保留有界头尾摘录，避免长会话把完整 8 MB 输出
+            // 永久留在 canonical history 里；中段诊断应被省略。
             let broken = Arc::new(OutputArchive::default());
             let blocker = broken.break_dir_for_test();
-            let stored = store_tool_output(&broken, output.clone()).await;
-            assert!(stored.contains(&output), "IO 失败时完整捕获必须保留");
+            let mut large_output = "H".repeat(50_000);
+            large_output.push_str(middle_marker);
+            large_output.push_str(&"T".repeat(50_000));
+            let stored = store_tool_output(&broken, large_output.clone()).await;
             assert!(
-                stored.contains(middle_marker),
-                "中段诊断留在 canonical: 必须有"
+                stored.chars().count() <= policy::ARCHIVE_FALLBACK_MAX_CHARS + 200,
+                "归档失败回退必须保持有界: {}",
+                stored.chars().count()
             );
+            assert!(!stored.contains(&large_output), "不应保留完整大输出");
+            assert!(!stored.contains(middle_marker), "中段应被省略");
             assert!(
-                stored.contains("retained in conversation history")
-                    || stored.contains("已保留在会话历史中"),
+                stored.contains("bounded head/tail excerpt")
+                    || stored.contains("有界头尾摘录"),
                 "应附归档失败说明: {}",
                 &stored[stored.len() - 300..]
             );
@@ -1117,10 +1125,10 @@ mod tests {
         });
     }
 
-    /// 容量上限：超过配额的保存被拒绝，store_tool_output 退回「完整捕获
-    /// 留在历史 + 说明」的口径，临时存储不会随长会话无限增长。
+    /// 容量上限：超过配额的保存被拒绝，store_tool_output 退回「有界头尾摘录
+    /// + 说明」的口径，临时存储与 canonical history 都不会随长会话无限增长。
     #[test]
-    fn capacity_limit_falls_back_to_full_capture() {
+    fn capacity_limit_falls_back_to_bounded_excerpt() {
         block_on(async {
             let archive = Arc::new(OutputArchive::default());
             archive.set_max_bytes_for_test(4_096);
@@ -1128,12 +1136,17 @@ mod tests {
             let err = archive.save("z".repeat(3_000)).await.unwrap_err();
             assert!(err.contains("capacity"), "应为容量拒绝: {err}");
 
-            let long = "w".repeat(9_000);
+            let long = "w".repeat(100_000);
             let stored = store_tool_output(&archive, long.clone()).await;
-            assert!(stored.contains(&long), "容量拒绝时完整捕获必须保留");
             assert!(
-                stored.contains("retained in conversation history")
-                    || stored.contains("已保留在会话历史中"),
+                stored.chars().count() <= policy::ARCHIVE_FALLBACK_MAX_CHARS + 200,
+                "容量拒绝回退必须保持有界: {}",
+                stored.chars().count()
+            );
+            assert!(!stored.contains(&long), "不应保留完整大输出");
+            assert!(
+                stored.contains("bounded head/tail excerpt")
+                    || stored.contains("有界头尾摘录"),
                 "应附归档失败说明: {}",
                 &stored[stored.len() - 300..]
             );

@@ -20,9 +20,12 @@ pub(super) const TOOL_PREVIEW_TAIL_CHARS: usize = 3_900;
 /// IPC/display limit also applies when archiving fails and history retains more.
 pub(super) const TOOL_DISPLAY_MAX_CHARS: usize = 12_000;
 /// Per-conversation archive capacity: long sessions cannot grow temp storage
-/// without bound. Exceeding it falls back to retaining the full capture in
+/// without bound. Exceeding it falls back to a bounded head/tail excerpt in
 /// canonical history (same path as an archive IO failure).
 pub(super) const ARCHIVE_MAX_BYTES: usize = 128 * 1024 * 1024;
+/// Archive failure/容量耗尽时在 canonical history 中保留的字符上限。
+/// 不保留完整 8 MB 输出，避免长会话内存无界增长。
+pub(super) const ARCHIVE_FALLBACK_MAX_CHARS: usize = 64_000;
 /// Default number of Unicode characters returned by a recall request.
 pub(super) const RECALL_DEFAULT_LIMIT: usize = 4_000;
 /// Maximum number of Unicode characters returned by a recall request.

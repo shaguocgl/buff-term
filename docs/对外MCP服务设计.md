@@ -1,6 +1,8 @@
 # 对外 MCP 服务设计
 
 > buffTerm 作为 MCP 服务器（自研 Streamable HTTP + JSON-RPC + token 认证），把用户勾选的服务器能力开放给外部 AI（Codex、Claude Desktop 等）。协议层基于 tiny_http 手写实现，无框架依赖。
+>
+> **2026-10 安全策略更新**：`readonly` 已从“命中危险表才拒绝”改为默认拒绝的安全只读白名单（`is_safe_readonly_command`）；`confirm` 对非安全只读命令、敏感路径与自定义规则都要求审批。下文旧图中的 `is_write_operation` 三层判定为历史实现，以代码为准。
 
 ## 1. 架构
 

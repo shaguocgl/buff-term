@@ -117,17 +117,24 @@ export const sftpUpload = (
   local: string,
   remote: string,
   transferId: string,
-) => invoke<SftpResult>('sftp_upload', { hostId, local, remote, transferId });
+  confirmed: boolean,
+) => invoke<SftpResult>('sftp_upload', { hostId, local, remote, transferId, confirmed });
 export const sftpExists = (hostId: string, path: string) =>
   invoke<boolean>('sftp_exists', { hostId, path });
+export const sftpCheckSensitive = (path: string) =>
+  invoke<boolean>('sftp_check_sensitive', { path });
 export const sftpCancelTransfer = (transferId: string) =>
   invoke<boolean>('sftp_cancel_transfer', { transferId });
-export const sftpDelete = (hostId: string, path: string) =>
-  invoke<SftpResult>('sftp_delete', { hostId, path });
+export const sftpDelete = (hostId: string, path: string, confirmed: boolean) =>
+  invoke<SftpResult>('sftp_delete', { hostId, path, confirmed });
 export const sftpMkdir = (hostId: string, path: string) =>
   invoke<SftpResult>('sftp_mkdir', { hostId, path });
-export const sftpRename = (hostId: string, from: string, to: string) =>
-  invoke<SftpResult>('sftp_rename', { hostId, from, to });
+export const sftpRename = (
+  hostId: string,
+  from: string,
+  to: string,
+  confirmed: boolean,
+) => invoke<SftpResult>('sftp_rename', { hostId, from, to, confirmed });
 /** 读取远端文本文件（内置编辑器打开）；超限 / 二进制 / 非 UTF-8 会直接报错 */
 export const sftpReadFile = (hostId: string, path: string) =>
   invoke<SftpFileContent>('sftp_read_file', { hostId, path });
@@ -239,6 +246,7 @@ export const getAlertSettings = () =>
   invoke<AlertSettings>('get_alert_settings');
 export const saveAlertSettings = (settings: AlertSettings) =>
   invoke<void>('save_alert_settings', { settings });
+export const clearAlertPassword = () => invoke<void>('clear_alert_password');
 export const testAlertSettings = (settings: AlertSettings) =>
   invoke<TestResult>('test_alert_settings', { settings });
 export const getMcpService = () => invoke<McpService>('get_mcp_service');
@@ -246,6 +254,7 @@ export const saveMcpService = (input: McpServiceInput) =>
   invoke<McpService>('save_mcp_service', { input });
 export const rotateMcpToken = () =>
   invoke<McpService>('rotate_mcp_token');
+export const revealMcpToken = () => invoke<string>('reveal_mcp_token');
 export const mcpApprove = (requestId: string, allow: boolean) =>
   invoke<void>('mcp_approve', { requestId, allow });
 export const listMcpRules = () => invoke<McpRule[]>('list_mcp_rules');
@@ -446,6 +455,19 @@ export const onAiRoundsResolved = (
 
 export const onAiContext = (cb: (payload: ContextUsage) => void) =>
   listen<ContextUsage>('ai:context', (event) => cb(event.payload));
+
+export interface HostConnectionChangedPayload {
+  host_id: string;
+  deleted: boolean;
+}
+
+/** 主机连接信息变更/删除：后端已关闭该主机的会话与运行时缓存，前端同步清理标签。 */
+export const onHostConnectionChanged = (
+  cb: (payload: HostConnectionChangedPayload) => void,
+) =>
+  listen<HostConnectionChangedPayload>('host:connection-changed', (event) =>
+    cb(event.payload),
+  );
 
 export const openSession = (
   hostId: string,

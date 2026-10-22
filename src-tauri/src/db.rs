@@ -7,6 +7,7 @@ use crate::util::now;
 use rusqlite::OptionalExtension;
 use rusqlite::{params, Connection, Row};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub struct Db {
@@ -29,6 +30,7 @@ impl Db {
         let conn = Connection::open(path)?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
+             PRAGMA busy_timeout = 5000;
              PRAGMA foreign_keys = ON;
              CREATE TABLE IF NOT EXISTS hosts (
                  id          TEXT PRIMARY KEY,
@@ -501,6 +503,21 @@ impl Db {
                 log.duration_ms.map(|v| v as i64),
             ],
         )?;
+        // 启动时清理一次之外，长期运行的实例每天再清理一次 365 天前的审计，
+        // 防止数据库随持续使用无限增长。
+        static LAST_AUDIT_PRUNE: AtomicU64 = AtomicU64::new(0);
+        let current = now();
+        let last = LAST_AUDIT_PRUNE.load(Ordering::Relaxed);
+        if current.saturating_sub(last) > 24 * 3600
+            && LAST_AUDIT_PRUNE
+                .compare_exchange(last, current, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            let _ = conn.execute(
+                "DELETE FROM audit_logs WHERE ts < ?1",
+                params![current.saturating_sub(365 * 24 * 3600) as i64],
+            );
+        }
         Ok(())
     }
 
@@ -929,6 +946,38 @@ impl Db {
         Ok(())
     }
 
+    /// 原子地把整改任务从可执行状态切到 executing。
+    /// `retry = false` 只允许 plan_ready；`retry = true` 允许 failed/cancelled。
+    /// 返回 false 表示状态已被其它调用改变（例如双击/并发执行），调用方应拒绝。
+    pub fn begin_remediation_execution(
+        &self,
+        remediation: &Remediation,
+        retry: bool,
+    ) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let steps_json = serde_json::to_string(&remediation.steps)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let status_clause = if retry {
+            "status IN ('failed', 'cancelled')"
+        } else {
+            "status = 'plan_ready'"
+        };
+        let sql = format!(
+            "UPDATE remediations SET steps_json=?2, status='executing', error=NULL,
+                 started_at=?3, finished_at=NULL, duration_ms=NULL
+             WHERE id=?1 AND {status_clause}"
+        );
+        let rows = conn.execute(
+            &sql,
+            params![
+                remediation.id,
+                steps_json,
+                remediation.started_at.map(|v| v as i64),
+            ],
+        )?;
+        Ok(rows == 1)
+    }
+
     pub fn update_remediation(&self, remediation: &Remediation) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         let steps_json = serde_json::to_string(&remediation.steps)
@@ -1080,7 +1129,8 @@ impl Db {
             "DELETE FROM host_metrics WHERE host_id=?1",
             params![host_id],
         )?;
-        tx.execute("DELETE FROM audit_logs WHERE host_id=?1", params![host_id])?;
+        // 审计日志不随主机删除：host_label 已保存快照，保留审计链比“删干净”
+        // 更重要；需要清理时用户可在审计面板显式清空。
         tx.execute(
             "DELETE FROM inspection_reports WHERE host_id=?1",
             params![host_id],
@@ -1335,7 +1385,7 @@ mod tests {
                  );
                  INSERT INTO audit_logs (id, ts, session_id, host_id, host_label, tool_name,
                                          summary, permission_mode, approval, status, result, duration_ms)
-                 VALUES ('legacy', 1, 1, 'h1', '主机 (1.2.3.4)', 'terminal_command',
+                 VALUES ('legacy', 1800000000, 1, 'h1', '主机 (1.2.3.4)', 'terminal_command',
                          'rm -rf /', 'guard', 'denied', 'ok', NULL, NULL);",
             )
             .unwrap();
@@ -1350,7 +1400,7 @@ mod tests {
         // 新写入的记录按显式 source 落库并可读回
         db.insert_audit_log(&AuditLog {
             id: "new".to_string(),
-            ts: 2,
+            ts: 1800000001,
             session_id: None,
             host_id: "h1".to_string(),
             host_label: "主机 (1.2.3.4)".to_string(),

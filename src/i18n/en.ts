@@ -84,10 +84,14 @@ export const en: Dict = {
   'alert.tlsStarttls': 'STARTTLS (587)',
   'alert.tlsSsl': 'SSL (465)',
   'alert.tlsNone': 'None',
+  'alert.tlsNoneWarning': 'Without encryption, SMTP credentials are sent in plaintext; use this only on a trusted internal network.',
   'alert.tlsAria': 'Encryption method',
   'alert.username': 'Username',
   'alert.password': 'Password / app password',
   'alert.passwordPlaceholder': 'SMTP password or mailbox app password',
+  'alert.passwordSavedHint': 'A password is saved; leave blank to keep it',
+  'alert.clearPassword': 'Clear saved password',
+  'alert.passwordCleared': 'Saved SMTP password cleared',
   'alert.from': 'From',
   'alert.to': 'Recipients (comma-separated)',
   'alert.saved': '✓ SMTP settings saved',
@@ -154,6 +158,7 @@ export const en: Dict = {
   'hostForm.notes': 'Notes',
   'hostForm.notesPlaceholder': 'Optional',
   'hostForm.needAddressUser': 'Enter the address and username first',
+  'hostForm.unsavedTabsOnChange': 'This host has unsaved file edits. Changing the connection will close the related tabs and discard unsaved changes. Continue?',
   'hostForm.badPort': 'Invalid port',
   'hostForm.needFields': 'Name, address and username are required',
   'hostForm.passwordSaveFailedNew':
@@ -212,13 +217,13 @@ export const en: Dict = {
   'mcp.permissionHint':
     'Approval policy for commands executed by external AI',
   'mcp.permissionAria': 'Permission mode',
-  'mcp.permReadonly': 'Read-only (write operations rejected)',
-  'mcp.permConfirm': 'Guarded (writes and matched rules need approval)',
+  'mcp.permReadonly': 'Read-only (proven safe commands only)',
+  'mcp.permConfirm': 'Guarded (non-safe commands and sensitive paths need approval)',
   'mcp.permAllow': 'Allow all (any command may run)',
   'mcp.permReadonlyHint':
-    'Read-only commands (ps, df, cat …) are allowed; write operations (file redirection, modification, deletion, installation, transfers) are rejected.',
+    'Only proven safe, simple read-only commands (ps, df, cat …) are allowed; interpreters, scripts, pipes, redirections, unknown commands and sensitive paths are rejected.',
   'mcp.permConfirmHint':
-    'When a command matches the built-in write/danger detection or one of your custom rules, a confirmation dialog appears before it runs.',
+    'Non-safe commands, sensitive paths and your custom rules all trigger a confirmation dialog before running.',
   'mcp.permAllowHint':
     'Any command runs and is only recorded in the audit log. Make sure you trust the source of the external AI.',
   'mcp.customTitle': 'Custom guarded commands',
@@ -229,6 +234,9 @@ export const en: Dict = {
   'mcp.externalTitle': 'External AI connection config',
   'mcp.running': 'Running · 127.0.0.1:{port}',
   'mcp.copyConfig': 'Copy config',
+  'mcp.revealToken': 'Reveal token and build config',
+  'mcp.revealing': 'Reading…',
+  'mcp.revealHint': 'The token is not sent to the UI by default; it is read only after you click this button.',
   'mcp.rotate': 'Revoke and regenerate token',
   'mcp.configHint':
     'Paste the JSON above into the MCP configuration of Codex / Claude Desktop. External AI can call list_hosts, resource_usage, read_file, list_dir and exec_command.',
@@ -346,6 +354,10 @@ export const en: Dict = {
   'sftp.deleteFileTitle': 'Delete file',
   'sftp.deleteDirBody': 'Delete directory "{name}"?',
   'sftp.deleteFileBody': 'Delete file "{name}"?',
+  'sftp.sensitiveDeleteWarning': 'Warning: this is a sensitive path (SSH/credentials/cron/systemd, etc.); deleting it may affect logins or services.',
+  'sftp.sensitiveRenameWarning': 'Warning: this is a sensitive path; renaming it may affect logins or services.',
+  'sftp.sensitiveUploadTitle': 'Upload to sensitive paths',
+  'sftp.sensitiveUploadBody': '{n} target(s) match sensitive paths (SSH/credentials/cron/systemd, etc.). Continuing may overwrite critical configuration. Continue?',
   'sftp.newFolderLabel': 'Folder name',
   'sftp.newNameLabel': 'New name',
   'sftp.newFolderPlaceholder': 'e.g. logs',
@@ -496,7 +508,7 @@ export const en: Dict = {
   'chat.tipAll':
     'Security level: approve all · every command needs your approval before it runs',
   'chat.tipSmart':
-    'Security level: smart · write/dangerous commands need approval, read-only commands run automatically',
+    'Security level: smart · only safe read-only commands run automatically; other commands and sensitive paths need approval',
   'chat.tipNone':
     'Security level: allow all · commands run directly, use with caution',
   'chat.toolReadPath': 'Read {path}',
@@ -655,6 +667,7 @@ export const en: Dict = {
   'app.importConfirm': 'Import {n}',
   'app.deleteHostTitle': 'Delete host',
   'app.deleteHostBody': 'Delete host "{name}"?',
+  'app.deleteHostDirtyWarning': 'This host has unsaved file edits; the related tabs will close and unsaved changes will be lost.',
   'app.closeTabTitle': 'Close tab',
   'app.closeTabBody':
     'This file has unsaved changes that will be lost. Close it anyway?',

@@ -18,10 +18,15 @@ pub(super) struct ToolCallAcc {
 /// SSE 解码器：字节缓冲而非 String——SSE 的 UTF-8 多字节字符可能被切分到两个
 /// chunk，逐 chunk 用 from_utf8_lossy 会破坏跨 chunk 的中文/emoji，改为先累积
 /// 字节、在 \n 边界处解码完整行。
+/// 单行 SSE 缓冲上限。正常 OpenAI 兼容流不会接近该值；超过通常意味着
+/// 服务端没有按行发送或恶意构造，继续累积会耗尽内存。
+const MAX_SSE_LINE_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Default)]
 pub(super) struct SseDecoder {
     /// 尚未遇到 \n 边界的残留字节（可能含被切开的 UTF-8 多字节字符）
     buf: Vec<u8>,
+    overflowed: bool,
 }
 
 /// 一条 SSE 事件：`data:` 行解析出的 JSON，或流的 [DONE] 结束标记。
@@ -36,7 +41,15 @@ impl SseDecoder {
     /// 追加一段字节流，返回其中完整行解析出的事件；不足一行的残留留在缓冲区，
     /// 等后续 chunk 或 `finish` 处理。
     pub(super) fn feed(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
+        if self.overflowed {
+            return Vec::new();
+        }
         self.buf.extend_from_slice(chunk);
+        if self.buf.len() > MAX_SSE_LINE_BYTES {
+            self.overflowed = true;
+            self.buf.clear();
+            return Vec::new();
+        }
         let mut events = Vec::new();
         while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.buf.drain(..pos + 1).collect();
@@ -50,8 +63,16 @@ impl SseDecoder {
     /// 处理流结束时缓冲区中残留的未换行数据，避免丢失最后一段内容
     /// （部分平台会在流末尾附带 usage，丢掉就把实测用量变回估算）。
     pub(super) fn finish(&mut self) -> Option<SseEvent> {
+        if self.overflowed {
+            return None;
+        }
         let rest = std::mem::take(&mut self.buf);
         parse_sse_line(&rest)
+    }
+
+    /// 是否因单行超过上限而丢弃了数据；调用方应把该流当成错误，而不是正常结束。
+    pub(super) fn overflowed(&self) -> bool {
+        self.overflowed
     }
 }
 
@@ -144,6 +165,15 @@ mod tests {
             }
             SseEvent::Done => panic!("应为 Data 事件"),
         }
+    }
+
+    #[test]
+    fn rejects_single_line_over_memory_cap() {
+        let mut dec = SseDecoder::default();
+        let chunk = vec![b'a'; MAX_SSE_LINE_BYTES + 1];
+        assert!(dec.feed(&chunk).is_empty());
+        assert!(dec.overflowed());
+        assert!(dec.finish().is_none());
     }
 
     #[test]

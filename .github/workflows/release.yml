@@ -48,6 +48,10 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Run library tests (Windows)
+        if: runner.os == 'Windows'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
       - name: Ensure the tag matches the app version
         if: github.ref_type == 'tag'
         env:

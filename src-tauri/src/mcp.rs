@@ -11,11 +11,14 @@
 use crate::db::Db;
 use crate::models::{Host, McpPermissionMode, McpRule, McpService};
 use crate::russh::{ExecResult, RusshManager};
-use crate::safety::{is_write_operation, sanitize};
+use crate::safety::{
+    command_has_sensitive_path, is_safe_readonly_command, is_sensitive_path, sanitize,
+};
 use crate::util::{format_exec_output, generate_token, now, shq, truncate};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -45,13 +48,28 @@ pub struct McpServiceView {
     #[serde(flatten)]
     pub config: McpService,
     pub running: bool,
+    /// 是否已生成 token。token 本身默认不回传，前端点“显示”时再取。
+    pub token_set: bool,
 }
 
 // ---------- 运行管理 ----------
 
 struct RunningMcp {
     shutdown: tokio::sync::oneshot::Sender<()>,
+    /// 服务线程存活标志：停止时置 false，SSE 长连接据此退出；线程异常退出也会置 false。
+    alive: Arc<AtomicBool>,
 }
+
+/// 服务线程退出时自动把 alive 置 false，避免 manager 误以为服务仍在运行。
+struct AliveGuard(Arc<AtomicBool>);
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// 同时处理的 MCP HTTP/SSE 连接上限，避免本地客户端异常时线程无限增长。
+const MAX_MCP_CONNECTIONS: usize = 32;
 
 #[derive(Default)]
 pub struct McpServiceManager {
@@ -63,7 +81,11 @@ pub struct McpServiceManager {
 
 impl McpServiceManager {
     pub fn is_running(&self) -> bool {
-        self.inner.lock().unwrap().is_some()
+        self.inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|running| running.alive.load(Ordering::SeqCst))
     }
 
     pub fn lock_lifecycle(&self) -> std::sync::MutexGuard<'_, ()> {
@@ -117,13 +139,22 @@ pub fn get_mcp_service(
     let mut config = db
         .get_mcp_service()
         .map_err(|e| format!("{}: {e}", crate::i18n::t("读取 MCP 服务配置失败", "Failed to read the MCP service config")))?;
-    // token 加密存储在凭据表，读取时解密回填供前端展示
-    if config.token.is_none() {
-        config.token = crate::credentials::get_mcp_token();
-    }
+    // 默认不回传明文 token，只告知是否存在；需要复制配置时前端显式调用
+    // reveal_mcp_token。这样普通打开设置页不会把 token 长时间留在渲染进程。
+    let token_set = crate::credentials::get_mcp_token().is_some();
+    config.token = None;
     Ok(McpServiceView {
         running: manager.is_running(),
         config,
+        token_set,
+    })
+}
+
+/// 显式读取 MCP token（用于“显示 token / 复制配置”按钮）。
+#[tauri::command]
+pub fn reveal_mcp_token() -> Result<String, String> {
+    crate::credentials::get_mcp_token().ok_or_else(|| {
+        crate::i18n::t("MCP token 不存在，请重新启用或轮换 token", "The MCP token does not exist; re-enable the service or rotate the token").to_string()
     })
 }
 
@@ -156,6 +187,7 @@ pub async fn save_mcp_service(
         return Ok(McpServiceView {
             running: false,
             config,
+            token_set: crate::credentials::get_mcp_token().is_some(),
         });
     }
 
@@ -185,6 +217,7 @@ pub async fn save_mcp_service(
     Ok(McpServiceView {
         running: true,
         config,
+        token_set: true,
     })
 }
 
@@ -207,6 +240,7 @@ pub fn rotate_mcp_token(
     Ok(McpServiceView {
         running: manager.is_running(),
         config,
+        token_set: true,
     })
 }
 
@@ -253,19 +287,33 @@ pub fn delete_mcp_rule(db: State<'_, Arc<Db>>, id: String) -> Result<(), String>
 pub(crate) fn start_service(app: &AppHandle, manager: &McpServiceManager) -> Result<u16, String> {
     let (port_tx, port_rx) = mpsc::channel::<Result<u16, String>>();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let alive = Arc::new(AtomicBool::new(true));
     let app = app.clone();
-    std::thread::spawn(move || mcp_server_main(app, port_tx, shutdown_rx));
-    let port = port_rx
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|_| crate::i18n::t("MCP 服务启动超时", "Timed out starting the MCP service").to_string())??;
+    let alive_thread = alive.clone();
+    std::thread::spawn(move || mcp_server_main(app, port_tx, shutdown_rx, alive_thread));
+    let port = match port_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(port)) => port,
+        Ok(Err(e)) => {
+            alive.store(false, Ordering::SeqCst);
+            return Err(e);
+        }
+        Err(_) => {
+            alive.store(false, Ordering::SeqCst);
+            return Err(crate::i18n::t("MCP 服务启动超时", "Timed out starting the MCP service").to_string());
+        }
+    };
     manager.set(Some(RunningMcp {
         shutdown: shutdown_tx,
+        alive,
     }));
     Ok(port)
 }
 
 pub(crate) fn stop_service(manager: &McpServiceManager) {
     if let Some(running) = manager.inner.lock().unwrap().take() {
+        // 先关闭存活标志，让已经建立的 SSE 长连接在下一个检查点退出；
+        // oneshot 只负责唤醒 accept 循环。
+        running.alive.store(false, Ordering::SeqCst);
         let _ = running.shutdown.send(());
     }
 }
@@ -274,7 +322,9 @@ fn mcp_server_main(
     app: AppHandle,
     port_tx: mpsc::Sender<Result<u16, String>>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    alive: Arc<AtomicBool>,
 ) {
+    let _alive_guard = AliveGuard(alive.clone());
     let server = match Server::http(&format!("127.0.0.1:{DEFAULT_PORT}")) {
         Ok(s) => s,
         Err(_) => match Server::http("127.0.0.1:0") {
@@ -286,32 +336,54 @@ fn mcp_server_main(
         },
     };
     let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(DEFAULT_PORT);
-    if port_tx.send(Ok(port)).is_err() {
-        return;
-    }
 
+    // runtime 创建失败时不要先把端口告诉 manager，否则 UI 会显示“运行中”
+    // 但实际没有可用的监听线程。
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
     {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("[mcp] {}: {e}", crate::i18n::t("创建 runtime 失败", "failed to create the runtime"));
+            let _ = port_tx.send(Err(format!(
+                "{}: {e}",
+                crate::i18n::t("创建 runtime 失败", "failed to create the runtime")
+            )));
             return;
         }
     };
     let rt = Arc::new(rt);
+    if port_tx.send(Ok(port)).is_err() {
+        return;
+    }
 
+    let active = Arc::new(AtomicUsize::new(0));
     loop {
-        match server.recv_timeout(Duration::from_millis(300)) {
+        if !alive.load(Ordering::SeqCst) {
+            break;
+        }
+        match server.recv_timeout(Duration::from_millis(250)) {
             Ok(Some(request)) => {
+                if active.fetch_add(1, Ordering::SeqCst) >= MAX_MCP_CONNECTIONS {
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    let _ = request.respond(
+                        Response::from_string("too many connections")
+                            .with_status_code(StatusCode(503)),
+                    );
+                    continue;
+                }
                 let app = app.clone();
                 let rt = rt.clone();
-                std::thread::spawn(move || handle_http(app, rt, request));
+                let alive_req = alive.clone();
+                let active_req = active.clone();
+                std::thread::spawn(move || {
+                    handle_http(app, rt, request, alive_req);
+                    active_req.fetch_sub(1, Ordering::SeqCst);
+                });
             }
             Ok(None) => {}
             Err(e) => {
-                eprintln!("[mcp] {}: {e}", crate::i18n::t("HTTP 服务器错误", "HTTP server error"));
+                log::error!("[mcp] {}: {e}", crate::i18n::t("HTTP 服务器错误", "HTTP server error"));
                 break;
             }
         }
@@ -333,7 +405,10 @@ fn allowed_origin(origin: &str) -> bool {
         || o.starts_with("http://localhost:")
         || o.starts_with("http://127.0.0.1:")
         || o == "tauri://localhost"
+        || o == "http://tauri.localhost"
         || o == "https://tauri.localhost"
+        || o == "https://localhost"
+        || o == "https://127.0.0.1"
 }
 
 fn cors_headers(request: &Request) -> Vec<Header> {
@@ -442,10 +517,35 @@ fn check_auth(app: &AppHandle, request: &Request) -> bool {
     false
 }
 
-fn handle_http(app: AppHandle, rt: Arc<tokio::runtime::Runtime>, mut request: Request) {
+fn handle_http(
+    app: AppHandle,
+    rt: Arc<tokio::runtime::Runtime>,
+    mut request: Request,
+    alive: Arc<AtomicBool>,
+) {
+    if !alive.load(Ordering::SeqCst) {
+        let _ = request.respond(Response::empty(StatusCode(503)));
+        return;
+    }
     let method = request.method().clone();
     let url = request.url().to_string();
     let path = url.split('?').next().unwrap_or("/");
+
+    // 不只在响应里省略 CORS 头，还直接拒绝非本机 Origin：浏览器用
+    // no-cors/simple request 仍可能把请求送达本地服务，必须显式拒绝。
+    let origin = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Origin"))
+        .map(|h| h.value.as_str().to_string());
+    if let Some(origin) = origin {
+        if !allowed_origin(&origin) {
+            let _ = request.respond(
+                Response::from_string("forbidden origin").with_status_code(StatusCode(403)),
+            );
+            return;
+        }
+    }
 
     if method == Method::Options {
         let headers = cors_headers(&request);
@@ -474,7 +574,7 @@ fn handle_http(app: AppHandle, rt: Arc<tokio::runtime::Runtime>, mut request: Re
     }
 
     match method {
-        Method::Get => handle_sse(request),
+        Method::Get => handle_sse(request, alive),
         Method::Post => {
             // 限制请求体大小，避免本地恶意/异常客户端无界占用内存
             const MAX_BODY: u64 = 1024 * 1024;
@@ -503,7 +603,7 @@ fn handle_http(app: AppHandle, rt: Arc<tokio::runtime::Runtime>, mut request: Re
     }
 }
 
-fn handle_sse(request: Request) {
+fn handle_sse(request: Request, alive: Arc<AtomicBool>) {
     // tiny_http 的 respond 会把响应写入 BufWriter，无限流 body 阻塞读取时
     // header 永远无法 flush；这里直接用 into_writer 手动写头并立即 flush。
     let origin = request
@@ -534,14 +634,21 @@ fn handle_sse(request: Request) {
     }
     let _ = writer.write_all(b": connected\n\n");
     let _ = writer.flush();
-    loop {
-        std::thread::sleep(Duration::from_secs(15));
+    let mut last_ping = Instant::now();
+    while alive.load(Ordering::SeqCst) {
+        // 250ms 检查一次存活标志，服务停止时能及时退出并释放线程/连接；
+        // 真正的 ping 仍保持 15 秒节奏，避免无意义心跳。
+        std::thread::sleep(Duration::from_millis(250));
+        if last_ping.elapsed() < Duration::from_secs(15) {
+            continue;
+        }
         if writer.write_all(b": ping\n\n").is_err() {
             break;
         }
         if writer.flush().is_err() {
             break;
         }
+        last_ping = Instant::now();
     }
 }
 
@@ -639,7 +746,7 @@ fn tools_schema() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "read_file",
-            "description": crate::i18n::t("读取指定服务器上的文件内容", "Read a file on the given server"),
+            "description": crate::i18n::t("读取指定服务器上的文件内容。敏感路径（SSH/凭据/cron 等）在只读模式下会被拒绝，管控模式下需要用户确认", "Read a file on the given server. Sensitive paths (SSH/credentials/cron, etc.) are rejected in read-only mode and require user approval in guarded mode"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -663,7 +770,7 @@ fn tools_schema() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "exec_command",
-            "description": crate::i18n::t("在指定服务器上执行一条 shell 命令并返回输出。只读模式下写操作会被拒绝；管控模式下命中自定义管控规则的命令会触发用户确认。host 可以是 list_hosts 返回的 id、name 或 address", "Run a shell command on the given server and return its output. In read-only mode write operations are rejected; in guarded mode commands matching a custom guard rule trigger a user confirmation. host may be an id, name or address returned by list_hosts"),
+            "description": crate::i18n::t("在指定服务器上执行一条 shell 命令并返回输出。只读模式只允许可证明安全的简单只读命令；管控模式下非安全只读命令、敏感路径或命中自定义规则都需要用户确认。host 建议使用 list_hosts 返回的 id", "Run a shell command on the given server and return its output. Read-only mode only allows proven safe simple read-only commands; in guarded mode non-safe commands, sensitive paths, or custom-rule matches require user approval. Prefer the id returned by list_hosts for host"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -733,8 +840,46 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
                 .get("path")
                 .and_then(|p| p.as_str())
                 .ok_or_else(|| crate::i18n::t("缺少 path 参数", "Missing path parameter").to_string())?;
-            let script = format!("cat -- {}", shq(path));
-            run_and_log(app, host, name, &script, 15, None).await
+            // 先解析符号链接真实目标：/tmp/link -> /etc/shadow 不能因为
+            // 输入路径不含敏感片段就绕过审批/只读拒绝。
+            let russh = app
+                .try_state::<RusshManager>()
+                .ok_or_else(|| crate::i18n::t("SSH 管理器不可用", "The SSH manager is unavailable").to_string())?;
+            let real = russh
+                .resolve_path(host, path)
+                .await
+                .unwrap_or_else(|| path.to_string());
+            let sensitive = is_sensitive_path(path) || is_sensitive_path(&real);
+            let mut approval: Option<bool> = None;
+            if sensitive {
+                match config.permission_mode {
+                    McpPermissionMode::Readonly => {
+                        let message = crate::i18n::t(
+                            "只读模式不允许读取敏感路径，已拒绝",
+                            "Sensitive paths cannot be read in read-only mode and were rejected",
+                        );
+                        let _ = write_audit(
+                            app, host, "mcp:read_file", path, "denied", "denied",
+                            Some(message), None,
+                        );
+                        return Err(message.to_string());
+                    }
+                    McpPermissionMode::Confirm => {
+                        approval = Some(request_approval(app, host, &format!("read_file {real}")).await?);
+                        if approval == Some(false) {
+                            let _ = write_audit(
+                                app, host, "mcp:read_file", path, "denied", "denied",
+                                Some(crate::i18n::t("用户拒绝读取敏感路径", "The user denied reading the sensitive path")),
+                                None,
+                            );
+                            return Err(crate::i18n::t("用户拒绝读取敏感路径", "The user denied reading the sensitive path").to_string());
+                        }
+                    }
+                    McpPermissionMode::Allow => {}
+                }
+            }
+            let script = format!("cat -- {}", shq(&real));
+            run_and_log(app, host, name, &script, 15, approval).await
         }
         "list_dir" => {
             let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
@@ -753,11 +898,21 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
                 .unwrap_or(30)
                 .clamp(1, 600);
             let mut approval: Option<bool> = None;
+            let safe = is_safe_readonly_command(&command);
+            let mut sensitive = command_has_sensitive_path(&command);
+            if !sensitive && config.permission_mode != McpPermissionMode::Allow {
+                if let Some(russh) = app.try_state::<RusshManager>() {
+                    sensitive = russh.command_reads_sensitive_path(host, &command).await;
+                }
+            }
             if config.permission_mode == McpPermissionMode::Readonly {
-                // 只读模式：允许只读命令，拒绝任何写操作
-                if is_write_operation(&command) {
-                    let message =
-                        crate::i18n::t("只读模式不允许写操作，已拒绝执行。如需写操作请切换到管控模式或全部放行", "Write operations are not allowed in read-only mode and were rejected. Switch to guarded mode or allow-all to permit writes");
+                // 只读模式：默认拒绝；仅放行可证明安全的简单只读命令。
+                // 敏感路径也不放行，即使命令本身是 cat/grep。
+                if !safe || sensitive {
+                    let message = crate::i18n::t(
+                        "只读模式只允许安全的只读命令，已拒绝执行；敏感路径需要切换到管控模式确认",
+                        "Read-only mode only allows proven safe read-only commands; sensitive paths require guarded mode confirmation",
+                    );
                     let _ = write_audit(
                         app,
                         host,
@@ -771,11 +926,10 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
                     return Err(message.to_string());
                 }
             } else if config.permission_mode == McpPermissionMode::Confirm {
-                // 管控模式：命中自定义管控规则 **或** 内置写/危险判定时弹窗审批。
-                // 若只按自定义规则判定，规则为空时 confirm 会退化成 allow，与模式语义不符。
+                // 管控模式：自定义规则、非安全只读命令或敏感路径都要审批。
+                // 不再依赖“危险词表是否收录”，未知命令默认需要确认。
                 let rule_hit = check_mcp_rule_match(app, &command);
-                let builtin_hit = is_write_operation(&command);
-                if rule_hit || builtin_hit {
+                if rule_hit || !safe || sensitive {
                     approval = Some(request_approval(app, host, &command).await?);
                     if approval == Some(false) {
                         let _ = write_audit(
@@ -935,16 +1089,30 @@ fn write_audit(
 
 fn resolve_host<'a>(hosts: &'a [Host], key: Option<&str>) -> Result<&'a Host, String> {
     let key = key.ok_or_else(|| crate::i18n::t("缺少 host 参数", "Missing host parameter").to_string())?;
-    hosts
+    // id 唯一，优先按 id 解析；名称/地址可能重复（手工创建时允许重名），
+    // 重复时拒绝而不是默默操作第一台，避免 AI 把命令发到错误服务器。
+    if let Some(host) = hosts.iter().find(|h| h.id == key) {
+        return Ok(host);
+    }
+    let matches: Vec<&Host> = hosts
         .iter()
-        .find(|h| h.id == key || h.name == key || h.address == key)
-        .ok_or_else(|| {
-            if crate::i18n::is_en() {
-                format!("Host {key} not found; call list_hosts to see the available hosts")
-            } else {
-                format!("未找到主机 {key}，请先调用 list_hosts 查看可用主机")
-            }
-        })
+        .filter(|h| h.name == key || h.address == key)
+        .collect();
+    match matches.as_slice() {
+        [host] => Ok(host),
+        [] => Err(if crate::i18n::is_en() {
+            format!("Host {key} not found; call list_hosts to see the available hosts")
+        } else {
+            format!("未找到主机 {key}，请先调用 list_hosts 查看可用主机")
+        }),
+        _ => Err(if crate::i18n::is_en() {
+            format!(
+                "Host name/address {key} matches multiple hosts; use the id returned by list_hosts"
+            )
+        } else {
+            format!("主机名/地址 {key} 匹配到多台主机，请改用 list_hosts 返回的 id")
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -972,6 +1140,38 @@ mod tests {
         assert_eq!(exec_status(&exec_result("x", Some(1), false)), "error");
         assert_eq!(exec_status(&exec_result("x", Some(0), true)), "error");
         assert_eq!(exec_status(&exec_result("x", None, true)), "error");
+    }
+
+    fn test_host(id: &str, name: &str, address: &str) -> Host {
+        Host {
+            id: id.to_string(),
+            name: name.to_string(),
+            address: address.to_string(),
+            port: 22,
+            username: "root".to_string(),
+            auth_type: crate::models::AuthType::Key,
+            key_path: None,
+            notes: None,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn resolve_host_prefers_id_and_rejects_ambiguous_names() {
+        let hosts = vec![
+            test_host("h1", "prod", "10.0.0.1"),
+            test_host("h2", "prod", "10.0.0.2"),
+        ];
+        assert_eq!(resolve_host(&hosts, Some("prod")).unwrap_err(), {
+            if crate::i18n::is_en() {
+                "Host name/address prod matches multiple hosts; use the id returned by list_hosts"
+                    .to_string()
+            } else {
+                "主机名/地址 prod 匹配到多台主机，请改用 list_hosts 返回的 id".to_string()
+            }
+        });
+        assert_eq!(resolve_host(&hosts, Some("h2")).unwrap().id, "h2");
+        assert_eq!(resolve_host(&hosts, Some("10.0.0.1")).unwrap().id, "h1");
     }
 
     #[test]

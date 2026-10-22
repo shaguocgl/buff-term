@@ -27,10 +27,62 @@ try {
   /* ignore storage errors */
 }
 
+class AppErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    const en = document.documentElement.lang === "en";
+    return (
+      <div
+        style={{
+          padding: 32,
+          color: "#e8eaf0",
+          background: "#0b0d12",
+          minHeight: "100vh",
+          fontFamily: "system-ui, sans-serif",
+        }}
+      >
+        <h1 style={{ fontSize: 20 }}>buffTerm</h1>
+        <p style={{ color: "#f5a623" }}>
+          {en
+            ? "The interface ran into an unexpected error."
+            : "界面遇到了未预期的错误。"}
+        </p>
+        <pre
+          style={{
+            whiteSpace: "pre-wrap",
+            color: "#9aa4b2",
+            fontSize: 12,
+            maxWidth: 900,
+          }}
+        >
+          {this.state.error.message}
+        </pre>
+        <button
+          onClick={() => window.location.reload()}
+          style={{ padding: "8px 14px", cursor: "pointer" }}
+        >
+          {en ? "Reload" : "重新加载"}
+        </button>
+      </div>
+    );
+  }
+}
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <I18nProvider>
-      <App />
-    </I18nProvider>
+    <AppErrorBoundary>
+      <I18nProvider>
+        <App />
+      </I18nProvider>
+    </AppErrorBoundary>
   </React.StrictMode>,
 );

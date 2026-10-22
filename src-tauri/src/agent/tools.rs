@@ -31,16 +31,18 @@ pub(crate) fn system_prompt(
                 .to_string()
         }
         (crate::models::PermissionMode::Smart, false) => {
-            "exec_command 中只读命令会自动执行；写操作（修改、删除、安装、下载等）、\
-             命中危险规则或你标记 requires_approval 的命令会经过用户批准，获批后才执行，\
-             请先说明意图。"
+            "exec_command 中只有简单、明确的安全只读命令会自动执行；其他命令（包括解释器、\
+             脚本、管道、重定向、未知命令、敏感路径、修改/删除/安装/下载等）以及你标记 \
+             requires_approval 的命令都会经过用户批准，获批后才执行，请先说明意图。\
+             不要用 shell 引号/变量拼接规避审批。"
                 .to_string()
         }
         (crate::models::PermissionMode::Smart, true) => {
-            "Read-only exec_command calls run automatically; write operations (modifying, deleting, \
-             installing, downloading, …), commands matching dangerous rules, and commands you mark \
-             with requires_approval go through user approval and only run once approved; state your \
-             intent first."
+            "Only simple, proven safe read-only exec_command calls run automatically. All other \
+             commands (interpreters, scripts, pipes, redirections, unknown commands, sensitive \
+             paths, modifying/deleting/installing/downloading, …) and commands you mark with \
+             requires_approval go through user approval and only run once approved; state your \
+             intent first. Do not use shell quoting or variable tricks to bypass approval."
                 .to_string()
         }
         (crate::models::PermissionMode::None, false) => {

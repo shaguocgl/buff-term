@@ -468,6 +468,23 @@ impl RusshManager {
         }
     }
 
+    /// 主机删除或连接信息变更时整体移除池化连接：
+    /// 之后 acquire 会重新建连，避免继续复用指向旧地址/旧用户的连接。
+    /// 已持有租约的进行中操作仍可收尾，但不会再被新的命令复用。
+    pub(crate) fn drop_host(&self, host_id: &str) {
+        let slot = self
+            .conns
+            .lock()
+            .unwrap()
+            .remove(host_id)
+            .map(|entry| entry.slot);
+        if let Some(slot) = slot {
+            if let Ok(mut guard) = slot.try_lock() {
+                *guard = None;
+            }
+        }
+    }
+
     /// 更新指定主机的最近使用时间（连接成功后调用）。
     pub(crate) fn touch(&self, host_id: &str) {
         let map = self.conns.lock().unwrap();
@@ -495,6 +512,65 @@ impl RusshManager {
                 }
             }
         }
+    }
+
+    /// 解析远端路径的真实目标（用于 read_file 的敏感路径判断）。
+    /// `realpath` 不可用时返回 None，由调用方回退到原路径。
+    pub async fn resolve_path(&self, host: &Host, path: &str) -> Option<String> {
+        let command = format!("realpath -- {}", crate::util::shq(path));
+        let out = self
+            .exec(host, &command, Duration::from_secs(5))
+            .await
+            .ok()?;
+        let real = out.text.trim();
+        if real.starts_with('/') && !real.contains('\n') && !real.contains('\r') {
+            Some(real.to_string())
+        } else {
+            None
+        }
+    }
+
+    /// 对 `cat/head/tail/grep` 这类内容读取命令，预解析参数里的文件路径，
+    /// 防止 `/tmp/link -> /etc/shadow` 这类符号链接绕过敏感路径判定。
+    /// 只处理安全白名单内的简单命令；其他命令本来就需要审批。
+    pub async fn command_reads_sensitive_path(&self, host: &Host, command: &str) -> bool {
+        if !crate::safety::is_safe_readonly_command(command) {
+            return false;
+        }
+        let tokens: Vec<&str> = command.split_whitespace().collect();
+        let Some(first) = tokens.first().map(|token| token.trim_matches(|c| c == '\'' || c == '"').to_ascii_lowercase()) else {
+            return false;
+        };
+        if !matches!(first.as_str(), "cat" | "head" | "tail" | "grep" | "egrep" | "fgrep") {
+            return false;
+        }
+        let mut candidates = Vec::new();
+        let mut skipped_pattern = false;
+        for raw in tokens.iter().skip(1) {
+            let token = raw.trim_matches(|c| c == '\'' || c == '"');
+            if token.is_empty() || token.starts_with('-') || token.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            // grep 的第一个非选项参数是 pattern，不当作文件路径。
+            if matches!(first.as_str(), "grep" | "egrep" | "fgrep") && !skipped_pattern {
+                skipped_pattern = true;
+                continue;
+            }
+            if candidates.len() >= 6 {
+                // 参数过多时无法逐一 realpath 预检；保守地要求审批，
+                // 而不是跳过第 7 个及之后的参数（那会留下符号链接绕过）。
+                return true;
+            }
+            candidates.push(token.to_string());
+        }
+        for candidate in candidates {
+            if let Some(real) = self.resolve_path(host, &candidate).await {
+                if crate::safety::is_sensitive_path(&real) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     pub async fn exec(
@@ -731,12 +807,17 @@ async fn authenticate_with_password(
                 KeyboardInteractiveAuthResponse::Success => return Ok(()),
                 KeyboardInteractiveAuthResponse::Failure { .. } => break,
                 KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => {
-                    // echo=false 或提示语含 password/密码 → 回应密码，其余 prompt 回空串
+                    // 只对明确的密码提示回应密码，避免把口令发给 OTP / 验证码 /
+                    // 二次验证等其它 echo=false 提示（既有安全风险，也会破坏 MFA）。
                     let answers = prompts
                         .iter()
                         .map(|p| {
                             let lower = p.prompt.to_lowercase();
-                            if !p.echo || lower.contains("password") || p.prompt.contains("密码") {
+                            if lower.contains("password")
+                                || lower.contains("passphrase")
+                                || p.prompt.contains("密码")
+                                || p.prompt.contains("口令")
+                            {
                                 password.clone()
                             } else {
                                 String::new()

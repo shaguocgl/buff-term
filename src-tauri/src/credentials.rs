@@ -2,19 +2,24 @@ use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
+#[cfg(not(test))]
 use keyring::Entry;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
 /// 主密钥在系统钥匙串中的条目：SQLite 中只存密文，解密需本机钥匙串里的密钥。
+#[cfg(not(test))]
 const MASTER_KEY_SERVICE: &str = "com.buffterm.agent";
+#[cfg(not(test))]
 const MASTER_KEY_ACCOUNT: &str = "master-key";
 
 /// 主密钥内存缓存（全局维度，一把密钥加密所有凭据）：
 /// 首次从钥匙串读取/生成一次，之后解密任何凭据（AI 调用、任意主机连接）
 /// 都直接走内存，不再重复访问钥匙串。
+#[cfg(not(test))]
 static MASTER_KEY_CACHE: OnceLock<[u8; 32]> = OnceLock::new();
+#[cfg(not(test))]
 static MASTER_KEY_LOCK: Mutex<()> = Mutex::new(());
 
 /// 内存凭据缓存（明文）：解密结果只计算一次，避免反复解密与弹钥匙串授权。
@@ -45,10 +50,12 @@ fn cache_remove(kind: &str, id: &str) {
         .remove(&(kind.to_string(), id.to_string()));
 }
 
+#[cfg(not(test))]
 fn key_to_hex(k: &[u8]) -> String {
     k.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+#[cfg(not(test))]
 fn hex_to_key(s: &str) -> Result<[u8; 32], String> {
     if s.len() != 64 {
         return Err(crate::i18n::t("主密钥长度异常", "The master key has an unexpected length").to_string());
@@ -63,20 +70,30 @@ fn hex_to_key(s: &str) -> Result<[u8; 32], String> {
 
 /// 获取（或首次生成并保存）AES-256 主密钥。
 fn master_key() -> Result<[u8; 32], String> {
-    // 已缓存 → 直接返回，后续不再访问钥匙串
-    if let Some(key) = MASTER_KEY_CACHE.get() {
-        return Ok(*key);
+    // 单元测试固定使用内存密钥：CI 的 Windows/macOS runner 没有稳定的
+    // 交互式钥匙串，测试不应依赖系统凭据管理器，也不应污染真实钥匙串。
+    #[cfg(test)]
+    {
+        return Ok([0x42; 32]);
     }
-    let _guard = MASTER_KEY_LOCK.lock().unwrap();
-    if let Some(key) = MASTER_KEY_CACHE.get() {
-        return Ok(*key);
+    #[cfg(not(test))]
+    {
+        // 已缓存 → 直接返回，后续不再访问钥匙串
+        if let Some(key) = MASTER_KEY_CACHE.get() {
+            return Ok(*key);
+        }
+        let _guard = MASTER_KEY_LOCK.lock().unwrap();
+        if let Some(key) = MASTER_KEY_CACHE.get() {
+            return Ok(*key);
+        }
+        let key = load_or_create_master_key()?;
+        let _ = MASTER_KEY_CACHE.set(key);
+        Ok(key)
     }
-    let key = load_or_create_master_key()?;
-    let _ = MASTER_KEY_CACHE.set(key);
-    Ok(key)
 }
 
 /// 从钥匙串读取或首次生成主密钥（仅在未缓存时调用一次）。
+#[cfg(not(test))]
 fn load_or_create_master_key() -> Result<[u8; 32], String> {
     let entry = Entry::new(MASTER_KEY_SERVICE, MASTER_KEY_ACCOUNT)
         .map_err(|e| format!("{}: {e}", crate::i18n::t("初始化钥匙串失败", "Failed to initialize the keychain")))?;
@@ -289,6 +306,13 @@ pub fn get_smtp_password() -> Option<String> {
     let plain = decrypt_secret(&enc).ok()?;
     cache_set("smtp-password", "password", plain.clone());
     Some(plain)
+}
+
+pub fn delete_smtp_password() {
+    cache_remove("smtp-password", "password");
+    if let Some(db) = db() {
+        let _ = db.delete_credential("alert:smtp", "password");
+    }
 }
 
 /// 迁移历史明文凭据（升级自旧版本）：MCP token 明文在 mcp_service 表、

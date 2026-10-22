@@ -2,7 +2,7 @@
 //! 用户中断或出错。会话/租约状态在 agent.rs，工具定义在 tools.rs，
 //! 审批判定在 approval.rs，流式解析在 stream.rs。
 
-use super::approval::approval_reason;
+use super::approval::approval_reason_with_sensitive;
 use super::archive;
 use super::context::{build_context_view, CompressionStrategy};
 use super::memory::{self, ContextMemory, SummaryCheckpoint};
@@ -16,7 +16,7 @@ use crate::db::Db;
 use crate::i18n::{is_en, t};
 use crate::models::{AuditLog, Host, PermissionMode, TaskPlan};
 use crate::russh::RusshManager;
-use crate::safety::sanitize;
+use crate::safety::{command_has_sensitive_path, sanitize};
 use crate::util::{extract_error, now, truncate};
 use futures_util::StreamExt;
 use serde_json::Value;
@@ -721,6 +721,13 @@ impl<'a> AgentRun<'a> {
                     }
                 }
             }
+            if decoder.overflowed() {
+                return Err(t(
+                    "AI 平台返回的流式数据单行超过 8MB，已中止以保护内存",
+                    "A streaming line exceeded 8MB; aborted to protect memory",
+                )
+                .to_string());
+            }
         }
         // 处理流结束时缓冲区中残留的未换行数据，避免丢失最后一段内容
         if let Some(SseEvent::Data(v)) = decoder.finish() {
@@ -759,7 +766,7 @@ impl<'a> AgentRun<'a> {
         // 未识别的名字没有机会以「执行兜底」的形式混过去
         let Some(tool) = call.tool else {
             let msg = unknown_tool_message(call.display_name());
-            eprintln!(
+            log::warn!(
                 "[agent] {}: {}, args: {args}",
                 t("未知工具调用", "Unknown tool call"),
                 call.display_name()
@@ -828,8 +835,46 @@ impl<'a> AgentRun<'a> {
             return CallFlow::Next;
         }
 
+        // read_file 先解析符号链接真实目标：真实目标敏感时审批/执行都按它处理，
+        // 避免 /tmp/link -> /etc/shadow 绕过敏感路径检查。
+        let resolved_args = if tool == Tool::ReadFile {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            match ctx.russh.resolve_path(ctx.host, path).await {
+                Some(real) if real != path => {
+                    let mut next = args.clone();
+                    next["path"] = serde_json::json!(real);
+                    next
+                }
+                _ => args.clone(),
+            }
+        } else {
+            args.clone()
+        };
+        let args = &resolved_args;
+
+        // 智能审核下，cat/head/tail/grep 的文件参数先做 realpath 预检：
+        // 符号链接指向敏感文件时，不能因为输入路径本身不含敏感片段而自动执行。
+        let resolved_sensitive = if tool == Tool::ExecCommand
+            && ctx.permission_mode == PermissionMode::Smart
+        {
+            let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            !command_has_sensitive_path(command)
+                && ctx
+                    .russh
+                    .command_reads_sensitive_path(ctx.host, command)
+                    .await
+        } else {
+            false
+        };
+
         // 判定是否需要审批，审批原因随 request 事件下发给审批卡片展示
-        let approval = match approval_reason(ctx.permission_mode, tool, args, ctx.danger_rules) {
+        let approval = match approval_reason_with_sensitive(
+            ctx.permission_mode,
+            tool,
+            args,
+            ctx.danger_rules,
+            resolved_sensitive,
+        ) {
             None => "auto",
             Some(reason) => match self.request_approval(call, args, reason).await {
                 ApprovalDecision::Approved => "approved",
@@ -997,7 +1042,7 @@ impl<'a> AgentRun<'a> {
                 self.memory.warning = None;
             }
             Err(err) => {
-                eprintln!(
+                log::warn!(
                     "[agent] {}: {err}",
                     t("上下文摘要请求失败", "Context summary request failed")
                 );

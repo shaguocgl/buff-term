@@ -8,7 +8,7 @@ use crate::sshconfig;
 use crate::util::now;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 #[derive(Debug, Deserialize)]
 pub struct HostInput {
@@ -160,22 +160,79 @@ pub fn create_host(db: State<'_, Arc<Db>>, input: HostInput) -> Result<Host, Str
     create(&db, input)
 }
 
-#[tauri::command]
-pub fn update_host(db: State<'_, Arc<Db>>, host: Host) -> Result<(), String> {
-    update(&db, host)
+/// 主机连接指纹（地址/端口/用户/认证方式/私钥路径）。
+/// 这些字段一旦变化，旧的连接池、SFTP 会话、Agent 历史、监控与在跑任务
+/// 都不能继续沿用，否则新命令可能落到旧服务器。
+fn connection_changed(saved: &Host, next: &Host) -> bool {
+    saved.address != next.address
+        || saved.port != next.port
+        || saved.username != next.username
+        || saved.auth_type != next.auth_type
+        || saved.key_path != next.key_path
 }
 
 #[tauri::command]
-pub fn delete_host(
+pub async fn update_host(
+    app: AppHandle,
     db: State<'_, Arc<Db>>,
     agents: State<'_, crate::agent::AgentManager>,
     sftp_sessions: State<'_, crate::sftp::SftpSessionManager>,
+    transfers: State<'_, crate::sftp::SftpTransferRegistry>,
+    sessions: State<'_, crate::session::SessionManager>,
+    russh: State<'_, crate::russh::RusshManager>,
+    inspections: State<'_, crate::inspection::InspectionManager>,
+    remediations: State<'_, crate::remediation::RemediationManager>,
+    host: Host,
+) -> Result<(), String> {
+    let saved = db
+        .get_host(&host.id)
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取主机失败", "Failed to read the host")))?
+        .ok_or_else(|| crate::i18n::t("主机不存在或已被删除", "The host does not exist or has been deleted").to_string())?;
+    let changed = connection_changed(&saved, &host);
+    update(&db, host.clone())?;
+    if changed {
+        // 连接信息变更：先取消/清空所有与旧主机绑定的运行时状态，再关闭会话。
+        inspections.cancel_for_host(&host.id);
+        remediations.cancel_for_host(&host.id);
+        agents.reset_host(&host.id);
+        transfers.cancel_for_host(&host.id);
+        sftp_sessions.drop_host(&host.id);
+        russh.drop_host(&host.id);
+        sessions.close_host(&app, &host.id).await;
+        let _ = app.emit(
+            "host:connection-changed",
+            serde_json::json!({ "host_id": host.id, "deleted": false }),
+        );
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn delete_host(
+    app: AppHandle,
+    db: State<'_, Arc<Db>>,
+    agents: State<'_, crate::agent::AgentManager>,
+    sftp_sessions: State<'_, crate::sftp::SftpSessionManager>,
+    transfers: State<'_, crate::sftp::SftpTransferRegistry>,
+    sessions: State<'_, crate::session::SessionManager>,
+    russh: State<'_, crate::russh::RusshManager>,
+    inspections: State<'_, crate::inspection::InspectionManager>,
+    remediations: State<'_, crate::remediation::RemediationManager>,
     id: String,
 ) -> Result<(), String> {
-    // 先取消该主机上正在运行的 agent 循环并作废其写回、清空历史与台账（借用 id），再删除主机（move id）
+    // 先停掉所有与这台主机绑定的长任务和已认证会话，再删数据库记录。
+    inspections.cancel_for_host(&id);
+    remediations.cancel_for_host(&id);
     agents.reset_host(&id);
+    transfers.cancel_for_host(&id);
     sftp_sessions.drop_host(&id);
-    delete(&db, id)?;
+    russh.drop_host(&id);
+    sessions.close_host(&app, &id).await;
+    delete(&db, id.clone())?;
+    let _ = app.emit(
+        "host:connection-changed",
+        serde_json::json!({ "host_id": id, "deleted": true }),
+    );
     Ok(())
 }
 

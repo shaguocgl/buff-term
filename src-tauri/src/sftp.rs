@@ -36,6 +36,14 @@ pub struct SftpEntry {
     pub perms: String,
     pub user: String,
     pub group: String,
+    /// 完整路径命中敏感路径规则：删除/重命名/打开时前端展示警告
+    pub sensitive: bool,
+}
+
+/// 判断远端路径是否是敏感路径（供前端在上传/删除前提示）。
+#[tauri::command]
+pub fn sftp_check_sensitive(path: String) -> bool {
+    is_sensitive_remote_path(&path)
 }
 
 fn success(text: impl Into<String>) -> SftpResult {
@@ -45,6 +53,37 @@ fn success(text: impl Into<String>) -> SftpResult {
     }
 }
 
+/// 变更类 SFTP 操作统一写审计。删除/重命名/上传同样能绕过终端防护，
+/// 不能只在编辑器保存时留痕。
+#[allow(clippy::too_many_arguments)]
+fn write_sftp_audit(
+    db: &Db,
+    host: &Host,
+    tool: &str,
+    summary: &str,
+    approval: &str,
+    status: &str,
+    result: Option<&str>,
+    duration_ms: u64,
+) {
+    let log = AuditLog {
+        id: uuid::Uuid::new_v4().to_string(),
+        ts: now(),
+        session_id: None,
+        host_id: host.id.clone(),
+        host_label: format!("{} ({})", host.name, host.label_address()),
+        tool_name: tool.to_string(),
+        source: "sftp".to_string(),
+        summary: truncate(&sanitize(summary), 500),
+        permission_mode: "sftp".to_string(),
+        approval: approval.to_string(),
+        status: status.to_string(),
+        result: result.map(|text| truncate(&sanitize(text), 300)),
+        duration_ms: Some(duration_ms),
+    };
+    let _ = db.insert_audit_log(&log);
+}
+
 /// 校验本地路径：必须为绝对路径，且拒绝凭据类敏感目录，
 /// 防止恶意前端/注入把私钥、云凭据等本地文件上传到远端，
 /// 或覆盖下载到敏感位置。
@@ -52,23 +91,14 @@ fn validate_local_path(local: &str) -> Result<(), String> {
     if !std::path::Path::new(local).is_absolute() {
         return Err(crate::i18n::t("本地路径必须是绝对路径", "The local path must be absolute").to_string());
     }
-    let lower = local.to_ascii_lowercase();
-    for bad in [
-        "/.ssh/",
-        "\\.ssh\\",
-        "/.gnupg/",
-        "\\.gnupg\\",
-        "/.aws/",
-        "\\.aws\\",
-        "/.azure/",
-    ] {
-        if lower.contains(bad) {
-            return Err(if crate::i18n::is_en() {
-                format!("The local path contains a sensitive directory ({bad}); the operation was rejected")
-            } else {
-                format!("本地路径包含敏感目录（{bad}），已拒绝该操作")
-            });
-        }
+    // 与远端敏感路径共用规则，额外挡住 .ssh/.gnupg/.aws/.azure 等本地凭据目录。
+    if crate::safety::is_sensitive_path(local) {
+        return Err(if crate::i18n::is_en() {
+            "The local path is a sensitive credential/system location; the operation was rejected"
+                .to_string()
+        } else {
+            "本地路径属于敏感凭据/系统位置，已拒绝该操作".to_string()
+        });
     }
     Ok(())
 }
@@ -78,15 +108,21 @@ fn validate_local_path(local: &str) -> Result<(), String> {
 #[derive(Default)]
 pub struct SftpTransferRegistry {
     flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// transfer_id → host_id：主机删除/连接变更时取消其进行中的传输
+    hosts: Mutex<HashMap<String, String>>,
 }
 
 impl SftpTransferRegistry {
-    fn register(&self, id: &str) -> Arc<AtomicBool> {
+    fn register(&self, id: &str, host_id: &str) -> Arc<AtomicBool> {
         let flag = Arc::new(AtomicBool::new(false));
         self.flags
             .lock()
             .unwrap()
             .insert(id.to_string(), flag.clone());
+        self.hosts
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), host_id.to_string());
         flag
     }
     fn cancel(&self, id: &str) -> bool {
@@ -98,8 +134,26 @@ impl SftpTransferRegistry {
             None => false,
         }
     }
+    /// 取消某主机的全部进行中传输（主机删除/连接信息变更时调用）。
+    pub fn cancel_for_host(&self, host_id: &str) {
+        let ids: Vec<String> = self
+            .hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, host)| host.as_str() == host_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let flags = self.flags.lock().unwrap();
+        for id in ids {
+            if let Some(flag) = flags.get(&id) {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+    }
     fn remove(&self, id: &str) {
         self.flags.lock().unwrap().remove(id);
+        self.hosts.lock().unwrap().remove(id);
     }
 }
 
@@ -466,6 +520,11 @@ async fn list_dir(sftp: &SftpSession, path: &str) -> Result<Vec<SftpEntry>, Stri
             };
             link_jobs.push((entries.len(), joined));
         }
+        let full_path = if path.ends_with('/') {
+            format!("{path}{name}")
+        } else {
+            format!("{path}/{name}")
+        };
         entries.push(SftpEntry {
             name,
             is_dir,
@@ -475,6 +534,7 @@ async fn list_dir(sftp: &SftpSession, path: &str) -> Result<Vec<SftpEntry>, Stri
             perms: format!("{}{}", file_type_char(&meta), permission_string(&meta)),
             user: attr_value(meta.user.as_deref(), meta.uid),
             group: attr_value(meta.group.as_deref(), meta.gid),
+            sensitive: is_sensitive_remote_path(&full_path),
         });
     }
     // 并发解析所有链接目标；解析失败按悬空链接处理（非目录、保留 lstat size）
@@ -527,7 +587,7 @@ pub async fn sftp_download(
 ) -> Result<SftpResult, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
     validate_local_path(&local)?;
-    let cancelled = registry.register(&transfer_id);
+    let cancelled = registry.register(&transfer_id, &host_id);
     let result = with_sftp(&russh, &host, TRANSFER_TIMEOUT, |sftp| {
         let remote = remote.clone();
         let local = local.clone();
@@ -544,9 +604,19 @@ pub async fn sftp_download(
                 .open(remote)
                 .await
                 .map_err(|e| format!("{}: {e}", crate::i18n::t("打开远程文件失败", "Failed to open the remote file")))?;
-            let mut dst = tokio::fs::File::create(&local)
+            // 先写同目录临时文件，成功后再 rename 覆盖目标：
+            // 下载失败/取消绝不能截断或删除用户已有的本地文件。
+            let existing_perms = tokio::fs::metadata(&local)
                 .await
-                .map_err(|e| format!("{}: {e}", crate::i18n::t("创建本地文件失败", "Failed to create the local file")))?;
+                .ok()
+                .map(|meta| meta.permissions());
+            let temp = format!(
+                "{local}.buffterm-{}.part",
+                uuid::Uuid::new_v4().simple()
+            );
+            let mut dst = tokio::fs::File::create(&temp)
+                .await
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("创建本地临时文件失败", "Failed to create the local temporary file")))?;
             let count = copy_with_progress(
                 &mut src,
                 &mut dst,
@@ -558,15 +628,23 @@ pub async fn sftp_download(
             )
             .await;
             if count.is_err() {
-                // 取消/失败时先清理半成品本地文件（尽力而为），
-                // 并直接返回原始错误，不被收尾操作（flush/close）掩盖
-                let _ = tokio::fs::remove_file(&local).await;
+                let _ = tokio::fs::remove_file(&temp).await;
                 return count;
             }
-            dst.flush()
-                .await
-                .map_err(|e| format!("{}: {e}", crate::i18n::t("刷新本地文件失败", "Failed to flush the local file")))?;
+            if let Err(e) = dst.flush().await {
+                let _ = tokio::fs::remove_file(&temp).await;
+                return Err(format!("{}: {e}", crate::i18n::t("刷新本地文件失败", "Failed to flush the local file")));
+            }
+            let _ = dst.sync_all().await;
+            drop(dst);
             let _ = src.close().await;
+            if let Err(e) = tokio::fs::rename(&temp, &local).await {
+                let _ = tokio::fs::remove_file(&temp).await;
+                return Err(format!("{}: {e}", crate::i18n::t("替换本地文件失败", "Failed to replace the local file")));
+            }
+            if let Some(perms) = existing_perms {
+                let _ = tokio::fs::set_permissions(&local, perms).await;
+            }
             count
         })
     })
@@ -590,10 +668,25 @@ pub async fn sftp_upload(
     local: String,
     remote: String,
     transfer_id: String,
+    confirmed: Option<bool>,
 ) -> Result<SftpResult, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
     validate_local_path(&local)?;
-    let cancelled = registry.register(&transfer_id);
+    let confirmed = confirmed.unwrap_or(false);
+    let sensitive = is_sensitive_remote_path(&remote);
+    if sensitive && !confirmed {
+        write_sftp_audit(
+            &db, &host, "sftp_upload", &remote, "confirm", "confirm",
+            Some("sensitive path; confirmation required"), 0,
+        );
+        return Err(if crate::i18n::is_en() {
+            format!("{remote} is a sensitive path; uploading requires confirmation")
+        } else {
+            format!("{remote} 属于敏感路径，上传需要确认")
+        });
+    }
+    let started = Instant::now();
+    let cancelled = registry.register(&transfer_id, &host_id);
     let result = with_sftp(&russh, &host, TRANSFER_TIMEOUT, |sftp| {
         let local = local.clone();
         let remote = remote.clone();
@@ -611,6 +704,13 @@ pub async fn sftp_upload(
             // 与 write_atomic 一致：符号链接写到真实目标（rename 到链接路径会把链接替换成普通文件），
             // 目标是目录直接拒绝，覆盖已有文件时沿用其权限
             let real = resolve_link(sftp, &remote).await;
+            if (is_sensitive_remote_path(&remote) || is_sensitive_remote_path(&real)) && !confirmed {
+                return Err(if crate::i18n::is_en() {
+                    format!("{remote} is a sensitive path; uploading requires confirmation")
+                } else {
+                    format!("{remote} 属于敏感路径，上传需要确认")
+                });
+            }
             let existing = sftp.symlink_metadata(real.as_str()).await.ok();
             if existing.as_ref().is_some_and(|m| m.file_type().is_dir()) {
                 return Err(crate::i18n::t("目标是目录，无法写入文件", "The target is a directory; cannot write a file").to_string());
@@ -656,6 +756,26 @@ pub async fn sftp_upload(
     })
     .await;
     registry.remove(&transfer_id);
+    let audit_result = match &result {
+        Ok(count) => {
+            if crate::i18n::is_en() {
+                format!("Uploaded {count} bytes")
+            } else {
+                format!("已上传 {count} 字节")
+            }
+        }
+        Err(e) => e.clone(),
+    };
+    write_sftp_audit(
+        &db,
+        &host,
+        "sftp_upload",
+        &remote,
+        if sensitive { "approved" } else { "auto" },
+        if result.is_ok() { "ok" } else { "error" },
+        Some(&audit_result),
+        started.elapsed().as_millis() as u64,
+    );
     let count = result?;
     Ok(success(if crate::i18n::is_en() {
             format!("Uploaded {count} bytes")
@@ -671,9 +791,20 @@ pub async fn sftp_delete(
     manager: State<'_, SftpSessionManager>,
     host_id: String,
     path: String,
+    confirmed: Option<bool>,
 ) -> Result<SftpResult, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    with_browse_sftp(&manager, &russh, &host, Duration::from_secs(20), |sftp| {
+    let sensitive = is_sensitive_remote_path(&path);
+    if sensitive && !confirmed.unwrap_or(false) {
+        write_sftp_audit(&db, &host, "sftp_delete", &path, "confirm", "confirm", Some("sensitive path; confirmation required"), 0);
+        return Err(if crate::i18n::is_en() {
+            format!("{path} is a sensitive path; deleting requires confirmation")
+        } else {
+            format!("{path} 属于敏感路径，删除需要确认")
+        });
+    }
+    let started = Instant::now();
+    let result = with_browse_sftp(&manager, &russh, &host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
         Box::pin(async move {
             // lstat：符号链接按链接本身删除，不跟随到目标目录
@@ -693,7 +824,15 @@ pub async fn sftp_delete(
             Ok(())
         })
     })
-    .await?;
+    .await;
+    write_sftp_audit(
+        &db, &host, "sftp_delete", &path,
+        if sensitive { "approved" } else { "auto" },
+        if result.is_ok() { "ok" } else { "error" },
+        result.as_ref().err().map(String::as_str),
+        started.elapsed().as_millis() as u64,
+    );
+    result?;
     Ok(success(crate::i18n::t("已删除", "Deleted")))
 }
 
@@ -706,7 +845,9 @@ pub async fn sftp_mkdir(
     path: String,
 ) -> Result<SftpResult, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    with_browse_sftp(&manager, &russh, &host, Duration::from_secs(20), |sftp| {
+    let sensitive = is_sensitive_remote_path(&path);
+    let started = Instant::now();
+    let result = with_browse_sftp(&manager, &russh, &host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
         Box::pin(async move {
             sftp.create_dir(path)
@@ -715,7 +856,15 @@ pub async fn sftp_mkdir(
             Ok(())
         })
     })
-    .await?;
+    .await;
+    write_sftp_audit(
+        &db, &host, "sftp_mkdir", &path,
+        if sensitive { "approved" } else { "auto" },
+        if result.is_ok() { "ok" } else { "error" },
+        result.as_ref().err().map(String::as_str),
+        started.elapsed().as_millis() as u64,
+    );
+    result?;
     Ok(success(crate::i18n::t("已创建目录", "Directory created")))
 }
 
@@ -727,9 +876,20 @@ pub async fn sftp_rename(
     host_id: String,
     from: String,
     to: String,
+    confirmed: Option<bool>,
 ) -> Result<SftpResult, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    with_browse_sftp(&manager, &russh, &host, Duration::from_secs(20), |sftp| {
+    let sensitive = is_sensitive_remote_path(&from) || is_sensitive_remote_path(&to);
+    if sensitive && !confirmed.unwrap_or(false) {
+        write_sftp_audit(&db, &host, "sftp_rename", &format!("{from} -> {to}"), "confirm", "confirm", Some("sensitive path; confirmation required"), 0);
+        return Err(if crate::i18n::is_en() {
+            "A sensitive path is involved; renaming requires confirmation".to_string()
+        } else {
+            "涉及敏感路径，重命名需要确认".to_string()
+        });
+    }
+    let started = Instant::now();
+    let result = with_browse_sftp(&manager, &russh, &host, Duration::from_secs(20), |sftp| {
         let from = from.clone();
         let to = to.clone();
         Box::pin(async move {
@@ -739,7 +899,15 @@ pub async fn sftp_rename(
             Ok(())
         })
     })
-    .await?;
+    .await;
+    write_sftp_audit(
+        &db, &host, "sftp_rename", &format!("{from} -> {to}"),
+        if sensitive { "approved" } else { "auto" },
+        if result.is_ok() { "ok" } else { "error" },
+        result.as_ref().err().map(String::as_str),
+        started.elapsed().as_millis() as u64,
+    );
+    result?;
     Ok(success(crate::i18n::t("已重命名", "Renamed")))
 }
 
@@ -792,48 +960,10 @@ fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF_BYTES).any(|b| *b == 0)
 }
 
-/// 敏感路径判定：命中时保存需用户二次确认。
-/// 覆盖私钥 / 账号口令 / sudo / 认证配置，以及可持久化执行任意命令的
-/// 定时任务、开机自启与登录 shell 启动脚本。
+/// 敏感路径判定：与 AI/MCP 工具共用同一份规则，避免 SFTP 与 Agent 的
+/// 安全口径漂移。命中时保存/删除/重命名/上传都需要确认。
 fn is_sensitive_remote_path(path: &str) -> bool {
-    let p = path.replace('\\', "/").to_ascii_lowercase();
-    if p.contains("/.ssh/") || p.ends_with("/.ssh") {
-        return true;
-    }
-    const CRITICAL: &[&str] = &[
-        // 账号 / 口令 / 提权 / 认证
-        "/etc/shadow",
-        "/etc/gshadow",
-        "/etc/passwd",
-        "/etc/group",
-        "/etc/sudoers",
-        "/etc/pam.d/",
-        "/etc/ld.so.preload",
-        "/etc/ssh/",
-        "/etc/krb5.keytab",
-        "/etc/ssl/private/",
-        // 定时任务 / 开机自启
-        "/etc/crontab",
-        "/etc/cron.d/",
-        "/etc/cron.daily/",
-        "/etc/cron.hourly/",
-        "/etc/cron.weekly/",
-        "/var/spool/cron",
-        "/etc/systemd/",
-        "/etc/init.d/",
-        "/etc/rc.local",
-        "/etc/profile.d/",
-        // 登录 shell 启动脚本
-        "/.bashrc",
-        "/.bash_profile",
-        "/.bash_login",
-        "/.bash_logout",
-        "/.profile",
-        "/.zshrc",
-        "/.zprofile",
-        "/.config/fish/",
-    ];
-    CRITICAL.iter().any(|f| p.contains(f))
+    crate::safety::is_sensitive_path(path)
 }
 
 /// 取远端路径的父目录（`/a/b.txt` → `/a`，`b.txt` → ``）。
@@ -871,41 +1001,74 @@ fn join_remote(dir: &str, name: &str) -> String {
 /// 符号链接解析：保存时若直接 rename 到链接路径会把链接替换成普通文件，
 /// 因此先解析到真实目标再写入（相对目标按链接所在目录拼接）。
 async fn resolve_link(sftp: &SftpSession, path: &str) -> String {
-    match sftp.symlink_metadata(path).await {
-        Ok(meta) if meta.file_type().is_symlink() => match sftp.read_link(path).await {
-            Ok(target) => join_remote(remote_parent(path), &target),
-            Err(_) => path.to_string(),
-        },
-        _ => path.to_string(),
+    // 递归解析嵌套符号链接（最多 8 层），同时用于敏感路径判断与写入目标。
+    // 不跟随无限链，避免恶意/损坏链接造成死循环。
+    let mut current = path.to_string();
+    for _ in 0..8 {
+        let Ok(meta) = sftp.symlink_metadata(&current).await else {
+            return current;
+        };
+        if !meta.file_type().is_symlink() {
+            return current;
+        }
+        match sftp.read_link(&current).await {
+            Ok(target) => current = join_remote(remote_parent(&current), &target),
+            Err(_) => return current,
+        }
     }
+    current
 }
 
 /// 同目录临时文件名：`/etc/nginx.conf` → `/etc/.nginx.conf.buffterm-<uuid>.tmp`
 fn temp_path(path: &str) -> String {
     let dir = remote_parent(path);
     let name = path.rsplit('/').next().unwrap_or(path);
-    let prefix = if dir.is_empty() || dir == "/" { "" } else { dir };
+    // 相对路径不能拼成 "/.name"（会跑到根目录）；空父目录保持相对语义，
+    // 用 "./" 前缀让临时文件与目标仍在同一目录。
+    let prefix = if dir.is_empty() {
+        "."
+    } else if dir == "/" {
+        ""
+    } else {
+        dir
+    };
     format!(
         "{prefix}/.{name}.buffterm-{}.tmp",
         uuid::Uuid::new_v4().simple()
     )
 }
 
-/// 用临时文件原子替换目标：多数服务端 rename 直接覆盖；个别实现拒绝已存在目标时
-/// 退化为「先删后改名」。第二次改名仍失败时**保留临时文件**（此时原文件可能已删除，
-/// 临时文件是新内容唯一副本），并在错误里给出其路径供手工恢复。
+/// 用临时文件替换目标：多数服务端 rename 直接覆盖；个别实现拒绝已存在目标时，
+/// 先把旧目标 rename 到备份，再替换，失败则把备份改回。绝不再“先删目标”：
+/// 第二次 rename 失败时原文件/新内容至少有一份保留，并在错误里给出临时路径。
 async fn replace_with_temp(sftp: &SftpSession, temp: &str, path: &str) -> Result<(), String> {
     if sftp.rename(temp, path).await.is_ok() {
         return Ok(());
     }
-    let _ = sftp.remove_file(path).await;
-    sftp.rename(temp, path).await.map_err(|e| {
-        format!(
-            "{}: {e}（{}: {temp}）",
-            crate::i18n::t("替换目标文件失败", "Failed to replace the target file"),
-            crate::i18n::t("新内容已保留在临时文件", "the new content is kept in the temporary file")
-        )
-    })
+    let backup = format!(
+        "{path}.buffterm-backup-{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    let had_backup = sftp.rename(path, &backup).await.is_ok();
+    match sftp.rename(temp, path).await {
+        Ok(()) => {
+            if had_backup {
+                let _ = sftp.remove_file(&backup).await;
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if had_backup {
+                // 尽量恢复原目标；恢复失败时备份仍在，不会丢数据。
+                let _ = sftp.rename(&backup, path).await;
+            }
+            Err(format!(
+                "{}: {e}（{}: {temp}）",
+                crate::i18n::t("替换目标文件失败", "Failed to replace the target file"),
+                crate::i18n::t("新内容已保留在临时文件", "the new content is kept in the temporary file")
+            ))
+        }
+    }
 }
 
 /// 原子写入：先写同目录临时文件，再 rename 覆盖目标。
@@ -973,11 +1136,12 @@ pub async fn sftp_read_file(
     path: String,
 ) -> Result<SftpFileContent, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    let sensitive = is_sensitive_remote_path(&path);
     with_browse_sftp(&manager, &russh, &host, Duration::from_secs(20), |sftp| {
         let path = path.clone();
         Box::pin(async move {
             let real = resolve_link(sftp, &path).await;
+            // 同时检查输入路径与符号链接目标，避免通过 /tmp/link 绕过敏感路径提示
+            let sensitive = is_sensitive_remote_path(&path) || is_sensitive_remote_path(&real);
             let meta = sftp
                 .metadata(real.as_str())
                 .await
@@ -1050,20 +1214,20 @@ pub async fn sftp_write_file(
     confirmed: bool,
 ) -> Result<SftpWriteOutcome, String> {
     let host = crate::hosts::load_host(&db, &host_id)?;
-    let sensitive = is_sensitive_remote_path(&path);
-    if sensitive && !confirmed {
+    // 直接命中敏感路径时先返回确认，避免为了弹确认而必须先建立 SFTP 连接；
+    // 符号链接目标是否敏感仍需进入会话后解析（见下方闭包）。
+    if is_sensitive_remote_path(&path) && !confirmed {
         return Ok(SftpWriteOutcome {
             ok: false,
             text: if crate::i18n::is_en() {
-            format!("{path} is a sensitive path; writing requires confirmation")
-        } else {
-            format!("{path} 属于敏感路径，写入需要确认")
-        },
+                format!("{path} is a sensitive path; writing requires confirmation")
+            } else {
+                format!("{path} 属于敏感路径，写入需要确认")
+            },
             requires_confirm: true,
             mtime: 0,
         });
     }
-
     let bytes = content.into_bytes();
     if bytes.len() as u64 > MAX_EDIT_BYTES {
         return Err(if crate::i18n::is_en() {
@@ -1085,18 +1249,47 @@ pub async fn sftp_write_file(
         let bytes = bytes.clone();
         Box::pin(async move {
             let real = resolve_link(sftp, &path).await;
+            // 敏感判断必须同时覆盖“用户输入路径”和“符号链接解析后的真实路径”：
+            // /tmp/link -> /etc/shadow 这种写法不能因为输入路径不敏感而漏掉。
+            let sensitive = is_sensitive_remote_path(&path) || is_sensitive_remote_path(&real);
+            if sensitive && !confirmed {
+                return Ok((0, true));
+            }
             write_atomic(sftp, &real, &bytes, expected_mtime).await?;
             // 回传写入后的 mtime，前端据此更新后续保存的并发修改基线
-            Ok(sftp
+            let mtime = sftp
                 .metadata(real.as_str())
                 .await
                 .ok()
                 .and_then(|m| m.mtime)
-                .unwrap_or(0) as u64)
+                .unwrap_or(0) as u64;
+            Ok((mtime, sensitive))
         })
     })
     .await;
 
+    let (_mtime, sensitive, result_text) = match &result {
+        Ok((mtime, sensitive)) => (
+            *mtime,
+            *sensitive,
+            if crate::i18n::is_en() {
+                format!("Wrote {total} bytes")
+            } else {
+                format!("已写入 {} 字节", total)
+            },
+        ),
+        Err(e) => (0, is_sensitive_remote_path(&path), e.clone()),
+    };
+    let requires_confirm = sensitive && !confirmed;
+    let audit_text = if requires_confirm {
+        if crate::i18n::is_en() {
+            format!("{path} is a sensitive path; confirmation required")
+        } else {
+            format!("{path} 属于敏感路径，需要确认")
+        }
+    } else {
+        result_text
+    };
     let log = AuditLog {
         id: uuid::Uuid::new_v4().to_string(),
         ts: now(),
@@ -1107,21 +1300,40 @@ pub async fn sftp_write_file(
         source: "sftp".to_string(),
         summary: truncate(&sanitize(&path), 500),
         permission_mode: "edit".to_string(),
-        approval: if sensitive { "approved" } else { "auto" }.to_string(),
-        status: if result.is_ok() { "ok" } else { "error" }.to_string(),
-        result: match &result {
-            Ok(_) => Some(if crate::i18n::is_en() {
-            format!("Wrote {total} bytes")
+        approval: if requires_confirm {
+            "confirm"
+        } else if sensitive {
+            "approved"
         } else {
-            format!("已写入 {} 字节", total)
-        }),
-            Err(e) => Some(truncate(&sanitize(e), 500)),
-        },
+            "auto"
+        }
+        .to_string(),
+        status: if requires_confirm {
+            "confirm"
+        } else if result.is_ok() {
+            "ok"
+        } else {
+            "error"
+        }
+        .to_string(),
+        result: Some(truncate(&sanitize(&audit_text), 500)),
         duration_ms: Some(started.elapsed().as_millis() as u64),
     };
     let _ = db.insert_audit_log(&log);
 
-    let mtime = result?;
+    if requires_confirm {
+        return Ok(SftpWriteOutcome {
+            ok: false,
+            text: if crate::i18n::is_en() {
+                format!("{path} is a sensitive path; writing requires confirmation")
+            } else {
+                format!("{path} 属于敏感路径，写入需要确认")
+            },
+            requires_confirm: true,
+            mtime: 0,
+        });
+    }
+    let (mtime, _) = result?;
     Ok(SftpWriteOutcome {
         ok: true,
         text: if crate::i18n::is_en() {
@@ -1170,6 +1382,15 @@ fn attr_value(value: Option<&str>, id: Option<u32>) -> String {
 mod tests {
     use super::*;
     use crate::models::AuthType;
+
+    #[test]
+    fn transfer_cancel_for_host_sets_flag() {
+        let registry = SftpTransferRegistry::default();
+        let flag = registry.register("t1", "h1");
+        registry.cancel_for_host("h1");
+        assert!(flag.load(Ordering::SeqCst));
+        registry.remove("t1");
+    }
 
     fn test_host(key_path: String) -> Host {
         Host {
@@ -1243,6 +1464,8 @@ mod tests {
         assert!(t.ends_with(".tmp"), "{t}");
         let t = temp_path("/a.txt");
         assert!(t.starts_with("/.a.txt.buffterm-"), "{t}");
+        let t = temp_path("a.txt");
+        assert!(t.starts_with("./.a.txt.buffterm-"), "相对路径不应落到根目录: {t}");
     }
 
     #[test]

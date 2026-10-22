@@ -8,6 +8,7 @@ interface Props {
   initialValue?: string;
   placeholder?: string;
   confirmText?: string;
+  hint?: string;
   onOk: (value: string) => void;
   onCancel: () => void;
 }
@@ -19,6 +20,7 @@ export default function PromptModal({
   initialValue = '',
   placeholder,
   confirmText,
+  hint,
   onOk,
   onCancel,
 }: Props) {
@@ -59,6 +61,7 @@ export default function PromptModal({
             }}
           />
         </label>
+        {hint && <p className="confirm-hint">{hint}</p>}
         <div className="tool-actions">
           <button className="btn primary small" onClick={submit}>
             {confirmLabel}

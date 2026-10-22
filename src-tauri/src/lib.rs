@@ -32,10 +32,33 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 单实例：第二个进程直接退出并聚焦已存在的窗口。否则两个实例会同时
+        // 打开同一个 SQLite、争用 MCP 端口并互相覆盖 settings。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        // 文件日志：Windows release 没有控制台，只有 eprintln 会丢失现场。
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("buffterm".into()),
+                    },
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ))
+                .level(log::LevelFilter::Info)
+                .build(),
+        )
         .setup(|app| {
             let dir = app
                 .path()
@@ -109,13 +132,13 @@ pub fn run() {
                                     let _ = app.state::<Arc<Db>>().save_mcp_service(&config);
                                 }
                             }
-                            Err(e) => eprintln!(
+                            Err(e) => log::error!(
                                 "[mcp] {}: {e}",
                                 crate::i18n::t("读取 MCP 配置失败", "Failed to read MCP config")
                             ),
                         }
                     }
-                    Err(e) => eprintln!(
+                    Err(e) => log::error!(
                         "[mcp] {}: {e}",
                         crate::i18n::t("启动 MCP 服务失败", "Failed to start MCP service")
                     ),
@@ -159,6 +182,7 @@ pub fn run() {
             sftp::sftp_mkdir,
             sftp::sftp_rename,
             sftp::sftp_exists,
+            sftp::sftp_check_sensitive,
             sftp::sftp_cancel_transfer,
             sftp::sftp_read_file,
             sftp::sftp_write_file,
@@ -178,10 +202,12 @@ pub fn run() {
             remediation::retry_remediation,
             alert::get_alert_settings,
             alert::save_alert_settings,
+            alert::clear_alert_password,
             alert::test_alert_settings,
             mcp::get_mcp_service,
             mcp::save_mcp_service,
             mcp::rotate_mcp_token,
+            mcp::reveal_mcp_token,
             mcp::mcp_approve,
             mcp::list_mcp_rules,
             mcp::add_mcp_rule,

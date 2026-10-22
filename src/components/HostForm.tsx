@@ -9,11 +9,18 @@ import { EyeIcon, EyeOffIcon, KeyIcon, ShieldIcon } from './Icons';
 
 interface Props {
   initial?: Host | null;
+  /** 保存前确认（连接信息变化且有未保存文件编辑时由 App 弹确认）。 */
+  onBeforeUpdate?: (current: Host, next: Host) => boolean;
   onSaved: () => void;
   onCancel: () => void;
 }
 
-export default function HostForm({ initial, onSaved, onCancel }: Props) {
+export default function HostForm({
+  initial,
+  onBeforeUpdate,
+  onSaved,
+  onCancel,
+}: Props) {
   const t = useT();
   const [name, setName] = useState(initial?.name ?? '');
   const [address, setAddress] = useState(initial?.address ?? '');
@@ -98,7 +105,7 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
     setSaving(true);
     try {
       if (initial) {
-        await updateHost({
+        const nextHost: Host = {
           ...initial,
           name: input.name,
           address: input.address,
@@ -107,7 +114,12 @@ export default function HostForm({ initial, onSaved, onCancel }: Props) {
           auth_type: input.auth_type,
           key_path: input.key_path ?? null,
           notes: input.notes ?? null,
-        });
+        };
+        if (onBeforeUpdate && !onBeforeUpdate(initial, nextHost)) {
+          setSaving(false);
+          return;
+        }
+        await updateHost(nextHost);
       } else {
         const host = await createHost(input);
         if (authType === 'password' && password) {

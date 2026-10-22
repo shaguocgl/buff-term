@@ -1158,6 +1158,11 @@ input::placeholder {
   color: var(--success);
 }
 
+.toast-error {
+  border-color: rgba(248, 113, 113, 0.5);
+  border-left: 3px solid var(--danger);
+}
+
 .toast-error .toast-icon {
   background: rgba(248, 113, 113, 0.15);
   color: var(--danger);
@@ -2933,6 +2938,28 @@ button.sftp-chevron:hover {
   color: var(--muted);
   flex: 1;
   min-width: 0;
+}
+
+.alert-warning {
+  margin: 2px 0 8px;
+  color: var(--warning, #f5a623);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.alert-clear-password {
+  margin-top: 6px;
+  align-self: flex-start;
+  border: 0;
+  background: transparent;
+  color: var(--accent, #7aa2ff);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+.alert-clear-password:hover {
+  text-decoration: underline;
 }
 
 .alert-field-label {
@@ -6209,6 +6236,13 @@ button.sftp-chevron:hover {
 .confirm-label {
   font-size: 12px;
   color: var(--muted);
+}
+
+.confirm-hint {
+  margin: 8px 0 0;
+  color: var(--warning, #f5a623);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .confirm-field input {

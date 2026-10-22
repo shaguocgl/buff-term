@@ -24,6 +24,7 @@ import {
   mcpApprove,
   onMcpApprovalRequest,
   onHostKeyConfirm,
+  onHostConnectionChanged,
   onTerminalGuardApproval,
   recordLaunch,
   sessionGuardApprove,
@@ -458,6 +459,45 @@ function App() {
     };
   }, [enqueueApproval]);
 
+  // 主机连接信息变更或删除：后端已经关闭该主机的会话、连接池与在跑任务，
+  // 前端同步关闭相关标签，避免继续用旧的 Host 对象/聊天记录操作新主机。
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    onHostConnectionChanged(({ host_id }) => {
+      const removed = tabsRef.current.filter((tab) => tab.host.id === host_id);
+      if (removed.length === 0) return;
+      const remaining = tabsRef.current.filter((tab) => tab.host.id !== host_id);
+      setTabs(remaining);
+      setDirtyTabs((prev) => {
+        const next = { ...prev };
+        for (const tab of removed) delete next[tab.key];
+        return next;
+      });
+      if (
+        activeKeyRef.current !== null &&
+        removed.some((tab) => tab.key === activeKeyRef.current)
+      ) {
+        setActiveKey(remaining[0]?.key ?? null);
+      }
+      setPanelByHost((prev) => {
+        if (!(host_id in prev)) return prev;
+        const next = { ...prev };
+        delete next[host_id];
+        return next;
+      });
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   const activeApproval = approvalQueue[0];
 
   useEffect(() => {
@@ -723,6 +763,24 @@ function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [closeTab]);
+
+  const confirmHostConnectionUpdate = useCallback(
+    (current: Host, next: Host) => {
+      const changed =
+        current.address !== next.address ||
+        current.port !== next.port ||
+        current.username !== next.username ||
+        current.auth_type !== next.auth_type ||
+        current.key_path !== next.key_path;
+      if (!changed) return true;
+      const hasDirtyTabs = tabsRef.current.some(
+        (tab) =>
+          tab.host.id === current.id && !!dirtyTabsRef.current[tab.key],
+      );
+      return !hasDirtyTabs || window.confirm(t('hostForm.unsavedTabsOnChange'));
+    },
+    [t],
+  );
 
   const handleDelete = async (host: Host) => {
     setDeleteHostTarget(null);
@@ -1527,6 +1585,7 @@ function App() {
                         : null
                   }
                   onOpenFile={(path) => handleOpenFile(host, path)}
+                  onNotify={showToast}
                   onClose={closePanel}
                 />
               ))}
@@ -1577,6 +1636,7 @@ function App() {
       {showForm && (
         <HostForm
           initial={editingHost}
+          onBeforeUpdate={confirmHostConnectionUpdate}
           onSaved={() => {
             setShowForm(false);
             setEditingHost(null);
@@ -1705,7 +1765,16 @@ function App() {
       {deleteHostTarget && (
         <ConfirmModal
           title={t('app.deleteHostTitle')}
-          body={t('app.deleteHostBody', { name: deleteHostTarget.name })}
+          body={
+            t('app.deleteHostBody', { name: deleteHostTarget.name }) +
+            (tabs.some(
+              (tab) =>
+                tab.host.id === deleteHostTarget.id &&
+                !!dirtyTabs[tab.key],
+            )
+              ? `\n\n${t('app.deleteHostDirtyWarning')}`
+              : '')
+          }
           confirmText={t('common.delete')}
           danger
           onConfirm={() => handleDelete(deleteHostTarget)}

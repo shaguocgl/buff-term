@@ -4,7 +4,7 @@
 use super::tools::Tool;
 use crate::i18n::t;
 use crate::models::PermissionMode;
-use crate::safety::{is_dangerous, is_write_operation};
+use crate::safety::{command_has_sensitive_path, is_dangerous, is_sensitive_path, is_write_operation};
 
 /// 返回 Some(原因)（随审批卡片展示）表示需要审批；None 表示直接执行。
 /// 基于已解析的 Tool 判定，与实际执行同一个值，
@@ -14,6 +14,18 @@ pub(super) fn approval_reason(
     tool: Tool,
     args: &serde_json::Value,
     danger_rules: &[String],
+) -> Option<String> {
+    approval_reason_with_sensitive(mode, tool, args, danger_rules, false)
+}
+
+/// 与 `approval_reason` 相同，但允许调用方先通过远端 realpath 判断
+/// `cat/grep` 的参数是否指向敏感文件（例如符号链接）。
+pub(super) fn approval_reason_with_sensitive(
+    mode: PermissionMode,
+    tool: Tool,
+    args: &serde_json::Value,
+    danger_rules: &[String],
+    resolved_sensitive: bool,
 ) -> Option<String> {
     // 任务台账与上下文回查只动本地状态，不访问远程主机，任何模式都不需要审批
     if matches!(tool, Tool::UpdateTaskPlan | Tool::RecallContext) {
@@ -29,6 +41,22 @@ pub(super) fn approval_reason(
             .to_string(),
         ),
         PermissionMode::Smart => {
+            // 读取敏感路径（私钥、凭据、cron/登录脚本等）即使在智能审核下
+            // 也需要用户确认，避免模型把秘密直接送进上下文或外部平台。
+            if tool == Tool::ReadFile {
+                let path = args.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                return if is_sensitive_path(path) {
+                    Some(
+                        t(
+                            "读取敏感路径，需要批准",
+                            "Reading a sensitive path needs approval",
+                        )
+                        .to_string(),
+                    )
+                } else {
+                    None
+                };
+            }
             if tool != Tool::ExecCommand {
                 return None;
             }
@@ -62,13 +90,21 @@ pub(super) fn approval_reason(
                     "{}{p}",
                     t("命中自定义规则：", "Matched custom rule: ")
                 ))
-            } else if is_write_operation(command) {
-                // 写操作（修改/删除/安装/网络写入等）同样需要批准，
-                // 与 MCP 只读模式的判定口径一致，避免静默放行文件修改
+            } else if resolved_sensitive || command_has_sensitive_path(command) {
                 Some(
                     t(
-                        "命令包含写操作，需要批准",
-                        "The command contains a write operation and needs approval",
+                        "命令包含敏感路径，需要批准",
+                        "The command contains a sensitive path and needs approval",
+                    )
+                    .to_string(),
+                )
+            } else if is_write_operation(command) {
+                // 默认拒绝：只有白名单内的简单只读命令才自动执行；其余
+                // （含解释器、脚本、管道、重定向和未知命令）一律审批。
+                Some(
+                    t(
+                        "命令不是可自动执行的安全只读命令，需要批准",
+                        "The command is not a proven safe read-only command and needs approval",
                     )
                     .to_string(),
                 )
@@ -148,10 +184,40 @@ mod tests {
         assert!(approval_reason(
             PermissionMode::Smart,
             Tool::ReadFile,
-            &serde_json::json!({"path": "/etc/shadow"}),
+            &serde_json::json!({"path": "/var/log/syslog"}),
             &[],
         )
         .is_none());
+    }
+
+    #[test]
+    fn smart_mode_flags_sensitive_read_and_unknown_commands() {
+        let reason = approval_reason(
+            PermissionMode::Smart,
+            Tool::ReadFile,
+            &serde_json::json!({"path": "/etc/shadow"}),
+            &[],
+        )
+        .expect("读取敏感路径需要审批");
+        assert!(reason.contains("敏感") || reason.contains("sensitive"));
+
+        for command in [
+            "cat /etc/passwd",
+            "awk 'BEGIN{system(\"unlink /tmp/x\")}'",
+            "r''m -rf /tmp/x",
+            "bash -c 'unlink /tmp/x'",
+        ] {
+            assert!(
+                approval_reason(
+                    PermissionMode::Smart,
+                    Tool::ExecCommand,
+                    &serde_json::json!({"command": command}),
+                    &[],
+                )
+                .is_some(),
+                "{command} 应要求审批"
+            );
+        }
     }
 
     #[test]
@@ -169,7 +235,10 @@ mod tests {
     fn smart_mode_flags_write_operation() {
         let reason =
             smart_approval(serde_json::json!({"command": "echo hi > /etc/motd"}), &[]).unwrap();
-        assert!(reason.contains("写操作"));
+        assert!(
+            reason.contains("写操作") || reason.contains("安全只读") || reason.contains("read-only"),
+            "{reason}"
+        );
     }
 
     #[test]

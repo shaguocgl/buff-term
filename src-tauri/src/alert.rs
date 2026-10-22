@@ -17,11 +17,24 @@ pub fn get_alert_settings(db: State<'_, Arc<Db>>) -> Result<AlertSettings, Strin
     let mut settings = db
         .get_alert_settings()
         .map_err(|e| format!("{}: {e}", crate::i18n::t("读取邮件设置失败", "Failed to read email settings")))?;
-    // SMTP 密码加密存凭据表，读取时解密回填供前端展示
-    if settings.smtp_password.is_none() {
-        settings.smtp_password = crate::credentials::get_smtp_password();
-    }
+    // 密码不回传渲染进程：只告知是否已保存，前端输入框保持空白；
+    // 需要清除时调用 clear_alert_password。
+    settings.smtp_password_set = crate::credentials::get_smtp_password().is_some();
+    settings.smtp_password = None;
     Ok(settings)
+}
+
+/// 清除已保存的 SMTP 密码（不影响其他 SMTP 设置）。
+#[tauri::command]
+pub fn clear_alert_password(db: State<'_, Arc<Db>>) -> Result<(), String> {
+    crate::credentials::delete_smtp_password();
+    let mut settings = db
+        .get_alert_settings()
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("读取邮件设置失败", "Failed to read email settings")))?;
+    settings.smtp_password = None;
+    settings.smtp_password_set = false;
+    db.save_alert_settings(&settings)
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存邮件设置失败", "Failed to save email settings")))
 }
 
 #[tauri::command]

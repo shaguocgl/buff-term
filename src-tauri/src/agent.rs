@@ -291,7 +291,7 @@ impl<'a> RunLease<'a> {
     /// 返回 false 表示期间发生过 reset，写回被丢弃。
     fn commit_run(&self, history: Vec<serde_json::Value>, memory: memory::ContextMemory) -> bool {
         self.with_current(|conv| {
-            conv.history = history;
+            conv.history = prune_old_images(history);
             conv.memory = memory;
         })
         .is_some()
@@ -301,6 +301,36 @@ impl<'a> RunLease<'a> {
     fn set_plan(&self, plan: TaskPlan) -> bool {
         self.with_current(|conv| conv.plan = Some(plan)).is_some()
     }
+}
+
+/// canonical history 只保留最近的有限张图片，旧图替换为文本占位符。
+/// 图片是 base64 data URL，单张可达数 MB；只追加不清理会让长会话内存无界增长。
+const MAX_RETAINED_IMAGES: usize = 12;
+
+fn prune_old_images(mut history: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut kept = 0usize;
+    for message in history.iter_mut().rev() {
+        let Some(parts) = message.get_mut("content").and_then(|c| c.as_array_mut()) else {
+            continue;
+        };
+        for part in parts.iter_mut().rev() {
+            if part.get("type").and_then(|t| t.as_str()) != Some("image_url") {
+                continue;
+            }
+            if kept < MAX_RETAINED_IMAGES {
+                kept += 1;
+            } else {
+                *part = serde_json::json!({
+                    "type": "text",
+                    "text": t(
+                        "[较早的图片已从历史中移除以控制内存]",
+                        "[an older image was removed from history to bound memory]",
+                    ),
+                });
+            }
+        }
+    }
+    history
 }
 
 impl Drop for RunLease<'_> {
@@ -470,7 +500,7 @@ async fn chat(
     let model = model_info.model.clone();
     let context_window = model_info.context_window;
     validate_images(&req.images, model_info.supports_vision)?;
-    eprintln!(
+    log::info!(
         "[agent] {}: {}（{}，{} {} tokens）",
         t("使用模型", "using model"),
         model,
@@ -928,6 +958,39 @@ mod tests {
         // 旧 output:<id> 引用对新会话归档不可见（reset 后引用即过期）
         assert!(block_on(new_lease.archive.read(&saved.reference, 0, 10)).is_err());
         // 旧租约的写回被拒已在 reset_host_cancels_run_and_voids_its_writes 覆盖
+    }
+
+    #[test]
+    fn commit_prunes_old_images_to_bound_memory() {
+        let agents = AgentManager::default();
+        let (lease, _rx) = agents.try_acquire_run("h1", 1).unwrap();
+        let mut history = Vec::new();
+        for i in 0..15 {
+            history.push(serde_json::json!({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": format!("msg {i}")},
+                    {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{i}")}}
+                ]
+            }));
+        }
+        let memory = memory::ContextMemory::default();
+        assert!(lease.commit_run(history, memory));
+        let saved = agents.history("h1");
+        let images = saved
+            .iter()
+            .filter_map(|m| m["content"].as_array())
+            .flatten()
+            .filter(|p| p["type"] == "image_url")
+            .count();
+        let placeholders = saved
+            .iter()
+            .filter_map(|m| m["content"].as_array())
+            .flatten()
+            .filter(|p| p["type"] == "text" && p["text"].as_str().is_some_and(|t| t.contains("较早的图片")))
+            .count();
+        assert_eq!(images, MAX_RETAINED_IMAGES);
+        assert_eq!(placeholders, 3);
     }
 
     #[test]

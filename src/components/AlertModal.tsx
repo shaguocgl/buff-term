@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
-import { getAlertSettings, saveAlertSettings, testAlertSettings } from '../api';
+import {
+  clearAlertPassword,
+  getAlertSettings,
+  saveAlertSettings,
+  testAlertSettings,
+} from '../api';
 import { useT } from '../i18n';
 import type { AlertSettings } from '../types';
 import { fmtError } from '../utils/errors';
@@ -42,9 +47,35 @@ export default function AlertModal({ onClose }: Props) {
     setError(null);
     setTestResult(null);
     setSaving(true);
+    const typedPassword = settings.smtp_password?.trim() ?? '';
     try {
       await saveAlertSettings(settings);
+      // 密码已单独加密保存；清空输入框，避免明文长期停留在组件状态。
+      setSettings((prev) => ({
+        ...prev,
+        smtp_password: '',
+        smtp_password_set: prev.smtp_password_set || typedPassword.length > 0,
+      }));
       setTestResult(t('alert.saved'));
+    } catch (e) {
+      setError(fmtError(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleClearPassword = async () => {
+    setError(null);
+    setTestResult(null);
+    setSaving(true);
+    try {
+      await clearAlertPassword();
+      setSettings((prev) => ({
+        ...prev,
+        smtp_password: '',
+        smtp_password_set: false,
+      }));
+      setTestResult(t('alert.passwordCleared'));
     } catch (e) {
       setError(fmtError(e));
     } finally {
@@ -116,6 +147,9 @@ export default function AlertModal({ onClose }: Props) {
               />
             </div>
           </div>
+          {settings.smtp_tls === 'none' && (
+            <p className="alert-warning">{t('alert.tlsNoneWarning')}</p>
+          )}
 
           <div className="alert-field">
             <span className="alert-field-label">{t('alert.username')}</span>
@@ -132,8 +166,22 @@ export default function AlertModal({ onClose }: Props) {
               type="password"
               value={settings.smtp_password ?? ''}
               onChange={(e) => set('smtp_password', e.target.value)}
-              placeholder={t('alert.passwordPlaceholder')}
+              placeholder={
+                settings.smtp_password_set
+                  ? t('alert.passwordSavedHint')
+                  : t('alert.passwordPlaceholder')
+              }
             />
+            {settings.smtp_password_set && (
+              <button
+                type="button"
+                className="alert-clear-password"
+                onClick={() => void handleClearPassword()}
+                disabled={saving}
+              >
+                {t('alert.clearPassword')}
+              </button>
+            )}
           </div>
 
           <div className="alert-field">

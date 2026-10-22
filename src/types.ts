@@ -275,6 +275,8 @@ export interface AlertSettings {
   smtp_port?: number | null;
   smtp_username?: string | null;
   smtp_password?: string | null;
+  /** 后端只告知是否已保存密码，密码本身不回传渲染进程 */
+  smtp_password_set?: boolean;
   smtp_from?: string | null;
   smtp_to?: string | null;
   smtp_tls?: string | null;
@@ -285,6 +287,8 @@ export interface McpService {
   host_ids: string[];
   permission_mode: 'readonly' | 'confirm' | 'allow';
   token?: string | null;
+  /** 是否已生成 token；token 本身默认不回传，需点“显示”再取 */
+  token_set?: boolean;
   port?: number | null;
   updated_at: number;
   running: boolean;
@@ -454,6 +458,8 @@ export interface SftpEntry {
   perms: string;
   user: string;
   group: string;
+  /** 命中敏感路径规则：删除/重命名前需要更明确的确认 */
+  sensitive: boolean;
 }
 
 /** 远端文本文件内容：中间区内置编辑器打开时返回 */
