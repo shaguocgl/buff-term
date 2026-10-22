@@ -54,6 +54,11 @@ interface Props {
   onDisconnect: (tabKey: number) => void;
   /** 把终端中选中的文本加入 AI 会话提问 */
   onAddToChat: (text: string) => void;
+  /** 注册/注销「读取当前控制台行」的回调：文件面板打开时据此校正远端 cwd */
+  onRegisterConsoleReader?: (
+    tabKey: number,
+    reader: (() => string | null) | null,
+  ) => void;
 }
 
 const TERMINAL_THEMES = {
@@ -194,6 +199,7 @@ export default function TerminalView({
   onExited,
   onDisconnect,
   onAddToChat,
+  onRegisterConsoleReader,
 }: Props) {
   const t = useT();
   // 终端实例只在挂载时创建一次；用 ref 取最新文案，避免切换语言时重建终端（会断开会话）
@@ -213,6 +219,7 @@ export default function TerminalView({
   const onExitedRef = useRef(onExited);
   const onDisconnectRef = useRef(onDisconnect);
   const onAddToChatRef = useRef(onAddToChat);
+  const onRegisterConsoleReaderRef = useRef(onRegisterConsoleReader);
   const zoomRef = useRef<(delta: number) => void>(() => {});
   const [connecting, setConnecting] = useState(true);
   const [exited, setExited] = useState(false);
@@ -326,6 +333,19 @@ export default function TerminalView({
     text = text.trimEnd();
     return text || null;
   }, []);
+
+  onRegisterConsoleReaderRef.current = onRegisterConsoleReader;
+  // 供文件面板打开时读取提示符路径：全屏应用里光标行不是 shell 提示符，
+  // 此时返回 null，由后端沿用跟踪值。
+  const readCwdLine = useCallback((): string | null => {
+    const term = termRef.current;
+    if (!term || term.buffer.active.type === 'alternate') return null;
+    return readConsoleLine();
+  }, [readConsoleLine]);
+  useEffect(() => {
+    onRegisterConsoleReaderRef.current?.(tabKey, readCwdLine);
+    return () => onRegisterConsoleReaderRef.current?.(tabKey, null);
+  }, [tabKey, readCwdLine]);
 
   const sendInput = useCallback(
     (data: number[], consoleLine?: string | null) => {

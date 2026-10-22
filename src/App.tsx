@@ -610,6 +610,15 @@ function App() {
   }, [activeTab, tabs]);
   // 文件面板只需要主机信息：文件标签同样有 host，编辑文件时也能继续浏览目录
   const sftpPanelHost = activeTab?.host ?? panelTab?.host ?? null;
+  // 各终端标签注册的「当前控制台行」读取器：文件面板打开时据此校正 cwd
+  const consoleReadersRef = useRef(new Map<number, () => string | null>());
+  const registerConsoleReader = useCallback(
+    (key: number, reader: (() => string | null) | null) => {
+      if (reader) consoleReadersRef.current.set(key, reader);
+      else consoleReadersRef.current.delete(key);
+    },
+    [],
+  );
   // 所有有标签页的主机（去重）：每台主机各挂一个文件面板实例并保持挂载，
   // 在不同主机的标签间来回切换时目录位置 / 传输任务不会被重置
   const sftpHosts = useMemo(() => {
@@ -1475,6 +1484,7 @@ function App() {
                       onToggleInspection={() =>
                         applyPanel(inspectionOpen ? 'none' : 'inspection')
                       }
+                      onRegisterConsoleReader={registerConsoleReader}
                       onOpened={(key, id) => {
                         setTabs((prev) =>
                           prev.map((t) =>
@@ -1577,11 +1587,19 @@ function App() {
                   key={`sftp-${host.id}`}
                   host={host}
                   hidden={!sftpOpen || sftpPanelHost?.id !== host.id}
+                  panelOpen={panelByHost[host.id] === 'sftp'}
                   terminalSessionId={
                     activeTab?.kind === 'terminal' && activeTab.host.id === host.id
                       ? activeTab.sessionId
                       : panelTab?.host.id === host.id
                         ? panelTab.sessionId
+                        : null
+                  }
+                  readConsoleLine={
+                    activeTab?.kind === 'terminal' && activeTab.host.id === host.id
+                      ? () => consoleReadersRef.current.get(activeTab.key)?.() ?? null
+                      : panelTab?.host.id === host.id
+                        ? () => consoleReadersRef.current.get(panelTab.key)?.() ?? null
                         : null
                   }
                   onOpenFile={(path) => handleOpenFile(host, path)}

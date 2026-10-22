@@ -490,9 +490,13 @@ export const sessionInput = (
   });
 export const resizeSession = (id: number, cols: number, rows: number) =>
   invoke<void>('session_resize', { id, cols, rows });
-/** 终端会话当前跟踪到的远端工作目录；未知（尚未探测/上下文已切换）时返回 null */
-export const sessionCwd = (id: number) =>
-  invoke<string | null>('session_cwd', { id });
+/** 终端会话当前跟踪到的远端工作目录；未知（尚未探测/上下文已切换）时返回 null。
+ *  consoleLine 为终端当前控制台行（含提示符），后端据此校正失败 cd 造成的偏差 */
+export const sessionCwd = (id: number, consoleLine?: string | null) =>
+  invoke<string | null>('session_cwd', {
+    id,
+    consoleLine: consoleLine ?? null,
+  });
 
 /** 终端状态帧（帧首字节 0x01 后的 JSON 负载） */
 export interface TerminalStatusFrame {

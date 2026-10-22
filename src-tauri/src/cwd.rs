@@ -20,6 +20,9 @@ pub(crate) struct CwdState {
     /// shell 嵌套栈：bash/zsh 等子 shell 启动时记录进入点目录与 pushd 栈，
     /// exit/logout 弹栈恢复——子 shell 里的 cd 不作用于父 shell
     shells: Vec<ShellFrame>,
+    /// 已切换到 ssh/su/sudo -i 等别的执行上下文：此时提示符里的
+    /// `~`/绝对路径属于另一台主机或另一个用户，不能再拿来校正 cwd
+    context_unknown: bool,
 }
 
 /// 一层 shell 嵌套的记忆：进入子 shell 时父 shell 的 cwd/oldpwd/pushd 栈
@@ -233,6 +236,7 @@ fn cwd_op_of_command(cmd: &str, state: &mut CwdState) {
             }
             // 切换到别的执行上下文：远端 cwd 不再是本机路径
             "ssh" | "telnet" | "mosh" | "su" | "doas" => {
+                state.context_unknown = true;
                 state.cwd = None;
                 return;
             }
@@ -268,6 +272,7 @@ fn cwd_op_of_command(cmd: &str, state: &mut CwdState) {
             },
             // exec 用新程序替换当前 shell（不会再返回），语义不可知
             "exec" => {
+                state.context_unknown = true;
                 state.cwd = None;
                 return;
             }
@@ -277,6 +282,7 @@ fn cwd_op_of_command(cmd: &str, state: &mut CwdState) {
                     .iter()
                     .any(|a| matches!(a.as_str(), "-i" | "--login" | "su" | "bash" | "sh" | "zsh" | "fish"))
                 {
+                    state.context_unknown = true;
                     state.cwd = None;
                     return;
                 }
@@ -289,6 +295,42 @@ fn cwd_op_of_command(cmd: &str, state: &mut CwdState) {
 /// 把已提交命令行应用到会话 cwd 状态。
 pub(crate) fn apply_command(cmd: &str, state: &mut CwdState) {
     cwd_op_of_command(cmd, state);
+}
+
+/// 用提示符里展示的路径校正 cwd。输入解析无法知道一条 cd 在远端是否成功
+/// （失败信息在输出流里），而提示符（bash `\w`、zsh `%~` 等）由 shell 自己
+/// 绘制，是当前目录的真实状态：在提交命令前调用，可纠正上一条失败的 cd，
+/// 避免后续相对路径在错误目录上继续级联。
+pub(crate) fn apply_prompt(line: &str, state: &mut CwdState) {
+    if state.context_unknown {
+        return;
+    }
+    let Some(raw) = prompt_path(line) else { return };
+    if let Some(dir) = resolve_dir(Some(raw), state) {
+        state.cwd = Some(dir);
+    }
+}
+
+/// 从「提示符 + 已输入命令」的控制台行中提取提示符路径。
+/// 只接受明确以 `~`/`~/` 或 `/` 开头的最后一段，且拒绝被截断的 `...` 路径；
+/// 提示符不展示路径（如 `user@host$`、仅 basename）时返回 None，交回命令跟踪。
+fn prompt_path(line: &str) -> Option<&str> {
+    let t = line.trim();
+    // 与 extract_command_from_console_line 相同：首个标记即提示符结尾
+    let pos = t.find(['#', '$', '%', '>'])?;
+    let prompt = t[..pos].trim_end();
+    let token = prompt.split_whitespace().last()?;
+    // 兼容 [root@host ~] / (user@host ~) 一类包裹
+    let token = token.trim_end_matches([']', ')', '}']);
+    // root@host:~/proj → ~/proj；[root@host /var/log] → /var/log
+    let path = token.rsplit_once(':').map(|(_, p)| p).unwrap_or(token);
+    let path = path.trim_end_matches([']', ')', '}']);
+    let absolute = path == "~" || path.starts_with("~/") || path.starts_with('/');
+    if absolute && !path.split('/').any(|seg| seg == "...") {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 /// 按顺序执行的语句分隔符切分：; && || ——忽略引号内的分隔符。
@@ -470,6 +512,7 @@ mod tests {
             home: Some("/root".to_string()),
             stack: Vec::new(),
             shells: Vec::new(),
+            context_unknown: false,
         }
     }
 
@@ -649,5 +692,55 @@ mod tests {
         tr.reset();
         let cmds = tr.on_input(b"\r", None);
         assert!(cmds.is_empty(), "reset 后本地行已清，无 console_line 则为空");
+    }
+
+    #[test]
+    fn prompt_path_variants() {
+        assert_eq!(prompt_path("root@h:~# ls"), Some("~"));
+        assert_eq!(
+            prompt_path("root@h:~/biz/adminapi# pwd"),
+            Some("~/biz/adminapi")
+        );
+        assert_eq!(prompt_path("[root@h /var/log]# tail -f x"), Some("/var/log"));
+        assert_eq!(prompt_path("root@h:/# ls"), Some("/"));
+        assert_eq!(prompt_path("[root@h ~]# ls"), Some("~"));
+        assert_eq!(prompt_path("user@h:~$ ls"), Some("~"));
+        // 不展示路径 / 只有 basename / 被截断的路径都不采用
+        assert_eq!(prompt_path("root@h# ls"), None);
+        assert_eq!(prompt_path("root@h:adminapi# ls"), None);
+        assert_eq!(prompt_path("root@h:~/.../adminapi# ls"), None);
+        assert_eq!(prompt_path("user@h:~/p 12:34:56$ ls"), None);
+    }
+
+    /// 回归：远端 `cd biz/admin` 失败后，提示符仍是 `~`；
+    /// 下一条命令提交前用提示符校正，后续相对 cd 才不会在错误目录上级联。
+    #[test]
+    fn prompt_corrects_failed_cd_before_next_relative_cd() {
+        let mut s = state_at("/root");
+        apply_command("cd biz/admin", &mut s);
+        assert_eq!(s.cwd.as_deref(), Some("/root/biz/admin"), "仅凭输入无法知道 cd 失败");
+
+        let mut tr = CwdTracker::default();
+        tr.on_input(b"cd biz/adminapi", None);
+        let cmds = tr.on_input(b"\r", Some("root@h:~# cd biz/adminapi"));
+        apply_prompt("root@h:~# cd biz/adminapi", &mut s);
+        for cmd in cmds {
+            apply_command(&cmd, &mut s);
+        }
+        assert_eq!(s.cwd.as_deref(), Some("/root/biz/adminapi"));
+    }
+
+    #[test]
+    fn prompt_ignored_after_context_switch() {
+        let mut s = state_at("/root");
+        apply_command("sudo -i", &mut s);
+        assert!(s.cwd.is_none());
+        apply_prompt("root@h:~# ls", &mut s);
+        assert!(s.cwd.is_none(), "sudo -i 后的提示符属于另一用户环境");
+
+        let mut s = state_at("/root");
+        apply_command("ssh dev@prod", &mut s);
+        apply_prompt("dev@prod:/srv/app$ ls", &mut s);
+        assert!(s.cwd.is_none(), "ssh 后的提示符属于另一台主机");
     }
 }

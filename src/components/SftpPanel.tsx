@@ -41,8 +41,13 @@ interface Props {
   host: Host;
   /** 面板隐藏时保持挂载（传输任务与目录展开状态不重置），仅隐藏显示 */
   hidden?: boolean;
-  /** 该主机当前终端会话 id：面板从隐藏切到可见时，把目录定位到该终端的 cwd */
+  /** 该主机是否选择了文件面板；只在 false→true（用户主动打开）时同步终端目录，
+   *  切换主机/标签导致的显隐变化保持原有浏览位置 */
+  panelOpen: boolean;
+  /** 该主机当前终端会话 id：主动打开文件面板时，把目录定位到该终端的 cwd */
   terminalSessionId: number | null;
+  /** 读取该终端当前控制台行（含提示符）：打开面板时校正失败 cd 造成的 cwd 偏差 */
+  readConsoleLine?: (() => string | null) | null;
   /** 悬浮按钮「在内置编辑器中打开」：在中间区打开该文件 */
   onOpenFile: (path: string) => void;
   /** 全局 Toast：敏感路径/传输失败等关键错误需要在右下角明显提示 */
@@ -141,7 +146,9 @@ function ancestorsOf(path: string): string[] {
 function SftpPanel({
   host,
   hidden = false,
+  panelOpen,
   terminalSessionId,
+  readConsoleLine,
   onOpenFile,
   onNotify,
   onClose,
@@ -180,6 +187,13 @@ function SftpPanel({
   // 当前目录的最新值：批量上传结束时据此判断用户是否还停留在目标目录
   const cwdRef = useRef(cwd);
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  // 只有用户主动打开文件面板（panelOpen false→true）才同步终端目录；
+  // 序号用于丢弃异步存在性校验期间已过期的请求
+  const followSeqRef = useRef(0);
+  const panelOpenRef = useRef(false);
+  const pendingSyncRef = useRef(false);
+  const readConsoleLineRef = useRef(readConsoleLine);
+  readConsoleLineRef.current = readConsoleLine;
 
   useEffect(() => {
     cwdRef.current = cwd;
@@ -324,6 +338,8 @@ function SftpPanel({
       });
       await Promise.all(ancestors.map(ensureLoaded));
       setCwd(path);
+      // 同步更新 ref：下一次渲染前触发的操作也要基于新目录
+      cwdRef.current = path;
       requestAnimationFrame(() => {
         bodyRef.current
           ?.querySelector(`[data-path="${CSS.escape(path)}"]`)
@@ -333,23 +349,50 @@ function SftpPanel({
     [ensureLoaded],
   );
 
-  // 面板由隐藏切到可见时，把目录定位到「当前终端」的工作目录
-  const wasHiddenRef = useRef(true);
+  /** 自动跟随终端目录：先确认目录存在再展开，避免把失败的 cd
+   *  （例如 `cd biz/admin` 拼错）当成有效位置，让面板停在不存在路径上 */
+  const followTerminalDir = useCallback(
+    async (dir: string) => {
+      if (!dir.startsWith('/')) return;
+      const seq = ++followSeqRef.current;
+      try {
+        if (!(await sftpExists(host.id, dir))) return;
+      } catch {
+        // 目录校验失败（连接异常等）时不跟随，保留当前浏览位置
+        return;
+      }
+      // 校验期间可能又打开了一次：只让最新一次定位生效
+      if (seq !== followSeqRef.current) return;
+      await reveal(dir);
+    },
+    [host.id, reveal],
+  );
+
+  // 用户主动打开文件面板时同步一次终端 cwd；面板保持打开期间不再跟随，
+  // 切换主机/终端标签只改变显隐、不重置各自之前浏览的目录。
   useEffect(() => {
-    if (hidden) {
-      wasHiddenRef.current = true;
+    if (!panelOpen) {
+      panelOpenRef.current = false;
+      pendingSyncRef.current = false;
       return;
     }
-    if (!wasHiddenRef.current) return;
-    wasHiddenRef.current = false;
-    if (terminalSessionId == null) return;
-    void sessionCwd(terminalSessionId)
+    if (!panelOpenRef.current) {
+      panelOpenRef.current = true;
+      pendingSyncRef.current = true;
+    }
+    // 面板尚未成为当前主机的可见面板，或终端还在连接中：等下一次状态变化
+    if (hidden || !pendingSyncRef.current || terminalSessionId == null) return;
+    pendingSyncRef.current = false;
+    // 控制台行里的提示符是 shell 绘制的真实状态：失败 cd（如 `cd aa`）
+    // 后命令跟踪会指向 .../aa，提示符仍停在正确目录，交给后端优先采用
+    const consoleLine = readConsoleLineRef.current?.() ?? null;
+    void sessionCwd(terminalSessionId, consoleLine)
       .then((dir) => {
         // 仅接受合法的绝对路径；cwd 未知/跟踪失败时保持当前目录
-        if (dir && dir.startsWith('/')) void reveal(dir);
+        if (dir && dir.startsWith('/')) void followTerminalDir(dir);
       })
       .catch(() => {});
-  }, [hidden, terminalSessionId, reveal]);
+  }, [panelOpen, hidden, terminalSessionId, followTerminalDir]);
 
   /** 选中目录行：已选中且展开时再点折叠（根目录恒展开）；否则选中并展开 */
   const onDirClick = useCallback(

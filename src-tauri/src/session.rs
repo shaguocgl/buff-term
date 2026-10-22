@@ -326,14 +326,20 @@ impl SessionManager {
                         guard.set_config(config);
                         guard.set_passthrough(passthrough);
                         // 透传（全屏应用）期间输入不是 shell 命令，丢弃本地行；
-                        // 其余输入喂给 cwd 跟踪器：回车提交出的命令逐条应用
+                        // 其余输入喂给 cwd 跟踪器：回车提交出的命令逐条应用。
+                        // 提交前先用提示符里的真实路径校正——输入解析无法感知
+                        // `cd` 在远端失败，失败的 cd 会让后续相对路径继续跑偏。
                         if passthrough {
                             cwd_tracker.reset();
                         } else {
-                            for cmd in
-                                cwd_tracker.on_input(&data, console_line.as_deref())
-                            {
-                                cwd::apply_command(&cmd, &mut cwd_for_guard.lock().unwrap());
+                            let submitted =
+                                cwd_tracker.on_input(&data, console_line.as_deref());
+                            let mut state = cwd_for_guard.lock().unwrap();
+                            if let Some(line) = console_line.as_deref() {
+                                cwd::apply_prompt(line, &mut state);
+                            }
+                            for cmd in submitted {
+                                cwd::apply_command(&cmd, &mut state);
                             }
                         }
                         let outcome =
@@ -453,12 +459,17 @@ impl SessionManager {
     }
 
     /// 该会话当前跟踪到的远端工作目录；未知（尚未探测/上下文已切换）返回 None
-    pub fn session_cwd(&self, id: u32) -> Option<String> {
-        self.sessions
-            .lock()
-            .unwrap()
-            .get(&id)
-            .and_then(|s| s.cwd.lock().unwrap().cwd.clone())
+    /// 读取会话 cwd。console_line 是前端打开文件面板时读到的当前控制台行：
+    /// 提示符里的路径由 shell 自己绘制，能纠正输入解析无法感知的失败 cd
+    /// （例如 `cd aa` 报错后，跟踪值可能已经变成 .../aa）。
+    pub fn session_cwd(&self, id: u32, console_line: Option<&str>) -> Option<String> {
+        let sessions = self.sessions.lock().unwrap();
+        let session = sessions.get(&id)?;
+        let mut state = session.cwd.lock().unwrap();
+        if let Some(line) = console_line {
+            cwd::apply_prompt(line, &mut state);
+        }
+        state.cwd.clone()
     }
 
     /// 取该主机任一存活会话的 SSH 连接（后台监控采集复用终端会话自身连接，
@@ -626,8 +637,13 @@ pub fn session_resize(
 }
 
 /// 查询终端会话当前跟踪到的远端工作目录；未知时返回 null，
-/// 由文件面板在打开时把目录定位到这里（用户跟随）
+/// 由文件面板在打开时把目录定位到这里（用户跟随）。
+/// console_line 为终端当前控制台行（含提示符），用于校正失败 cd 造成的偏差。
 #[tauri::command]
-pub fn session_cwd(state: State<'_, SessionManager>, id: u32) -> Option<String> {
-    state.session_cwd(id)
+pub fn session_cwd(
+    state: State<'_, SessionManager>,
+    id: u32,
+    console_line: Option<String>,
+) -> Option<String> {
+    state.session_cwd(id, console_line.as_deref())
 }
