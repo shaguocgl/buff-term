@@ -40,6 +40,8 @@ interface Props {
   host: Host;
   tabKey: number;
   theme: 'dark' | 'light';
+  /** 首次连接成功后自动执行一次的命令（文件面板「在此路径打开终端」的 cd） */
+  initialCommand?: string;
   chatOpen: boolean;
   sftpOpen: boolean;
   monitorOpen: boolean;
@@ -58,6 +60,12 @@ interface Props {
   onRegisterConsoleReader?: (
     tabKey: number,
     reader: (() => string | null) | null,
+  ) => void;
+  /** 注册/注销「在提示符空闲时直接执行命令」的回调（文件面板「在此路径打开终端」复用终端）。
+   *  返回 false 表示当前不适合注入（全屏程序 / 命令运行中 / 有未提交输入） */
+  onRegisterCommandRunner?: (
+    tabKey: number,
+    runner: ((command: string) => boolean) | null,
   ) => void;
 }
 
@@ -186,6 +194,7 @@ export default function TerminalView({
   host,
   tabKey,
   theme,
+  initialCommand,
   chatOpen,
   sftpOpen,
   monitorOpen,
@@ -200,6 +209,7 @@ export default function TerminalView({
   onDisconnect,
   onAddToChat,
   onRegisterConsoleReader,
+  onRegisterCommandRunner,
 }: Props) {
   const t = useT();
   // 终端实例只在挂载时创建一次；用 ref 取最新文案，避免切换语言时重建终端（会断开会话）
@@ -207,6 +217,9 @@ export default function TerminalView({
   tRef.current = t;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sessionIdRef = useRef<number | null>(null);
+  // 初始命令只在首次连接成功后执行一次：连接失败保留待下次成功，
+  // 之后的重连不再重复（避免覆盖用户在会话里手动 cd 到的位置）
+  const initialCommandRef = useRef(initialCommand || null);
   const activeConnectionRequestRef = useRef<string | null>(null);
   const pendingInputRef = useRef<number[]>([]);
   const inputChainRef = useRef<Promise<void>>(Promise.resolve());
@@ -220,6 +233,7 @@ export default function TerminalView({
   const onDisconnectRef = useRef(onDisconnect);
   const onAddToChatRef = useRef(onAddToChat);
   const onRegisterConsoleReaderRef = useRef(onRegisterConsoleReader);
+  const onRegisterCommandRunnerRef = useRef(onRegisterCommandRunner);
   const zoomRef = useRef<(delta: number) => void>(() => {});
   const [connecting, setConnecting] = useState(true);
   const [exited, setExited] = useState(false);
@@ -255,6 +269,7 @@ export default function TerminalView({
   onExitedRef.current = onExited;
   onDisconnectRef.current = onDisconnect;
   onAddToChatRef.current = onAddToChat;
+  onRegisterCommandRunnerRef.current = onRegisterCommandRunner;
 
   // 字号缩放：Cmd/Ctrl + = / - / 0，持久化到 localStorage
   const changeFontSize = useCallback((delta: number) => {
@@ -366,6 +381,39 @@ export default function TerminalView({
     [],
   );
 
+  // 文件面板「在此路径打开终端」复用本终端：只有确认 shell 空闲在提示符行时才注入，
+  // 否则返回 false 交给调用方新开标签。避免把 cd 拼进用户半截命令（可能变成
+  // `rm -rf ...cd '...'` 这类误执行），或当成输入灌进 vim / ping / REPL 等运行中程序。
+  const runCommandHere = useCallback(
+    (command: string): boolean => {
+      const term = termRef.current;
+      if (!term || sessionIdRef.current === null) return false;
+      if (term.buffer.active.type === 'alternate') return false;
+      const line = readConsoleLine();
+      if (!line) return false;
+      // 判断光标行是否停在「空的 shell 提示符」上：
+      // 1) 提示符以标记符结尾（bash/zsh-agnoster `$`、fish `>`、p10k/starship `❯`）；
+      // 2) 标记符在行首的主题（Oh My Zsh robbyrussell `➜  ~`）其后最多一个路径段。
+      // 有已输入命令时行尾是命令文本，两条都不成立；命令运行中光标行是输出，通常也不成立。
+      // 判定不了就交给调用方新开标签——宁可多开一个，也不把 cd 拼进半截命令
+      const t = line.trim();
+      const idle =
+        /[#$%>❯➜λ→»]$/.test(t) || /^[❯➜λ→»]\s+\S+$/.test(t);
+      if (!idle) return false;
+      // Ctrl+U 兜底清行：提示符样式识别偏差时也不会把 cd 拼进旧输入
+      sendInput([
+        0x15,
+        ...Array.from(new TextEncoder().encode(`${command}\r`)),
+      ]);
+      return true;
+    },
+    [readConsoleLine, sendInput],
+  );
+  useEffect(() => {
+    onRegisterCommandRunnerRef.current?.(tabKey, runCommandHere);
+    return () => onRegisterCommandRunnerRef.current?.(tabKey, null);
+  }, [tabKey, runCommandHere]);
+
   // 会话状态帧处理：closed = 手动断开；exited 区分 shell 正常退出
   // （reason=exit，不自动重连）与底层连接断开（reason=disconnected，
   // 可按用户开关自动重连）。首个状态帧到达后清空 requestId，后续帧忽略。
@@ -431,6 +479,12 @@ export default function TerminalView({
     setConnecting(false);
     setExited(false);
     onOpenedRef.current(tabKey, id);
+    const initial = initialCommandRef.current;
+    if (initial) {
+      initialCommandRef.current = null;
+      // 直接写入 PTY：shell 尚未打印提示符时输入会被终端缓冲，就绪后按顺序执行
+      sendInput(Array.from(new TextEncoder().encode(`${initial}\r`)));
+    }
     const pending = pendingInputRef.current.splice(0);
     if (pending.length > 0) {
       sendInput(pending);

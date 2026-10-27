@@ -317,6 +317,7 @@ export const zh = {
   'sftp.openDir': '打开目录',
   'sftp.symlink': '符号链接',
   'sftp.openInEditor': '在内置编辑器中打开',
+  'sftp.openTerminalHere': '在此路径打开终端',
   'sftp.download': '下载',
   'sftp.rename': '重命名',
   'sftp.opFailed': '操作失败',

@@ -12,7 +12,7 @@ import {
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { fmtError } from './utils/errors';
-import { baseName } from './utils/remote';
+import { baseName, shellQuote } from './utils/remote';
 import { useI18n } from './i18n';
 import {
   checkForUpdate,
@@ -94,6 +94,8 @@ interface TerminalTab {
   sessionId: number | null;
   status: 'connecting' | 'connected' | 'exited';
   title: string;
+  /** 连接建立后自动执行一次的命令（文件面板「在此路径打开终端」的 cd） */
+  initialCommand?: string;
 }
 
 /** 文件标签：中间区内置编辑器打开的远端文件 */
@@ -619,6 +621,16 @@ function App() {
     },
     [],
   );
+  // 各终端标签注册的「空闲时执行命令」回调：文件面板「在此路径打开终端」复用它，
+  // 返回 false 表示终端正忙（全屏程序 / 命令运行中 / 有未提交输入），改用新开标签
+  const commandRunnersRef = useRef(new Map<number, (command: string) => boolean>());
+  const registerCommandRunner = useCallback(
+    (key: number, runner: ((command: string) => boolean) | null) => {
+      if (runner) commandRunnersRef.current.set(key, runner);
+      else commandRunnersRef.current.delete(key);
+    },
+    [],
+  );
   // 所有有标签页的主机（去重）：每台主机各挂一个文件面板实例并保持挂载，
   // 在不同主机的标签间来回切换时目录位置 / 传输任务不会被重置
   const sftpHosts = useMemo(() => {
@@ -662,6 +674,45 @@ function App() {
     setActiveKey(key);
     setLoadingHostId(host.id);
   };
+
+  // 文件面板「在此路径打开终端」：优先复用该主机已连接的终端并直接执行 cd
+  // （优先当前激活 / 最近使用的那个）；没有可用终端、或终端正忙时新开标签
+  const handleOpenTerminalHere = useCallback((host: Host, path: string) => {
+    const command = `cd ${shellQuote(path)}`;
+    const reusable = tabsRef.current.filter(
+      (t): t is TerminalTab =>
+        t.kind === 'terminal' &&
+        t.host.id === host.id &&
+        t.status === 'connected' &&
+        t.sessionId !== null,
+    );
+    const preferred =
+      reusable.find((t) => t.key === activeKeyRef.current) ??
+      reusable.find((t) => t.key === lastTerminalTabRef.current?.key) ??
+      reusable[0];
+    if (preferred) {
+      const runner = commandRunnersRef.current.get(preferred.key);
+      if (runner?.(command)) {
+        setActiveKey(preferred.key);
+        return;
+      }
+    }
+    const key = ++tabSeq.current;
+    setTabs((prev) => [
+      ...prev,
+      {
+        kind: 'terminal',
+        key,
+        host,
+        sessionId: null,
+        status: 'connecting',
+        title: `${host.name} · ${baseName(path)}`,
+        initialCommand: command,
+      },
+    ]);
+    setActiveKey(key);
+    setLoadingHostId(host.id);
+  }, []);
 
   // 文件面板点击文件：在中间区打开；同一主机同一路径复用已有标签
   const handleOpenFile = useCallback((host: Host, path: string) => {
@@ -1472,6 +1523,7 @@ function App() {
                       host={tab.host}
                       tabKey={tab.key}
                       theme={theme}
+                      initialCommand={tab.initialCommand}
                       chatOpen={chatOpen}
                       sftpOpen={sftpOpen}
                       monitorOpen={monitorOpen}
@@ -1485,6 +1537,7 @@ function App() {
                         applyPanel(inspectionOpen ? 'none' : 'inspection')
                       }
                       onRegisterConsoleReader={registerConsoleReader}
+                      onRegisterCommandRunner={registerCommandRunner}
                       onOpened={(key, id) => {
                         setTabs((prev) =>
                           prev.map((t) =>
@@ -1603,6 +1656,7 @@ function App() {
                         : null
                   }
                   onOpenFile={(path) => handleOpenFile(host, path)}
+                  onOpenTerminalHere={(path) => handleOpenTerminalHere(host, path)}
                   onNotify={showToast}
                   onClose={closePanel}
                 />

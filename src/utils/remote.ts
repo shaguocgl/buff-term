@@ -10,6 +10,11 @@ export function baseName(p: string): string {
   return parts[parts.length - 1] || p;
 }
 
+/** 用单引号包裹路径，供远端 shell 直接使用（内嵌单引号转义为 '\''） */
+export function shellQuote(p: string): string {
+  return `'${p.replace(/'/g, "'\\''")}'`;
+}
+
 /** 返回父目录路径，根目录返回自身 */
 export function parentPath(dir: string): string {
   if (dir === '/' || dir === '') return '/';

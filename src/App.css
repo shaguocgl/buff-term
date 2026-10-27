@@ -2253,6 +2253,11 @@ button.sftp-chevron:hover {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* 容器查询基准。挂在滚动区而非 .sftp-panel 上：container-type 会引入
+     layout containment，把面板内渲染的固定定位弹窗（确认框等）的包含块
+     从视口改成面板，导致弹窗被裁剪 */
+  container-type: inline-size;
+  container-name: sftp-files;
 }
 
 .sftp-status {
@@ -2316,6 +2321,20 @@ button.sftp-chevron:hover {
   width: 96px;
   color: var(--faint);
   font-size: 11px;
+}
+
+/* 窄面板优先保证文件路径的可读宽度：行内固定列（内边距 + 箭头 + 图标 + 间距 +
+   大小 70 + 时间 96）约 249px，面板最窄 280px 时文件名只剩 ~30px。
+   宽度低于 360px 时隐藏时间列，拉宽自动恢复 */
+@container sftp-files (max-width: 359px) {
+  .sftp-mtime {
+    display: none;
+  }
+
+  /* 时间列消失后悬浮操作按钮改为盖在大小列上，同样要遮掉文字避免透出 */
+  .sftp-row:hover .sftp-size {
+    visibility: hidden;
+  }
 }
 
 .sftp-link-badge {

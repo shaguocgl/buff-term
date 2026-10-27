@@ -335,6 +335,7 @@ export const en: Dict = {
   'sftp.openDir': 'Open directory',
   'sftp.symlink': 'Symbolic link',
   'sftp.openInEditor': 'Open in built-in editor',
+  'sftp.openTerminalHere': 'Open terminal here',
   'sftp.download': 'Download',
   'sftp.rename': 'Rename',
   'sftp.opFailed': 'Operation failed',

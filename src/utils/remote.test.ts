@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { baseName, formatBytes, joinPath, parentPath } from './remote';
+import { baseName, formatBytes, joinPath, parentPath, shellQuote } from './remote';
 
 describe('remote path helpers', () => {
   it('joins paths without duplicate separators', () => {
@@ -26,5 +26,10 @@ describe('remote path helpers', () => {
     expect(formatBytes(0)).toBe('0 B');
     expect(formatBytes(1024)).toBe('1 KB');
     expect(formatBytes(1024 * 1024)).toBe('1.0 MB');
+  });
+
+  it('quotes paths for the remote shell, escaping embedded single quotes', () => {
+    expect(shellQuote('/var/log')).toBe("'/var/log'");
+    expect(shellQuote("/srv/it's here")).toBe("'/srv/it'\\''s here'");
   });
 });

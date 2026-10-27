@@ -32,6 +32,7 @@ import {
   PencilIcon,
   RefreshIcon,
   ServerIcon,
+  TerminalIcon,
   TrashIcon,
   UploadIcon,
   XIcon,
@@ -50,6 +51,8 @@ interface Props {
   readConsoleLine?: (() => string | null) | null;
   /** 悬浮按钮「在内置编辑器中打开」：在中间区打开该文件 */
   onOpenFile: (path: string) => void;
+  /** 悬浮按钮「在此路径打开终端」：新建终端标签并自动 cd 到该目录 */
+  onOpenTerminalHere: (path: string) => void;
   /** 全局 Toast：敏感路径/传输失败等关键错误需要在右下角明显提示 */
   onNotify: (kind: 'success' | 'error' | 'info', message: string) => void;
   onClose: () => void;
@@ -150,6 +153,7 @@ function SftpPanel({
   terminalSessionId,
   readConsoleLine,
   onOpenFile,
+  onOpenTerminalHere,
   onNotify,
   onClose,
 }: Props) {
@@ -734,6 +738,18 @@ function SftpPanel({
           </span>
           <span className="sftp-mtime">{formatMtime(entry.mtime)}</span>
           <div className="sftp-row-actions">
+            {entry.is_dir && (
+              <button
+                className="icon-btn"
+                title={t('sftp.openTerminalHere')}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenTerminalHere(full);
+                }}
+              >
+                <TerminalIcon size={13} />
+              </button>
+            )}
             {!entry.is_dir && (
               <button
                 className="icon-btn"
@@ -978,6 +994,18 @@ function SftpPanel({
           </span>
           <span className="sftp-size">—</span>
           <span className="sftp-mtime" />
+          <div className="sftp-row-actions">
+            <button
+              className="icon-btn"
+              title={t('sftp.openTerminalHere')}
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenTerminalHere('/');
+              }}
+            >
+              <TerminalIcon size={13} />
+            </button>
+          </div>
         </div>
         {renderRows('/', 1)}
         {rootNode?.entries === undefined && !rootNode?.loading && !rootNode?.error && (
