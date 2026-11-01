@@ -42,6 +42,7 @@ import type {
   RemediationStepInput,
   SftpEntry,
   SftpFileContent,
+  SftpUploadDirPlan,
   SftpWriteOutcome,
 } from './types';
 
@@ -119,6 +120,29 @@ export const sftpUpload = (
   transferId: string,
   confirmed: boolean,
 ) => invoke<SftpResult>('sftp_upload', { hostId, local, remote, transferId, confirmed });
+/** 目录上传预检：统计文件/目录数、总大小、跳过项，并检查远端同名目标 */
+export const sftpUploadDirPlan = (hostId: string, local: string, remote: string) =>
+  invoke<SftpUploadDirPlan>('sftp_upload_dir_plan', { hostId, local, remote });
+/**
+ * 上传整个本地目录。
+ * `confirmed` 表示用户已确认敏感路径，`mergeConfirmed` 表示已确认合并覆盖已有目录。
+ */
+export const sftpUploadDir = (
+  hostId: string,
+  local: string,
+  remote: string,
+  transferId: string,
+  confirmed: boolean,
+  mergeConfirmed: boolean,
+) =>
+  invoke<SftpResult>('sftp_upload_dir', {
+    hostId,
+    local,
+    remote,
+    transferId,
+    confirmed,
+    mergeConfirmed,
+  });
 export const sftpExists = (hostId: string, path: string) =>
   invoke<boolean>('sftp_exists', { hostId, path });
 export const sftpCheckSensitive = (path: string) =>

@@ -462,6 +462,24 @@ export interface SftpEntry {
   sensitive: boolean;
 }
 
+/** 目录上传预检结果：数量统计、敏感目标与远端同名目录占用情况 */
+export interface SftpUploadDirPlan {
+  /** 待上传的常规文件数 */
+  files: number;
+  /** 待创建的目录数（不含上传根目录） */
+  dirs: number;
+  /** 待上传文件总字节数（进度条总量） */
+  total_bytes: number;
+  /** 被跳过的符号链接/非常规文件/敏感本地路径数量 */
+  skipped: number;
+  /** 任一目标路径命中敏感规则，需要用户确认 */
+  sensitive: boolean;
+  /** 远端同名目录已存在，将合并覆盖 */
+  target_exists: boolean;
+  /** 远端同名路径是文件，无法作为目录上传 */
+  target_is_file: boolean;
+}
+
 /** 远端文本文件内容：中间区内置编辑器打开时返回 */
 export interface SftpFileContent {
   /** 文件文本内容（UTF-8） */

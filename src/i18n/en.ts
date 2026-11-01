@@ -327,6 +327,15 @@ export const en: Dict = {
 
   // ---------- File panel (SFTP) ----------
   'sftp.uploadTitle': 'Upload files (multi-select supported)',
+  'sftp.uploadFolderTitle': 'Upload folder',
+  'sftp.folderScanning': 'Scanning folder…',
+  'sftp.folderDestination': 'Destination: {path}',
+  'sftp.folderUploadSummary': 'Upload folder "{name}": {files} file(s) ({size}) across {dirs} folder(s).',
+  'sftp.folderMergeWarning': 'Directory "{name}" already exists on the remote; files will be merged into it and same-name files overwritten.',
+  'sftp.folderSensitiveWarning': 'The destination contains sensitive paths (SSH/credentials/cron/systemd, etc.); continuing may overwrite critical configuration.',
+  'sftp.folderSkipped': '{n} unsupported or sensitive local entries will be skipped.',
+  'sftp.folderTargetConflict': 'The destination "{name}" is occupied by an existing file or link; cannot upload a folder there.',
+  'sftp.folderMergeAction': 'Merge and overwrite',
   'sftp.newFolder': 'New folder',
   'sftp.transfersCount': '{n} transfers in progress',
   'sftp.cancelAll': 'Cancel all',

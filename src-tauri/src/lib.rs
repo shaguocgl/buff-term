@@ -178,6 +178,8 @@ pub fn run() {
             sftp::sftp_list,
             sftp::sftp_download,
             sftp::sftp_upload,
+            sftp::sftp_upload_dir_plan,
+            sftp::sftp_upload_dir,
             sftp::sftp_delete,
             sftp::sftp_mkdir,
             sftp::sftp_rename,

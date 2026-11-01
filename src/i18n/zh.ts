@@ -309,6 +309,15 @@ export const zh = {
 
   // ---------- 文件面板（SFTP） ----------
   'sftp.uploadTitle': '上传文件（可多选批量上传）',
+  'sftp.uploadFolderTitle': '上传文件夹',
+  'sftp.folderScanning': '正在扫描文件夹…',
+  'sftp.folderDestination': '远端目录：{path}',
+  'sftp.folderUploadSummary': '将上传文件夹 "{name}"：{files} 个文件（{size}）、{dirs} 个目录。',
+  'sftp.folderMergeWarning': '远端已存在目录 "{name}"，将合并到该目录并覆盖同名文件。',
+  'sftp.folderSensitiveWarning': '目标包含敏感路径（SSH/凭据/cron/systemd 等），继续可能覆盖关键配置。',
+  'sftp.folderSkipped': '已跳过 {n} 个不支持或敏感的本地条目。',
+  'sftp.folderTargetConflict': '目标 "{name}" 已被同名文件或链接占用，无法作为目录上传。',
+  'sftp.folderMergeAction': '合并并覆盖',
   'sftp.newFolder': '新建文件夹',
   'sftp.transfersCount': '{n} 个传输进行中',
   'sftp.cancelAll': '全部取消',

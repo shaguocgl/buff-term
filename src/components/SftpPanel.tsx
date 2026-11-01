@@ -13,10 +13,12 @@ import {
   sftpMkdir,
   sftpRename,
   sftpUpload,
+  sftpUploadDir,
+  sftpUploadDirPlan,
 } from '../api';
 import type { SftpProgressPayload } from '../api';
 import { useT, type TFunc } from '../i18n';
-import type { Host, SftpEntry } from '../types';
+import type { Host, SftpEntry, SftpUploadDirPlan } from '../types';
 import { fmtError } from '../utils/errors';
 import { baseName, formatBytes, formatMtime, joinPath, parentPath } from '../utils/remote';
 import ConfirmModal from './ConfirmModal';
@@ -29,6 +31,7 @@ import {
   FileIcon,
   FolderIcon,
   FolderPlusIcon,
+  FolderUploadIcon,
   PencilIcon,
   RefreshIcon,
   ServerIcon,
@@ -135,6 +138,28 @@ function overwriteBody(
   return lines.join('\n');
 }
 
+/** 目录上传确认文案：统计摘要 + 合并/敏感/跳过提示（目录级一次确认） */
+function folderUploadBody(
+  plan: SftpUploadDirPlan,
+  name: string,
+  remote: string,
+  t: TFunc,
+): string {
+  const lines = [
+    t('sftp.folderDestination', { path: remote }),
+    t('sftp.folderUploadSummary', {
+      name,
+      files: plan.files,
+      dirs: plan.dirs,
+      size: formatBytes(plan.total_bytes),
+    }),
+  ];
+  if (plan.target_exists) lines.push(t('sftp.folderMergeWarning', { name }));
+  if (plan.sensitive) lines.push(t('sftp.folderSensitiveWarning'));
+  if (plan.skipped > 0) lines.push(t('sftp.folderSkipped', { n: plan.skipped }));
+  return lines.join('\n');
+}
+
 /** 路径 → 祖先目录链（含自身）：/a/b/c → ["/", "/a", "/a/b", "/a/b/c"] */
 function ancestorsOf(path: string): string[] {
   const out = ['/'];
@@ -183,6 +208,12 @@ function SftpPanel({
   } | null>(null);
   // 上传目标命中敏感路径时先做一次更强确认
   const [sensitiveBatch, setSensitiveBatch] = useState<UploadItem[] | null>(null);
+  // 文件夹上传：预检结果确认（目录级合并覆盖/敏感路径），确认后一次完成
+  const [folderUpload, setFolderUpload] = useState<{
+    local: string;
+    remote: string;
+    plan: SftpUploadDirPlan;
+  } | null>(null);
   // 顶部地址区：面包屑（可点击跳转）与直接输入两种形态，编辑态显示输入框
   const [editingPath, setEditingPath] = useState(false);
   const [pathInput, setPathInput] = useState('/');
@@ -552,6 +583,66 @@ function SftpPanel({
     if (cwdRef.current === target) void loadDir(target, true);
   };
 
+  // 文件夹上传：后端在一次 SFTP 会话内按层级建目录、逐文件原子上传，
+  // 进度按整个目录的累计字节展示；完成后刷新目标目录让新目录立即出现
+  const startFolderUpload = async (
+    local: string,
+    remote: string,
+    plan: SftpUploadDirPlan,
+  ) => {
+    // 刷新目标目录的父目录：预检期间用户可能已切换浏览位置
+    const target = parentPath(remote);
+    const id = `t-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setTransfers((prev) => ({
+      ...prev,
+      [id]: {
+        id,
+        name: baseName(local),
+        kind: 'upload',
+        transferred: 0,
+        total: plan.total_bytes,
+      },
+    }));
+    try {
+      // 敏感确认与合并确认分开传递：后端据此分别校验敏感目标和已存在目录
+      const res = await sftpUploadDir(
+        host.id,
+        local,
+        remote,
+        id,
+        plan.sensitive,
+        plan.target_exists,
+      );
+      if (!res.ok) {
+        const message = res.text || t('sftp.transferFailed');
+        setNodes((prev) => ({
+          ...prev,
+          [target]: { ...prev[target], error: message },
+        }));
+        onNotify('error', message);
+      }
+    } catch (e) {
+      const message = fmtError(e);
+      // 用户主动取消不算错误（后端按当前语言返回“已取消 / cancelled”）
+      if (!/取消|cancel/i.test(message)) {
+        setNodes((prev) => ({
+          ...prev,
+          [target]: { ...prev[target], error: message },
+        }));
+        onNotify('error', message);
+      }
+    } finally {
+      setTransfers((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      // 目标目录可能已展开并缓存了旧子项：清掉整棵子树缓存，再刷新父目录
+      purgeTree(remote);
+      if (cwdRef.current === target) void loadDir(target, true);
+    }
+  };
+
   const cancelTransfer = async (id: string) => {
     try {
       await sftpCancelTransfer(id);
@@ -602,6 +693,35 @@ function SftpPanel({
       return;
     }
     void beginUpload(items);
+  };
+
+  const handleUploadFolder = async () => {
+    // 目录选择返回绝对路径；去掉选择器可能附带的结尾分隔符，
+    // 保证目录名与远端拼接稳定
+    const picked = await open({ directory: true });
+    const local =
+      typeof picked === 'string' ? picked.replace(/[\\/]+$/, '') : null;
+    if (!local) return;
+    const remote = joinPath(cwd, baseName(local));
+    // 大目录扫描可能耗时：锁住面板并明确提示，避免用户以为按钮没反应
+    setBusy(true);
+    onNotify('info', t('sftp.folderScanning'));
+    try {
+      // 预检：统计数量/大小、跳过项、敏感目标与远端同名目录占用
+      const plan = await sftpUploadDirPlan(host.id, local, remote);
+      if (plan.target_is_file) {
+        onNotify(
+          'error',
+          t('sftp.folderTargetConflict', { name: baseName(remote) }),
+        );
+        return;
+      }
+      setFolderUpload({ local, remote, plan });
+    } catch (e) {
+      onNotify('error', fmtError(e));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const handleDownload = async (dir: string, entry: SftpEntry) => {
@@ -860,6 +980,14 @@ function SftpPanel({
           </button>
           <button
             className="icon-btn"
+            title={t('sftp.uploadFolderTitle')}
+            onClick={handleUploadFolder}
+            disabled={busy}
+          >
+            <FolderUploadIcon size={14} />
+          </button>
+          <button
+            className="icon-btn"
             title={t('sftp.newFolder')}
             onClick={() => setPromptState({ kind: 'mkdir', dir: cwd })}
             disabled={busy}
@@ -1013,6 +1141,29 @@ function SftpPanel({
         )}
       </div>
 
+      {folderUpload && (
+        <ConfirmModal
+          title={t('sftp.uploadFolderTitle')}
+          body={folderUploadBody(
+            folderUpload.plan,
+            baseName(folderUpload.remote),
+            folderUpload.remote,
+            t,
+          )}
+          confirmText={
+            folderUpload.plan.target_exists
+              ? t('sftp.folderMergeAction')
+              : t('common.confirm')
+          }
+          danger={folderUpload.plan.target_exists || folderUpload.plan.sensitive}
+          onConfirm={() => {
+            const req = folderUpload;
+            setFolderUpload(null);
+            void startFolderUpload(req.local, req.remote, req.plan);
+          }}
+          onCancel={() => setFolderUpload(null)}
+        />
+      )}
       {sensitiveBatch && (
         <ConfirmModal
           title={t('sftp.sensitiveUploadTitle')}
