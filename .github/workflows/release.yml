@@ -80,7 +80,59 @@ jobs:
             echo "__BUFFTERM_NOTES_EOF__"
           } >> "$GITHUB_ENV"
 
+      - name: Detect installer signing setup
+        shell: bash
+        env:
+          WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # 缺任一项就退回未签名构建，保证没有证书时发布流程与今天完全一致
+          enabled=no
+          if [ "$RUNNER_OS" = "Windows" ] && [ -n "$WINDOWS_PFX_BASE64" ] && [ -n "$WINDOWS_PFX_PASSWORD" ]; then
+            enabled=yes
+          elif [ "$RUNNER_OS" = "macOS" ] && [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ] \
+            && [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            enabled=yes
+          fi
+          echo "SIGNING_ENABLED=$enabled" >> "$GITHUB_ENV"
+
+      - name: Import Windows code signing certificate
+        if: runner.os == 'Windows' && env.SIGNING_ENABLED == 'yes'
+        shell: pwsh
+        env:
+          WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pfx = Join-Path $env:RUNNER_TEMP 'buffterm.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
+          $secure = ConvertTo-SecureString $env:WINDOWS_PFX_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $secure
+          Remove-Item $pfx -Force
+          if (-not $cert.Thumbprint) { throw 'Imported certificate has no thumbprint' }
+          $tspUrl = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
+          $config = @{
+            bundle = @{
+              windows = @{
+                certificateThumbprint = $cert.Thumbprint
+                digestAlgorithm       = 'SHA256'
+                timestampUrl          = $tspUrl
+                tsp                   = $true
+              }
+            }
+          } | ConvertTo-Json -Depth 5
+          $path = Join-Path $env:GITHUB_WORKSPACE 'ci-signing.json'
+          Set-Content -Path $path -Value $config -Encoding ascii
+          "SIGNING_CONFIG=--config $path" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+
       - name: Build installers and publish GitHub Release
+        if: env.SIGNING_ENABLED != 'yes'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -91,3 +143,22 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Build signed installers and publish GitHub Release
+        if: env.SIGNING_ENABLED == 'yes'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: v__VERSION__
+          releaseName: buffTerm v__VERSION__
+          releaseBody: ${{ env.RELEASE_BODY }}
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }} ${{ env.SIGNING_CONFIG }}

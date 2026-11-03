@@ -16,6 +16,9 @@ dist-ssr
 src-tauri/target
 src-tauri/gen
 
+# 发布工作流在 CI 临时生成的签名配置
+ci-signing.json
+
 # Codex 工作区
 .codex/
 .agents/
