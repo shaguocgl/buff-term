@@ -15,7 +15,7 @@
 ![Rust](https://img.shields.io/badge/Rust-1.97-orange.svg)
 ![React](https://img.shields.io/badge/React-19-blue.svg)
 ![Agent](https://img.shields.io/badge/Agent-self--built%20orchestration%20%7C%20no%20framework-8b5cf6.svg)
-[![Website](https://img.shields.io/badge/website-buffTerm%20Site-22d3ee.svg)](https://shaguocgl.github.io/buff-term-site/)
+[![Website](https://img.shields.io/badge/website-buffterm.com-22d3ee.svg)](https://buffterm.com/)
 
 buffTerm is an **AI-first SSH tool and MCP server**. It ships a **self-built AI agent orchestration layer** that works with any OpenAI-compatible model (DeepSeek, Qwen, Kimi, …), so you can inspect state, troubleshoot issues, install software and run operations in natural language.
 
@@ -27,7 +27,7 @@ It also exposes multiple hosts as an MCP server for other AI tools to call, with
   <img src="images/ai-agent.webp" alt="AI Agent chat and terminal" width="100%" />
 </p>
 <p align="center">
-  <a href="https://shaguocgl.github.io/buff-term-site">
+  <a href="https://buffterm.com">
     <img src="images/desc.webp" alt="buffTerm feature overview (click to visit the website)" width="100%" />
   </a>
 </p>
@@ -40,7 +40,14 @@ Grab the latest installer from [GitHub Releases](https://github.com/shaguocgl/bu
 - macOS: download the `.dmg` (Universal — Apple Silicon and Intel)
 - Windows: download the `.exe`
 
-> ⚠️ The macOS build is not Apple-notarized yet. Credentials are encrypted with AES-256-GCM and stored in a local SQLite database, while the master key lives in the system keychain. An unsigned development build may trigger a single keychain authorization prompt on first access — this is normal macOS behavior.
+### First launch notes
+
+Installers are not code-signed or Apple-notarized yet, so the system warning on first launch is expected and does not mean the file has been tampered with:
+
+- **Windows**: in the SmartScreen dialog choose "More info" → "Run anyway".
+- **macOS**: right-click the app → "Open" → "Open"; if it reports the app is damaged, run `xattr -d com.apple.quarantine /Applications/buffTerm.app` and reopen it.
+
+Credentials are encrypted with AES-256-GCM and stored in a local SQLite database, while the master key lives in the system keychain. An unsigned development build may trigger a single keychain authorization prompt on first access — this is normal macOS behavior. See [code signing and first launch notes](docs/安装包签名与首次安装说明.md) for the signing setup.
 
 ## ✨ Features
 
@@ -188,6 +195,7 @@ src-tauri/target/release/bundle/nsis/
 - [MCP service design](docs/对外MCP服务设计.md): Streamable HTTP service, permission modes and integration
 - [AI inspection and remediation design](docs/AI巡检整改功能设计.md): inspection, one-click remediation and notifications (email)
 - [Terminal dangerous-command blocking design](docs/终端危险命令拦截设计.md): frontend-authoritative command line plus backend decision
+- [Installer signing and first launch](docs/安装包签名与首次安装说明.md): signing routes and eligibility, CI integration points, first-launch steps
 
 ## 📁 Project structure
 
@@ -220,7 +228,7 @@ src-tauri/src/         Rust backend
   db.rs                SQLite (hosts, AI config, rules, audit, inspection and remediation, metrics)
 src-tauri/icons/       Desktop app icons (PNG / ICNS / ICO)
 .github/workflows/     GitHub Actions build and release
-docs/                  Design documents (credential encryption / AI agent permissions / MCP service / inspection & remediation / terminal blocking)
+docs/                  Design documents (credential encryption / AI agent permissions / MCP service / inspection & remediation / terminal blocking / installer signing)
 ```
 
 ## 📄 License

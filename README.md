@@ -15,7 +15,7 @@
 ![Rust](https://img.shields.io/badge/Rust-1.97-orange.svg)
 ![React](https://img.shields.io/badge/React-19-blue.svg)
 ![Agent](https://img.shields.io/badge/Agent-自研编排%20%7C%20无框架依赖-8b5cf6.svg)
-[![Website](https://img.shields.io/badge/官网-buffTerm%20Site-22d3ee.svg)](https://shaguocgl.github.io/buff-term-site/)
+[![Website](https://img.shields.io/badge/官网-buffterm.com-22d3ee.svg)](https://buffterm.com/)
 
 buffTerm 是一款**面向 AI 的 SSH 工具与 MCP 服务器**，内置**自研 AI Agent 编排层**，接入任意 OpenAI 兼容协议的大模型（如 DeepSeek、Qwen、Kimi 等），用自然语言就能查询状态、排查问题、安装程序、开展运维工作。
 
@@ -26,7 +26,7 @@ buffTerm 是一款**面向 AI 的 SSH 工具与 MCP 服务器**，内置**自研
   <img src="images/ai-agent.webp" alt="AI Agent 会话与终端" width="100%" />
 </p>
 <p align="center">
-  <a href="https://shaguocgl.github.io/buff-term-site">
+  <a href="https://buffterm.com">
     <img src="images/desc.webp" alt="buffTerm 功能介绍（点击访问官网）" width="100%" />
   </a>
 </p>
@@ -39,7 +39,14 @@ buffTerm 是一款**面向 AI 的 SSH 工具与 MCP 服务器**，内置**自研
 - macOS：下载 `.dmg`（Universal，同时支持 Apple Silicon 与 Intel）
 - Windows：下载 `.exe`
 
-> ⚠️ macOS 版本目前未做 Apple 公证。凭据以 AES-256-GCM 加密存本机 SQLite，主密钥存系统钥匙串；未签名开发版首次访问钥匙串时可能弹一次系统授权提示，属 macOS 正常行为。
+### 首次安装说明
+
+安装包暂未做代码签名与 Apple 公证，首次打开时的系统拦截提示属预期行为，不代表文件被篡改：
+
+- **Windows**：SmartScreen 弹窗选择「更多信息」→「仍要运行」。
+- **macOS**：右键应用图标 →「打开」→「打开」；若提示「已损坏」，执行 `xattr -d com.apple.quarantine /Applications/buffTerm.app` 后重新打开。
+
+凭据以 AES-256-GCM 加密存本机 SQLite，主密钥存系统钥匙串；未签名开发版首次访问钥匙串时可能弹一次系统授权提示，属 macOS 正常行为。签名与公证的接入方案见 [安装包签名与首次安装说明](docs/安装包签名与首次安装说明.md)。
 
 ## ✨ 功能特性
 
@@ -187,6 +194,7 @@ src-tauri/target/release/bundle/nsis/
 - [对外 MCP 服务设计](docs/对外MCP服务设计.md)：Streamable HTTP 服务、权限模式与接入
 - [AI 巡检整改功能设计](docs/AI巡检整改功能设计.md)：巡检、一键整改与通知（邮件）
 - [终端危险命令拦截设计](docs/终端危险命令拦截设计.md)：前端权威命令行 + 后端判定的拦截实现
+- [安装包签名与首次安装说明](docs/安装包签名与首次安装说明.md)：签名路线与资格、CI 接入点、首次安装放行步骤
 
 ## 📁 项目结构
 
@@ -219,7 +227,7 @@ src-tauri/src/         Rust 后端
   db.rs                SQLite（主机、AI 配置、规则、审计、巡检与整改、历史指标）
 src-tauri/icons/       桌面应用图标（PNG / ICNS / ICO）
 .github/workflows/     GitHub Actions 自动构建与发布
-docs/                  设计文档（密码加密 / AI Agent 权限 / MCP 服务 / 巡检整改 / 终端拦截）
+docs/                  设计文档（密码加密 / AI Agent 权限 / MCP 服务 / 巡检整改 / 终端拦截 / 安装包签名）
 ```
 
 
