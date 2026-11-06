@@ -651,26 +651,38 @@ function App() {
     );
   }, [hosts, hostSearch]);
 
+  // 新建标签：先同步登记到 tabsRef，再 setState。
+  // tabs 是 state，要等下一次渲染才可见，而双击的第二次点击往往发生在这之前；
+  // 同步登记后，各处去重判断才能看到刚刚创建的标签，不会重复开标签。
+  const pushTab = useCallback((tab: Tab) => {
+    tabsRef.current = [...tabsRef.current, tab];
+    setTabs((prev) => [...prev, tab]);
+  }, []);
+
+  // 连接主机：一台主机对应一个会话标签。已连接、正在连接的标签都复用，
+  // 否则双击主机时，第一次点击刚建出 status='connecting' 的标签（异步建连最长 60s），
+  // 第二次点击查不到「已连接」的标签，就会为同一主机再开一个重复标签。
   const handleConnect = (host: Host) => {
-    const existing = tabs.find(
-      (t) => t.kind === 'terminal' && t.host.id === host.id && t.status === 'connected',
+    const sessions = tabsRef.current.filter(
+      (t): t is TerminalTab => t.kind === 'terminal' && t.host.id === host.id,
     );
+    // 优先复用已连接的会话；没有再退回建连中的那个
+    const existing =
+      sessions.find((t) => t.status === 'connected') ??
+      sessions.find((t) => t.status === 'connecting');
     if (existing) {
       setActiveKey(existing.key);
       return;
     }
     const key = ++tabSeq.current;
-    setTabs((prev) => [
-      ...prev,
-      {
-        kind: 'terminal',
-        key,
-        host,
-        sessionId: null,
-        status: 'connecting',
-        title: host.name,
-      },
-    ]);
+    pushTab({
+      kind: 'terminal',
+      key,
+      host,
+      sessionId: null,
+      status: 'connecting',
+      title: host.name,
+    });
     setActiveKey(key);
     setLoadingHostId(host.id);
   };
@@ -697,22 +709,32 @@ function App() {
         return;
       }
     }
+    // 同一主机、同一目录已有建连中的标签时复用：连点「在此路径打开终端」
+    // 同样会落在建连窗口期里，否则会开出两个重复标签
+    const pending = tabsRef.current.find(
+      (t): t is TerminalTab =>
+        t.kind === 'terminal' &&
+        t.host.id === host.id &&
+        t.status === 'connecting' &&
+        t.initialCommand === command,
+    );
+    if (pending) {
+      setActiveKey(pending.key);
+      return;
+    }
     const key = ++tabSeq.current;
-    setTabs((prev) => [
-      ...prev,
-      {
-        kind: 'terminal',
-        key,
-        host,
-        sessionId: null,
-        status: 'connecting',
-        title: `${host.name} · ${baseName(path)}`,
-        initialCommand: command,
-      },
-    ]);
+    pushTab({
+      kind: 'terminal',
+      key,
+      host,
+      sessionId: null,
+      status: 'connecting',
+      title: `${host.name} · ${baseName(path)}`,
+      initialCommand: command,
+    });
     setActiveKey(key);
     setLoadingHostId(host.id);
-  }, []);
+  }, [pushTab]);
 
   // 文件面板点击文件：在中间区打开；同一主机同一路径复用已有标签
   const handleOpenFile = useCallback((host: Host, path: string) => {
@@ -724,12 +746,9 @@ function App() {
       return;
     }
     const key = ++tabSeq.current;
-    setTabs((prev) => [
-      ...prev,
-      { kind: 'file', key, host, path, title: baseName(path) },
-    ]);
+    pushTab({ kind: 'file', key, host, path, title: baseName(path) });
     setActiveKey(key);
-  }, []);
+  }, [pushTab]);
 
   // 文件编辑器的脏状态上报（引用稳定，避免每次渲染重挂 FileEditor 的监听）
   const handleFileDirtyChange = useCallback((key: number, dirty: boolean) => {
