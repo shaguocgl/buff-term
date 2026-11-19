@@ -1,5 +1,5 @@
 use crate::db::Db;
-use crate::models::{AlertSettings, Host, InspectionReport};
+use crate::models::{Host, InspectionReport};
 use crate::russh::RusshManager;
 use crate::safety::{sanitize, validate_readonly_command};
 use crate::util::{extract_error, now, truncate, truncate_output};
@@ -20,13 +20,23 @@ pub struct InspectionManager {
 }
 
 impl InspectionManager {
-    fn register(&self, id: String, host_id: String) -> (Arc<AtomicBool>, CancellationToken) {
+    /// 检查与登记必须在同一把锁内完成：否则手动点击与值守派发并发时，
+    /// 两边都先看到「无任务」再各自登记，同主机单 run 的约束就被绕过了。
+    fn register(&self, id: String, host_id: String) -> Option<(Arc<AtomicBool>, CancellationToken)> {
+        let mut hosts = self.hosts.lock().unwrap();
+        let mut flags = self.flags.lock().unwrap();
+        if hosts
+            .iter()
+            .any(|(rid, host)| host == &host_id && flags.contains_key(rid))
+        {
+            return None;
+        }
         let flag = Arc::new(AtomicBool::new(false));
         let token = CancellationToken::new();
-        self.flags.lock().unwrap().insert(id.clone(), flag.clone());
+        flags.insert(id.clone(), flag.clone());
         self.tokens.lock().unwrap().insert(id.clone(), token.clone());
-        self.hosts.lock().unwrap().insert(id, host_id);
-        (flag, token)
+        hosts.insert(id, host_id);
+        Some((flag, token))
     }
 
     fn cancel(&self, id: &str) -> bool {
@@ -99,13 +109,20 @@ pub struct InspectionError {
 }
 
 #[tauri::command]
-pub async fn start_inspection(
-    app: AppHandle,
-    state: State<'_, InspectionManager>,
-    db: State<'_, Arc<Db>>,
-    host_id: String,
+pub async fn start_inspection(app: AppHandle, host_id: String) -> Result<String, String> {
+    begin_inspection(&app, &host_id, "manual").await
+}
+
+/// 发起一次只读巡检。手动入口与值守调度共用此函数，保证两条路径的采集、
+/// 分析与落库完全一致，只有 `source` 不同（决定后续是否走分级静默）。
+pub(crate) async fn begin_inspection(
+    app: &AppHandle,
+    host_id: &str,
+    source: &str,
 ) -> Result<String, String> {
-    let host = crate::hosts::load_host(&db, &host_id)?;
+    let db = app.state::<Arc<Db>>();
+    let state = app.state::<InspectionManager>();
+    let host = crate::hosts::load_host(&db, host_id)?;
     if state.has_active_for_host(&host.id) {
         return Err(crate::i18n::t(
             "该主机已有巡检任务在运行，请等待完成或先取消",
@@ -128,21 +145,31 @@ pub async fn start_inspection(
         markdown: String::new(),
         html: String::new(),
         email_sent: false,
+        webhook_sent: false,
+        source: source.to_string(),
+        notify_skip: None,
         error: None,
         created_at: now(),
         finished_at: None,
         duration_ms: None,
     };
-    db.insert_inspection_report(&report)
-        .map_err(|e| {
-            format!(
-                "{}: {e}",
-                crate::i18n::t("创建巡检任务失败", "Failed to create the inspection task")
-            )
-        })?;
-
     let report_id = report.id.clone();
-    let (flag, token) = state.register(report_id.clone(), host.id.clone());
+    // 先原子登记再落库：登记失败说明并发下已有同主机任务，直接退出，不留孤儿报告行。
+    let Some((flag, token)) = state.register(report_id.clone(), host.id.clone()) else {
+        return Err(crate::i18n::t(
+            "该主机已有巡检任务在运行，请等待完成或先取消",
+            "An inspection is already running for this host; wait or cancel it first",
+        )
+        .to_string());
+    };
+    if let Err(e) = db.insert_inspection_report(&report) {
+        state.unregister(&report_id);
+        return Err(format!(
+            "{}: {e}",
+            crate::i18n::t("创建巡检任务失败", "Failed to create the inspection task")
+        ));
+    }
+
     let app_for_task = app.clone();
     let base_url = provider.base_url.clone();
     let host_for_task = host.clone();
@@ -381,35 +408,18 @@ async fn run_inspection_inner(
         crate::i18n::t("正在生成 HTML 报告", "Generating the HTML report"),
     );
     let body_html = markdown_to_html(&markdown);
-    report.html = wrap_email_html(&report.host_label, &report.risk_level, &body_html);
+    report.html = wrap_email_html(&report.host_label, &report.risk_level, &report.source, &body_html);
 
     emit_progress(
         app,
         &report.id,
-        "email",
-        crate::i18n::t("正在发送巡检邮件", "Sending the inspection email"),
+        "notify",
+        crate::i18n::t("正在分发巡检结论", "Dispatching the inspection findings"),
     );
-    let settings: AlertSettings = db
-        .get_alert_settings()
-        .map_err(|e| {
-            format!(
-                "{}: {e}",
-                crate::i18n::t("读取邮件设置失败", "Failed to read email settings")
-            )
-        })?;
-    if settings.smtp_host.as_deref().map(|s| !s.trim().is_empty()) == Some(true)
-        && settings.smtp_to.as_deref().map(|s| !s.trim().is_empty()) == Some(true)
-    {
-        let subject = format!(
-            "{} {} - {}",
-            crate::i18n::t("[buffTerm 巡检]", "[buffTerm inspection]"),
-            report.host_label,
-            report.risk_level
-        );
-        if crate::alert::send_html_email(&settings, &subject, &report.html).await.is_ok() {
-            report.email_sent = true;
-        }
-    }
+    let outcome = crate::alert::dispatch_inspection(&db, report).await;
+    report.email_sent = outcome.email_sent;
+    report.webhook_sent = outcome.webhook_sent;
+    report.notify_skip = outcome.skip;
 
     Ok(())
 }
@@ -808,14 +818,19 @@ mod tests {
     #[test]
     fn cancel_cancels_flag_and_running_token() {
         let manager = InspectionManager::default();
-        let (flag, token) = manager.register("r1".to_string(), "h1".to_string());
+        let (flag, token) = manager
+            .register("r1".to_string(), "h1".to_string())
+            .expect("first registration wins");
         assert!(!token.is_cancelled());
         assert!(manager.cancel("r1"));
         assert!(flag.load(Ordering::SeqCst));
         assert!(token.is_cancelled());
         assert!(manager.has_active_for_host("h1"));
+        // 已取消但尚未收尾的任务仍占着主机：并发登记必须被拒绝
+        assert!(manager.register("r2".to_string(), "h1".to_string()).is_none());
         manager.unregister("r1");
         assert!(!manager.has_active_for_host("h1"));
+        assert!(manager.register("r2".to_string(), "h1".to_string()).is_some());
     }
 
     #[test]
@@ -860,7 +875,7 @@ mod tests {
     }
 }
 
-fn markdown_to_html(markdown: &str) -> String {
+pub(crate) fn markdown_to_html(markdown: &str) -> String {
     let mut options = comrak::Options::default();
     options.extension.table = true;
     options.extension.strikethrough = true;
@@ -878,9 +893,15 @@ fn esc_html(value: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-fn wrap_email_html(host_label: &str, risk: &str, body: &str) -> String {
+pub(crate) fn wrap_email_html(host_label: &str, risk: &str, source: &str, body: &str) -> String {
     let host_label = esc_html(host_label);
     let risk = esc_html(risk);
+    // 报告头必须与来源一致：值守事件不是「巡检报告」
+    let brand = if source == "guard" {
+        crate::i18n::t("buffTerm · 智能值守报告", "buffTerm · Smart guard report")
+    } else {
+        crate::i18n::t("buffTerm · AI 巡检报告", "buffTerm · AI inspection report")
+    };
     let risk_color = match risk.as_str() {
         "high" => "#e5484d",
         "medium" => "#f5a623",
@@ -900,7 +921,7 @@ fn wrap_email_html(host_label: &str, risk: &str, body: &str) -> String {
          </div>\
          <div style=\"padding:24px 28px;line-height:1.65;font-size:14px;\">{}</div>\
          </div></body></html>",
-        crate::i18n::t("buffTerm · AI 巡检报告", "buffTerm · AI inspection report"),
+        brand,
         host_label,
         crate::i18n::t("风险等级", "Risk level"),
         risk_color,

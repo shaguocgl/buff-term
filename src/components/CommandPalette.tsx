@@ -5,7 +5,7 @@ import type { Host } from '../types';
 interface Props {
   hosts: Host[];
   onConnect: (host: Host) => void;
-  /** 动作标识：new-host / import-ssh / ai-config / logs / mcp / guard / alerts */
+  /** 动作标识：new-host / import-ssh / ai-config / logs / mcp / guard / alerts / watch */
   onAction: (action: string) => void;
   onClose: () => void;
 }
@@ -27,6 +27,7 @@ const ACTIONS: { key: string; labelKey: DictKey }[] = [
   { key: 'mcp', labelKey: 'palette.action.mcp' },
   { key: 'guard', labelKey: 'palette.action.guard' },
   { key: 'alerts', labelKey: 'palette.action.alerts' },
+  { key: 'watch', labelKey: 'palette.action.watch' },
 ];
 
 // Cmd+K 快速连接 / 命令面板：主机与常用动作的模糊搜索入口

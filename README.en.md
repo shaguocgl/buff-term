@@ -19,7 +19,7 @@
 
 buffTerm is an **AI-first SSH tool and MCP server**. It ships a **self-built AI agent orchestration layer** that works with any OpenAI-compatible model (DeepSeek, Qwen, Kimi, …), so you can inspect state, troubleshoot issues, install software and run operations in natural language.
 
-It also exposes multiple hosts as an MCP server for other AI tools to call, with security levels under your control. Dangerous-command blocking, AI operation approval and auditing cover you end to end; **config, credentials and audit data stay on your machine**, while AI conversations and inspection content are sent to the model platform you configure.
+It also exposes multiple hosts as an MCP server for other AI tools to call, with security levels under your control. Dangerous-command blocking, AI operation approval and auditing cover you end to end; **config, credentials and audit data stay on your machine**, while AI conversations, inspection and guard content are sent to the model platform you configure.
 
 > 🤖 **The agent orchestration layer is entirely self-built**: the core tool-calling loop (SSE streaming parse → tool execution → result backfill) is hand-written in this project and **does not depend on LangChain / OpenAI Agents SDK / Vercel AI SDK or similar frameworks** — approval interception, security policy and audit trails are all under our own control.
 
@@ -93,12 +93,16 @@ Credentials are encrypted with AES-256-GCM and stored in a local SQLite database
 - **Data flows**: AI conversations and inspection results go to the model platform you configure; update checks contact GitHub; the monitor's public-IP/geolocation lookup contacts public geo services; configuration, credentials and audit data stay local (credentials encrypted)
 - **Logs**: runtime logs are written to the app log directory (`buffterm.log`) for troubleshooting; review or clean them if they contain sensitive environment details
 
-### Monitoring, inspection and notifications
+### Monitoring, inspection, smart guard and notifications
 
 - Monitoring panel: CPU / memory / disk gauges plus load and TOP processes, refreshed automatically; background collection starts as soon as a terminal session connects (reusing the session connection — 5s while the panel is open, 30s silently in the background, keeping the last 30 minutes), so opening the panel shows the trend since you connected and switching hosts never loses data
-- AI inspection: collects read-only baseline data and produces a Markdown report (in Chinese or English, matching the interface), including malware / cryptomining risk detection
+- AI inspection: user-triggered; collects read-only baseline data and produces a Markdown report (in Chinese or English, matching the interface), including malware / cryptomining risk detection
+- **Smart guard (real-time)**: designed for sudden server incidents, with two per-host modes —
+  - **Client guard**: while buffTerm is running it samples read-only metrics every 5 seconds and evaluates thresholds locally (CPU / memory / disk / inode / load per core / connections / SSH brute force / OOM / failed systemd units / process and port liveness). On a breach it captures a snapshot, runs one AI quick assessment and pushes the result. Closing the window hides to tray and blocks system sleep so guarding continues.
+  - **Server guard**: installs a resident systemd service on the server, so it keeps working while your desktop is offline. Events are pushed straight to the configured channels and appended to an event log; once buffTerm is back online it pulls the events and completes the AI review automatically (or via "Sync now"). The model API key is never stored on the server.
 - One-click remediation: the AI turns the inspection report into remediation steps that run automatically once confirmed, with step editing and failure retry
-- Email notifications: inspection reports and remediation results can be sent automatically to configured recipients
+- Notifications: email (SMTP) plus group bots (DingTalk / WeCom / Feishu / Slack / Discord / Google Chat / Microsoft Teams / generic JSON), configured on separate tabs; DingTalk and Feishu signing supported, and built-in channels require HTTPS
+- **TODO · proactive AI protection**: the smart guard currently completes "detect → AI assessment → graded notification". The next step is letting the AI act within authorized boundaries (isolate processes, restart services, rate-limit, etc.), still gated by approval and auditing — solving what to do when nobody is around.
 
 ## 🧱 Tech stack
 
@@ -219,13 +223,14 @@ src-tauri/src/         Rust backend
   credentials.rs       Credential encryption (AES-256-GCM): host passwords / key passphrases / API keys / MCP tokens / SMTP passwords
   audit.rs             Audit log queries
   monitor.rs           Resource snapshot collection (CPU / memory / disk / load / TOP processes) written to the metrics table for query_history
-  alert.rs             Notification settings (email SMTP configuration and test)
-  inspection.rs        AI read-only inspection (including malware / cryptomining collection), report generation and email delivery
+  alert.rs             Notification settings and delivery (SMTP email + 8 group-bot webhooks, signing and response checks)
+  inspection.rs        AI read-only inspection (including malware / cryptomining collection), report generation and notification delivery
+  watch.rs             Smart guard: client-side sampling and rule evaluation, server-side systemd guard with event relay, AI assessment and review
   remediation.rs       One-click remediation (step generation, execution, retry, audit and email notification)
   mcp.rs               MCP service (HTTP + token + permission modes)
   sftp.rs              SFTP operations: structured directory, chunked transfer and built-in editor I/O (atomic write / sensitive paths / audit)
   update.rs            GitHub Release version check
-  db.rs                SQLite (hosts, AI config, rules, audit, inspection and remediation, metrics)
+  db.rs                SQLite (hosts, AI config, rules, audit, inspection / guard reports and events, metrics)
 src-tauri/icons/       Desktop app icons (PNG / ICNS / ICO)
 .github/workflows/     GitHub Actions build and release
 docs/                  Design documents (credential encryption / AI agent permissions / MCP service / inspection & remediation / terminal blocking / installer signing)

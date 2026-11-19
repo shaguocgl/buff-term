@@ -3104,6 +3104,229 @@ button.sftp-chevron:hover {
   font-size: 11.5px;
 }
 
+/* ============ 值守配置 ============ */
+
+.ai-modal.alert-channels {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 值守：主机列表。
+   不要在这里加 max-height/overflow——Select 的下拉是绝对定位，
+   内层滚动容器会把菜单裁掉；长列表交给整个弹窗滚动。 */
+.guard-host-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.guard-host-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel-2);
+}
+
+.guard-host-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.guard-host-main .mcp-card-meta {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.guard-mode {
+  flex: 0 0 auto;
+  width: 270px;
+}
+
+.guard-status {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.guard-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.guard-output {
+  margin: 0;
+  width: 100%;
+  max-height: 140px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--panel-3);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+/* 值守：规则行。用显式网格而非 flex，避免全局 input/label 样式把行挤歪 */
+.guard-rules {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 4px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel-3);
+  padding: 2px 12px;
+}
+
+.guard-rule {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 120px;
+  align-items: center;
+  column-gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.guard-rule:last-child {
+  border-bottom: none;
+}
+
+.guard-rule input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  /* 覆盖全局 input 的 100% 宽与内边距：否则复选框撑满整行，把标签挤到右边 */
+  padding: 0;
+  border: 0;
+  background: transparent;
+  justify-self: start;
+  accent-color: var(--accent);
+}
+
+.guard-rule-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.guard-rule input[type='number'] {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 10px;
+  text-align: right;
+}
+
+.mcp-hint.warn {
+  color: #f5a623;
+}
+
+/* 页签文字不换行：中英混排的通道名较长，折行会让切换条变高 */
+.alert-tabs .seg {
+  white-space: nowrap;
+}
+
+/* 通用 webhook 的字段说明：字段名等宽、描述弱化 */
+.generic-fields {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.generic-fields li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.generic-fields code {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.watch-params {
+  gap: 8px;
+}
+
+.watch-schedule {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+
+.watch-enable {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+
+.watch-enable.on {
+  border-color: rgba(109, 141, 255, 0.45);
+  background: rgba(109, 141, 255, 0.08);
+}
+
+.watch-enable .switch:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.watch-enable-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.watch-enable-text strong {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.watch-enable-text span {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.inspection-source {
+  flex: none;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.inspection-source.source-guard {
+  color: var(--accent);
+  border-color: rgba(109, 141, 255, 0.4);
+  background: rgba(109, 141, 255, 0.1);
+}
+
 /* ============ AI 定时巡检 ============ */
 
 .inspect-add {
@@ -5762,6 +5985,9 @@ button.sftp-chevron:hover {
 }
 
 .inspection-history-host {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12.5px;
   font-weight: 650;
 }

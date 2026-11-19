@@ -88,11 +88,18 @@ pub fn get_app_language() -> String {
 
 /// 切换界面语言并持久化：后续 AI 提示词、工具描述与错误文案都按新语言生成
 #[tauri::command]
-pub fn set_app_language(db: State<'_, Arc<Db>>, lang: String) -> Result<(), String> {
+pub fn set_app_language(
+    app: tauri::AppHandle,
+    db: State<'_, Arc<Db>>,
+    lang: String,
+) -> Result<(), String> {
     let next = parse_lang(&lang);
     set_lang(next);
     db.set_setting("app_language", as_str(next))
-        .map_err(|e| format!("{}: {e}", t("保存语言设置失败", "Failed to save language setting")))
+        .map_err(|e| format!("{}: {e}", t("保存语言设置失败", "Failed to save language setting")))?;
+    // 托盘菜单不在前端字典覆盖范围内，切换语言后同步重建
+    crate::tray::refresh(&app);
+    Ok(())
 }
 
 #[cfg(test)]

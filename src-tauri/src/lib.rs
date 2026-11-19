@@ -18,8 +18,10 @@ mod safety;
 mod session;
 mod sftp;
 mod sshconfig;
+mod tray;
 mod update;
 mod util;
+mod watch;
 
 use std::sync::Arc;
 use db::Db;
@@ -114,6 +116,11 @@ pub fn run() {
             app.manage(mcp::ApprovalRegistry::default());
             app.manage(sftp::SftpTransferRegistry::default());
             app.manage(sftp::SftpSessionManager::default());
+            app.manage(watch::GuardManager::default());
+            // 托盘先建好：客户端值守启用时关闭主窗口会隐藏到这里，而不是退出进程
+            tray::init(app.handle());
+            // 恢复客户端值守：按持久化配置重建每台主机的实时守护任务
+            watch::start_from_settings(app.handle());
             // 若上次退出前开启了 MCP 服务，启动时自动恢复
             let mcp_enabled = app
                 .state::<Arc<Db>>()
@@ -150,6 +157,16 @@ pub fn run() {
         .manage(RusshManager::new())
         .manage(monitor::MonitorManager::default())
         .manage(AgentManager::default())
+        .on_window_event(|window, event| {
+            // 客户端值守启用时把「关闭」改成「隐藏到托盘」，否则值守会随窗口一起结束。
+            // 未启用值守时不拦截，保持原有的关窗即退出行为。
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" && watch::is_active() {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             i18n::get_app_language,
             i18n::set_app_language,
@@ -197,6 +214,13 @@ pub fn run() {
             inspection::list_inspection_reports,
             inspection::delete_inspection_report,
             inspection::cancel_inspection,
+            watch::get_guard_settings,
+            watch::save_guard_settings,
+            watch::guard_status,
+            watch::install_server_guard,
+            watch::uninstall_server_guard,
+            watch::server_guard_status,
+            watch::sync_server_guard,
             remediation::start_remediation_planning,
             remediation::get_remediation,
             remediation::execute_remediation,
@@ -205,6 +229,7 @@ pub fn run() {
             alert::get_alert_settings,
             alert::save_alert_settings,
             alert::clear_alert_password,
+            alert::clear_webhook_secret,
             alert::test_alert_settings,
             mcp::get_mcp_service,
             mcp::save_mcp_service,

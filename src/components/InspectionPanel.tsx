@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { fmtError } from '../utils/errors';
-import { useI18n, type DictKey } from '../i18n';
+import { useI18n, type DictKey, type TFunc } from '../i18n';
 import ConfirmModal from './ConfirmModal';
 import {
   cancelInspection,
@@ -58,6 +58,15 @@ const RISK_LABEL: Record<string, DictKey> = {
   unknown: 'inspect.riskUnknown',
 };
 
+/** 通知结果文案：列出发出的通道，未发则说明。 */
+function notifyStatus(report: InspectionReport, t: TFunc): string {
+  const sent = [
+    report.email_sent ? t('inspect.emailSent') : null,
+    report.webhook_sent ? t('inspect.webhookSent') : null,
+  ].filter(Boolean);
+  return sent.length > 0 ? sent.join(' · ') : t('inspect.notNotified');
+}
+
 function InspectionPanel({ host, hidden = false, onClose }: Props) {
   const { t, lang } = useI18n();
   const locale = lang === 'en' ? 'en-US' : 'zh-CN';
@@ -69,7 +78,7 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
   const [report, setReport] = useState<InspectionReport | null>(null);
   const [history, setHistory] = useState<InspectionReport[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [emailConfigured, setEmailConfigured] = useState<boolean | null>(null);
+  const [notifyConfigured, setNotifyConfigured] = useState<boolean | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const currentIdRef = useRef<string | null>(null);
   const runningRef = useRef(false);
@@ -170,11 +179,13 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
     refreshHistory().catch(() => {});
     getAlertSettings()
       .then((s) => {
-        setEmailConfigured(
-          !!s.smtp_host?.trim() && !!s.smtp_to?.trim(),
+        // 邮件与群推送任一配置完整即算「通知已配置」，只配 webhook 的用户不该看到告警
+        setNotifyConfigured(
+          (!!s.smtp_host?.trim() && !!s.smtp_to?.trim()) ||
+            !!s.webhook_url?.trim(),
         );
       })
-      .catch(() => setEmailConfigured(false));
+      .catch(() => setNotifyConfigured(false));
   }, [refreshHistory]);
 
   useEffect(() => {
@@ -468,20 +479,20 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
             </button>
           )}
           <div
-            className={`inspection-mail-state${emailConfigured === false ? ' warn' : ''}`}
+            className={`inspection-mail-state${notifyConfigured === false ? ' warn' : ''}`}
             title={
-              emailConfigured === false
-                ? t('inspect.mailMissingTitle')
-                : emailConfigured === true
-                  ? t('inspect.mailConfiguredTitle')
-                  : t('inspect.mailCheckingTitle')
+              notifyConfigured === false
+                ? t('inspect.notifyMissingTitle')
+                : notifyConfigured === true
+                  ? t('inspect.notifyConfiguredTitle')
+                  : t('inspect.notifyCheckingTitle')
             }
           >
-            {emailConfigured === false
-              ? t('inspect.mailMissing')
-              : emailConfigured === true
-                ? t('inspect.mailConfigured')
-                : t('inspect.mailChecking')}
+            {notifyConfigured === false
+              ? t('inspect.notifyMissing')
+              : notifyConfigured === true
+                ? t('inspect.notifyConfigured')
+                : t('inspect.notifyChecking')}
           </div>
           <button className="icon-btn" title={t('common.close')} onClick={onClose}>
             <XIcon size={14} />
@@ -539,17 +550,18 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
                     ? t(RISK_LABEL[report.risk_level])
                     : report.risk_level}
                 </span>
+                <span className={`inspection-source source-${report.source}`}>
+                  {report.source === 'watch'
+                    ? t('inspect.sourceGuard')
+                    : t('inspect.sourceManual')}
+                </span>
                 <span>{report.provider_name} · {report.model}</span>
                 <span>
                   {report.duration_ms != null
                     ? `${(report.duration_ms / 1000).toFixed(1)}s`
                     : '—'}
                 </span>
-                <span>
-                  {report.email_sent
-                    ? t('inspect.emailSent')
-                    : t('inspect.emailNotSent')}
-                </span>
+                <span>{notifyStatus(report, t)}</span>
               </div>
               <div className="inspection-meta-actions">
                 <button className="btn secondary inspection-reinspect" onClick={begin}>
@@ -802,7 +814,14 @@ function InspectionPanel({ host, hidden = false, onClose }: Props) {
             >
               <span className={`risk-dot risk-${item.risk_level}`} />
               <span className="inspection-history-main">
-                <span className="inspection-history-host">{item.host_label}</span>
+                <span className="inspection-history-host">
+                  {item.host_label}
+                  <span className={`inspection-source source-${item.source}`}>
+                    {item.source === 'watch'
+                      ? t('inspect.sourceGuard')
+                      : t('inspect.sourceManual')}
+                  </span>
+                </span>
                 <span className="inspection-history-summary">{item.summary}</span>
               </span>
               <span className="inspection-history-time">

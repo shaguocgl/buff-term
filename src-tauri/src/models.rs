@@ -312,10 +312,23 @@ pub struct InspectionReport {
     pub markdown: String,
     pub html: String,
     pub email_sent: bool,
+    pub webhook_sent: bool,
+    /// 触发来源：`manual`（用户点击）/ `watch`（智能值守定时）。
+    /// 只有 watch 来源才走分级与冷却静默，手动巡检始终通知。
+    #[serde(default = "default_inspection_source")]
+    pub source: String,
+    /// 未发通知的原因：`below_threshold`（低于分级阈值）/ `cooldown`（冷却窗口内）。
+    /// None 表示已通知或无需说明。
+    #[serde(default)]
+    pub notify_skip: Option<String>,
     pub error: Option<String>,
     pub created_at: u64,
     pub finished_at: Option<u64>,
     pub duration_ms: Option<u64>,
+}
+
+pub fn default_inspection_source() -> String {
+    "manual".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,13 +376,193 @@ pub struct AlertSettings {
     pub smtp_username: Option<String>,
     pub smtp_password: Option<String>,
     /// 仅用于读取时告知前端“已保存密码”；密码本身不再回传渲染进程。
-    /// skip 保证它不会被写进 settings JSON。
-    #[serde(default, skip)]
+    /// skip_deserializing 而非 skip：skip 会连序列化一起跳过，IPC 也拿不到该标志；
+    /// 这里只拒绝反序列化（前端传值与库中旧值都无效），序列化仍要带给前端。
+    #[serde(default, skip_deserializing)]
     pub smtp_password_set: bool,
     pub smtp_from: Option<String>,
     pub smtp_to: Option<String>,
     /// starttls / ssl / none
     pub smtp_tls: Option<String>,
+    /// webhook 机器人类型：dingtalk / wecom / feishu / generic
+    #[serde(default)]
+    pub webhook_kind: Option<String>,
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    /// 钉钉加签密钥。与 SMTP 密码同样单独加密存储，不随 settings JSON 落库。
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+    #[serde(default, skip_deserializing)]
+    pub webhook_secret_set: bool,
+}
+
+fn default_guard_enabled_rule() -> bool {
+    true
+}
+fn default_guard_cpu() -> u32 {
+    90
+}
+fn default_guard_mem() -> u32 {
+    90
+}
+fn default_guard_disk() -> u32 {
+    90
+}
+fn default_guard_ssh_fail() -> u32 {
+    20
+}
+fn default_guard_conns() -> u32 {
+    300
+}
+fn default_guard_load() -> f64 {
+    4.0
+}
+fn default_guard_inode() -> u32 {
+    90
+}
+fn default_guard_duration() -> u32 {
+    60
+}
+fn default_guard_cooldown() -> u32 {
+    15
+}
+fn default_guard_mode() -> String {
+    "client".to_string()
+}
+
+/// 单台主机的值守模式：client = buffTerm 在线时实时守护；
+/// server = 在服务器上装 systemd 常驻守护，桌面离线也生效。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuardHost {
+    pub host_id: String,
+    #[serde(default = "default_guard_mode")]
+    pub mode: String,
+}
+
+/// 值守（实时守护）配置：本地判定阈值，事件触发时才调用 AI 快诊与通知。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuardSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub hosts: Vec<GuardHost>,
+    #[serde(default = "default_guard_enabled_rule")]
+    pub cpu_enabled: bool,
+    #[serde(default = "default_guard_cpu")]
+    pub cpu_percent: u32,
+    #[serde(default = "default_guard_enabled_rule")]
+    pub mem_enabled: bool,
+    #[serde(default = "default_guard_mem")]
+    pub mem_percent: u32,
+    #[serde(default = "default_guard_enabled_rule")]
+    pub disk_enabled: bool,
+    #[serde(default = "default_guard_disk")]
+    pub disk_percent: u32,
+    /// 一分钟内 SSH 登录失败次数阈值（暴力破解信号）
+    #[serde(default = "default_guard_enabled_rule")]
+    pub ssh_fail_enabled: bool,
+    #[serde(default = "default_guard_ssh_fail")]
+    pub ssh_fail_per_min: u32,
+    /// 已建立连接数阈值（连接洪峰信号）
+    #[serde(default = "default_guard_enabled_rule")]
+    pub conns_enabled: bool,
+    #[serde(default = "default_guard_conns")]
+    pub conns_threshold: u32,
+    /// 每核负载（load1 ÷ CPU 核数）
+    #[serde(default = "default_guard_enabled_rule")]
+    pub load_enabled: bool,
+    #[serde(default = "default_guard_load")]
+    pub load_per_core: f64,
+    /// inode 使用率（小文件把 inode 耗尽时 df 空间仍正常）
+    #[serde(default = "default_guard_enabled_rule")]
+    pub inode_enabled: bool,
+    #[serde(default = "default_guard_inode")]
+    pub inode_percent: u32,
+    /// 内核 OOM / oom-kill 事件
+    #[serde(default = "default_guard_enabled_rule")]
+    pub oom_enabled: bool,
+    /// 新增的 systemd 失败单元
+    #[serde(default = "default_guard_enabled_rule")]
+    pub units_enabled: bool,
+    /// 服务存活探测：进程名（与 ps comm 一致）与监听端口，连续 3 次探不到才告警
+    #[serde(default = "default_guard_enabled_rule")]
+    pub svc_enabled: bool,
+    #[serde(default)]
+    pub svc_procs: Vec<String>,
+    #[serde(default)]
+    pub svc_ports: Vec<u16>,
+    /// 资源类阈值需要持续多久才判定为事件（去抖）
+    #[serde(default = "default_guard_duration")]
+    pub duration_secs: u32,
+    /// 同一主机的同一规则在窗口内只告警一次
+    #[serde(default = "default_guard_cooldown")]
+    pub cooldown_minutes: u32,
+}
+
+impl Default for GuardSettings {
+    fn default() -> Self {
+        GuardSettings {
+            enabled: false,
+            hosts: Vec::new(),
+            cpu_enabled: default_guard_enabled_rule(),
+            cpu_percent: default_guard_cpu(),
+            mem_enabled: default_guard_enabled_rule(),
+            mem_percent: default_guard_mem(),
+            disk_enabled: default_guard_enabled_rule(),
+            disk_percent: default_guard_disk(),
+            ssh_fail_enabled: default_guard_enabled_rule(),
+            ssh_fail_per_min: default_guard_ssh_fail(),
+            conns_enabled: default_guard_enabled_rule(),
+            conns_threshold: default_guard_conns(),
+            load_enabled: default_guard_enabled_rule(),
+            load_per_core: default_guard_load(),
+            inode_enabled: default_guard_enabled_rule(),
+            inode_percent: default_guard_inode(),
+            oom_enabled: default_guard_enabled_rule(),
+            units_enabled: default_guard_enabled_rule(),
+            svc_enabled: default_guard_enabled_rule(),
+            svc_procs: Vec::new(),
+            svc_ports: Vec::new(),
+            duration_secs: default_guard_duration(),
+            cooldown_minutes: default_guard_cooldown(),
+        }
+    }
+}
+
+/// 值守事件落库记录（冷却判定与审计用）。
+#[derive(Debug, Clone)]
+pub struct GuardEventRecord {
+    pub id: String,
+    pub host_id: String,
+    pub rule: String,
+    pub severity: String,
+    pub message: String,
+    pub details: String,
+    pub report_id: Option<String>,
+    pub created_at: u64,
+}
+
+/// 服务器端守护回传的事件（桌面离线时产生，等待 AI 复盘）。
+#[derive(Debug, Clone, Serialize)]
+pub struct ServerGuardEvent {
+    pub id: String,
+    pub host_id: String,
+    pub rule: String,
+    pub severity: String,
+    pub message: String,
+    pub metrics: String,
+    pub event_ts: u64,
+}
+
+/// 值守状态（前端展示用）。running 仅代表客户端侧守护任务在采样。
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct GuardHostStatus {
+    pub host_id: String,
+    pub mode: String,
+    pub running: bool,
+    pub last_sample_at: u64,
+    pub last_event_at: u64,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

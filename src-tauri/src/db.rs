@@ -1,5 +1,5 @@
 use crate::models::{
-    AiModel, AiProvider, AiRule, AlertSettings, AuditLog, AuthType, Host, HostMetric,
+    AiModel, AiProvider, AiRule, AlertSettings, AuditLog, AuthType, GuardSettings, Host, HostMetric,
     InspectionReport, McpPermissionMode, McpRule, McpService, MetricDisk, MetricTop, NewMetric,
     Remediation, TerminalGuardSettings, TerminalRule,
 };
@@ -119,11 +119,39 @@ impl Db {
                  markdown      TEXT NOT NULL DEFAULT '',
                  html          TEXT NOT NULL DEFAULT '',
                  email_sent    INTEGER NOT NULL DEFAULT 0,
+                 webhook_sent  INTEGER NOT NULL DEFAULT 0,
+                 source        TEXT NOT NULL DEFAULT 'manual',
+                 notify_skip   TEXT,
                  error         TEXT,
                  created_at    INTEGER NOT NULL,
                  finished_at   INTEGER,
                  duration_ms   INTEGER
              );
+             CREATE TABLE IF NOT EXISTS guard_events (
+                 id         TEXT PRIMARY KEY,
+                 host_id    TEXT NOT NULL,
+                 rule       TEXT NOT NULL,
+                 severity   TEXT NOT NULL,
+                 message    TEXT NOT NULL,
+                 details    TEXT NOT NULL DEFAULT '',
+                 report_id  TEXT,
+                 created_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_guard_events_host
+                 ON guard_events(host_id, rule, created_at DESC);
+             CREATE TABLE IF NOT EXISTS server_guard_events (
+                 id         TEXT PRIMARY KEY,
+                 host_id    TEXT NOT NULL,
+                 rule       TEXT NOT NULL,
+                 severity   TEXT NOT NULL,
+                 message    TEXT NOT NULL,
+                 metrics    TEXT NOT NULL DEFAULT '',
+                 event_ts   INTEGER NOT NULL,
+                 fetched_at INTEGER NOT NULL,
+                 report_id  TEXT
+             );
+             CREATE INDEX IF NOT EXISTS idx_server_guard_pending
+                 ON server_guard_events(host_id, report_id);
              CREATE TABLE IF NOT EXISTS remediations (
                  id             TEXT PRIMARY KEY,
                  report_id      TEXT NOT NULL UNIQUE,
@@ -233,6 +261,27 @@ impl Db {
                      WHEN permission_mode = 'mcp' THEN 'mcp'
                      WHEN permission_mode = 'remediation' THEN 'remediation'
                      ELSE 'agent' END",
+                [],
+            )?;
+        }
+
+        // 迁移：inspection_reports 的值守字段。旧库补列并把历史报告一律视为手动触发，
+        // 使分级静默只作用于新产生的值守巡检，不改变历史记录的展示。幂等。
+        if !has_column(&conn, "inspection_reports", "webhook_sent")? {
+            conn.execute(
+                "ALTER TABLE inspection_reports ADD COLUMN webhook_sent INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        if !has_column(&conn, "inspection_reports", "source")? {
+            conn.execute(
+                "ALTER TABLE inspection_reports ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'",
+                [],
+            )?;
+        }
+        if !has_column(&conn, "inspection_reports", "notify_skip")? {
+            conn.execute(
+                "ALTER TABLE inspection_reports ADD COLUMN notify_skip TEXT",
                 [],
             )?;
         }
@@ -554,6 +603,111 @@ impl Db {
         self.set_setting("alert_settings", &value)
     }
 
+    pub fn get_guard_settings(&self) -> rusqlite::Result<GuardSettings> {
+        match self.get_setting("guard_settings")? {
+            Some(v) => serde_json::from_str(&v)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+            None => Ok(GuardSettings::default()),
+        }
+    }
+
+    pub fn save_guard_settings(&self, settings: &GuardSettings) -> rusqlite::Result<()> {
+        let value = serde_json::to_string(settings)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        self.set_setting("guard_settings", &value)
+    }
+
+    /// 该主机该规则最近一次值守事件的触发时间（冷却判定用）。
+    pub fn last_guard_event(&self, host_id: &str, rule: &str) -> rusqlite::Result<Option<u64>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT created_at FROM guard_events
+             WHERE host_id=?1 AND rule=?2 ORDER BY created_at DESC LIMIT 1",
+            params![host_id, rule],
+            |row| Ok(row.get::<_, i64>(0)? as u64),
+        )
+        .optional()
+    }
+
+    pub fn insert_guard_event(&self, event: &crate::models::GuardEventRecord) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO guard_events (id, host_id, rule, severity, message, details, report_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                event.id,
+                event.host_id,
+                event.rule,
+                event.severity,
+                event.message,
+                event.details,
+                event.report_id,
+                event.created_at as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 记录服务器端回传的事件；重复拉取同一事件不会重复入库。返回是否新插入。
+    pub fn insert_server_guard_event(
+        &self,
+        event: &crate::models::ServerGuardEvent,
+    ) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "INSERT OR IGNORE INTO server_guard_events
+                 (id, host_id, rule, severity, message, metrics, event_ts, fetched_at, report_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
+            params![
+                event.id,
+                event.host_id,
+                event.rule,
+                event.severity,
+                event.message,
+                event.metrics,
+                event.event_ts as i64,
+                now() as i64
+            ],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// 尚未做 AI 复盘的事件（按时间正序，避免旧事件被永久饿死）。
+    pub fn pending_server_guard_events(
+        &self,
+        host_id: &str,
+        limit: u32,
+    ) -> rusqlite::Result<Vec<crate::models::ServerGuardEvent>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, host_id, rule, severity, message, metrics, event_ts
+             FROM server_guard_events
+             WHERE host_id=?1 AND report_id IS NULL
+             ORDER BY event_ts ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![host_id, limit as i64], |row| {
+            Ok(crate::models::ServerGuardEvent {
+                id: row.get(0)?,
+                host_id: row.get(1)?,
+                rule: row.get(2)?,
+                severity: row.get(3)?,
+                message: row.get(4)?,
+                metrics: row.get(5)?,
+                event_ts: row.get::<_, i64>(6)? as u64,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn set_server_guard_report(&self, id: &str, report_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE server_guard_events SET report_id=?2 WHERE id=?1",
+            params![id, report_id],
+        )?;
+        Ok(())
+    }
+
     pub fn set_setting(&self, key: &str, value: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -793,10 +947,10 @@ impl Db {
         conn.execute(
             "INSERT INTO inspection_reports (
                  id, host_id, host_label, provider_id, provider_name, model, status,
-                 risk_level, summary, markdown, html, email_sent, error,
+                 risk_level, summary, markdown, html, email_sent, webhook_sent, source, notify_skip, error,
                  created_at, finished_at, duration_ms
              ) VALUES (
-                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
              )",
             params![
                 report.id,
@@ -811,6 +965,9 @@ impl Db {
                 report.markdown,
                 report.html,
                 report.email_sent as i64,
+                report.webhook_sent as i64,
+                report.source,
+                report.notify_skip,
                 report.error,
                 report.created_at as i64,
                 report.finished_at.map(|v| v as i64),
@@ -825,7 +982,8 @@ impl Db {
         conn.execute(
             "UPDATE inspection_reports SET
                 status=?2, risk_level=?3, summary=?4, markdown=?5, html=?6,
-                email_sent=?7, error=?8, finished_at=?9, duration_ms=?10
+                email_sent=?7, webhook_sent=?8, notify_skip=?9, error=?10,
+                finished_at=?11, duration_ms=?12
              WHERE id=?1",
             params![
                 report.id,
@@ -835,6 +993,8 @@ impl Db {
                 report.markdown,
                 report.html,
                 report.email_sent as i64,
+                report.webhook_sent as i64,
+                report.notify_skip,
                 report.error,
                 report.finished_at.map(|v| v as i64),
                 report.duration_ms.map(|v| v as i64),
@@ -847,7 +1007,7 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT id, host_id, host_label, provider_id, provider_name, model, status,
-                    risk_level, summary, markdown, html, email_sent, error,
+                    risk_level, summary, markdown, html, email_sent, webhook_sent, source, notify_skip, error,
                     created_at, finished_at, duration_ms
              FROM inspection_reports WHERE id=?1",
             params![id],
@@ -866,7 +1026,7 @@ impl Db {
             Some(host_id) => {
                 let mut stmt = conn.prepare(
                     "SELECT id, host_id, host_label, provider_id, provider_name, model, status,
-                            risk_level, summary, markdown, html, email_sent, error,
+                            risk_level, summary, markdown, html, email_sent, webhook_sent, source, notify_skip, error,
                             created_at, finished_at, duration_ms
                      FROM inspection_reports WHERE host_id=?1
                      ORDER BY created_at DESC, rowid DESC LIMIT ?2",
@@ -879,7 +1039,7 @@ impl Db {
             None => {
                 let mut stmt = conn.prepare(
                     "SELECT id, host_id, host_label, provider_id, provider_name, model, status,
-                            risk_level, summary, markdown, html, email_sent, error,
+                            risk_level, summary, markdown, html, email_sent, webhook_sent, source, notify_skip, error,
                             created_at, finished_at, duration_ms
                      FROM inspection_reports ORDER BY created_at DESC, rowid DESC LIMIT ?1",
                 )?;
@@ -1174,6 +1334,18 @@ impl Db {
     }
 }
 
+/// 判断某表是否已有指定列，用于幂等的 ADD COLUMN 迁移。
+fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in names {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn row_to_host(row: &Row<'_>) -> rusqlite::Result<Host> {
     Ok(Host {
         id: row.get(0)?,
@@ -1271,10 +1443,13 @@ fn row_to_inspection_report(row: &Row<'_>) -> rusqlite::Result<InspectionReport>
         markdown: row.get(9)?,
         html: row.get(10)?,
         email_sent: row.get::<_, i64>(11)? != 0,
-        error: row.get(12)?,
-        created_at: row.get::<_, i64>(13)? as u64,
-        finished_at: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
-        duration_ms: row.get::<_, Option<i64>>(15)?.map(|v| v as u64),
+        webhook_sent: row.get::<_, i64>(12)? != 0,
+        source: row.get(13)?,
+        notify_skip: row.get(14)?,
+        error: row.get(15)?,
+        created_at: row.get::<_, i64>(16)? as u64,
+        finished_at: row.get::<_, Option<i64>>(17)?.map(|v| v as u64),
+        duration_ms: row.get::<_, Option<i64>>(18)?.map(|v| v as u64),
     })
 }
 

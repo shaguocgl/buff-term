@@ -31,6 +31,8 @@ import type {
   TaskPlan,
   TestResult,
   UpdateInfo,
+  GuardSettings,
+  GuardHostStatus,
   InspectionReport,
   InspectionProgressPayload,
   InspectionDonePayload,
@@ -271,6 +273,19 @@ export const getAlertSettings = () =>
 export const saveAlertSettings = (settings: AlertSettings) =>
   invoke<void>('save_alert_settings', { settings });
 export const clearAlertPassword = () => invoke<void>('clear_alert_password');
+export const clearWebhookSecret = () => invoke<void>('clear_webhook_secret');
+export const getGuardSettings = () => invoke<GuardSettings>('get_guard_settings');
+export const saveGuardSettings = (settings: GuardSettings) =>
+  invoke<GuardSettings>('save_guard_settings', { settings });
+export const guardStatus = () => invoke<GuardHostStatus[]>('guard_status');
+export const installServerGuard = (hostId: string) =>
+  invoke<string>('install_server_guard', { hostId });
+export const uninstallServerGuard = (hostId: string) =>
+  invoke<string>('uninstall_server_guard', { hostId });
+export const serverGuardStatus = (hostId: string) =>
+  invoke<string>('server_guard_status', { hostId });
+export const syncServerGuard = (hostId: string) =>
+  invoke<string>('sync_server_guard', { hostId });
 export const testAlertSettings = (settings: AlertSettings) =>
   invoke<TestResult>('test_alert_settings', { settings });
 export const getMcpService = () => invoke<McpService>('get_mcp_service');

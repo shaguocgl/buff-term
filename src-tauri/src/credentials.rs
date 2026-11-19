@@ -315,6 +315,37 @@ pub fn delete_smtp_password() {
     }
 }
 
+// ---------- webhook 加签密钥 ----------
+
+/// 钉钉机器人的加签密钥：与 SMTP 密码同样加密存储，避免数据库泄露后
+/// 拿到密钥即可伪造告警推送到用户的群。
+pub fn save_webhook_secret(secret: &str) -> Result<(), String> {
+    let db = db().ok_or_else(|| crate::i18n::t("数据库未就绪", "The database is not ready").to_string())?;
+    let enc = encrypt_secret(secret)?;
+    db.set_credential("alert:webhook", "secret", &enc)
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("保存 webhook 密钥失败", "Failed to store the webhook secret")))?;
+    cache_set("webhook-secret", "secret", secret.to_string());
+    Ok(())
+}
+
+pub fn get_webhook_secret() -> Option<String> {
+    if let Some(cached) = cache_get("webhook-secret", "secret") {
+        return Some(cached);
+    }
+    let db = db()?;
+    let enc = db.get_credential("alert:webhook", "secret").ok()??;
+    let plain = decrypt_secret(&enc).ok()?;
+    cache_set("webhook-secret", "secret", plain.clone());
+    Some(plain)
+}
+
+pub fn delete_webhook_secret() {
+    cache_remove("webhook-secret", "secret");
+    if let Some(db) = db() {
+        let _ = db.delete_credential("alert:webhook", "secret");
+    }
+}
+
 /// 迁移历史明文凭据（升级自旧版本）：MCP token 明文在 mcp_service 表、
 /// SMTP 密码明文在 settings 表的 alert_settings JSON 中，统一转为加密存储。
 pub fn migrate_plaintext_secrets() {

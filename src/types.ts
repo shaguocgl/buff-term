@@ -280,6 +280,71 @@ export interface AlertSettings {
   smtp_from?: string | null;
   smtp_to?: string | null;
   smtp_tls?: string | null;
+  /** 机器人类型：钉钉 / 企微 / 飞书 / 通用 JSON */
+  webhook_kind?:
+    | 'dingtalk'
+    | 'wecom'
+    | 'feishu'
+    | 'slack'
+    | 'discord'
+    | 'googlechat'
+    | 'teams'
+    | 'generic'
+    | null;
+  webhook_url?: string | null;
+  /** 钉钉加签密钥；与 SMTP 密码一样单独加密存储，不回传渲染进程 */
+  webhook_secret?: string | null;
+  webhook_secret_set?: boolean;
+}
+
+/** 值守模式：client = buffTerm 在线时守护；server = 服务器常驻 systemd 守护 */
+export type GuardMode = 'client' | 'server';
+
+export interface GuardHost {
+  host_id: string;
+  mode: GuardMode;
+}
+
+/** 值守（实时守护）配置：本地判定阈值，事件触发时才 AI 快诊与通知 */
+export interface GuardSettings {
+  enabled: boolean;
+  hosts: GuardHost[];
+  cpu_enabled: boolean;
+  cpu_percent: number;
+  mem_enabled: boolean;
+  mem_percent: number;
+  disk_enabled: boolean;
+  disk_percent: number;
+  ssh_fail_enabled: boolean;
+  ssh_fail_per_min: number;
+  conns_enabled: boolean;
+  conns_threshold: number;
+  /** 每核负载（load1 ÷ 核数） */
+  load_enabled: boolean;
+  load_per_core: number;
+  /** inode 使用率 */
+  inode_enabled: boolean;
+  inode_percent: number;
+  /** 内核 OOM / oom-kill 事件 */
+  oom_enabled: boolean;
+  /** 新增 systemd 失败单元 */
+  units_enabled: boolean;
+  /** 服务存活探测 */
+  svc_enabled: boolean;
+  svc_procs: string[];
+  svc_ports: number[];
+  /** 资源类阈值需要持续多少秒才判定为事件 */
+  duration_secs: number;
+  cooldown_minutes: number;
+}
+
+export interface GuardHostStatus {
+  host_id: string;
+  mode: GuardMode;
+  running: boolean;
+  last_sample_at: number;
+  last_event_at: number;
+  error?: string | null;
 }
 
 export interface McpService {
@@ -368,6 +433,11 @@ export interface InspectionReport {
   markdown: string;
   html: string;
   email_sent: boolean;
+  webhook_sent: boolean;
+  /** 触发来源：手动点击 / 智能值守定时 */
+  source: 'manual' | 'watch';
+  /** 静默原因：低于分级阈值 / 冷却窗口内；null 表示已走通知流程 */
+  notify_skip: 'below_threshold' | 'cooldown' | null;
   error: string | null;
   created_at: number;
   finished_at: number | null;
@@ -376,7 +446,7 @@ export interface InspectionReport {
 
 export interface InspectionProgressPayload {
   report_id: string;
-  phase: 'collect' | 'analyze' | 'exec' | 'render' | 'email';
+  phase: 'collect' | 'analyze' | 'exec' | 'render' | 'notify';
   message: string;
 }
 

@@ -45,6 +45,7 @@ import type {
 } from './types';
 import AIConfigModal from './components/AIConfigModal';
 import AlertModal from './components/AlertModal';
+import GuardModal from './components/GuardModal';
 import AuditLogModal from './components/AuditLogModal';
 import ChatPanel from './components/ChatPanel';
 import CommandPalette from './components/CommandPalette';
@@ -80,6 +81,7 @@ import {
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
   ShieldIcon,
+  RadarIcon,
   SunIcon,
   TrashIcon,
   MoonIcon,
@@ -195,6 +197,7 @@ function App() {
   const [showAi, setShowAi] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [showAlerts, setShowAlerts] = useState(false);
+  const [showGuard, setShowGuard] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
   const [showTerminalGuard, setShowTerminalGuard] = useState(false);
   const [approvalQueue, setApprovalQueue] = useState<ApprovalQueueItem[]>([]);
@@ -1170,6 +1173,12 @@ function App() {
               <span className="rail-tip">{t('app.notifications')}</span>
             </div>
             <div className="rail-icon-wrap">
+              <button className="rail-btn" onClick={() => setShowGuard(true)}>
+                <RadarIcon size={16} />
+              </button>
+              <span className="rail-tip">{t('app.guard')}</span>
+            </div>
+            <div className="rail-icon-wrap">
               <button
                 className="rail-btn"
                 onClick={() => setShowTerminalGuard(true)}
@@ -1401,6 +1410,9 @@ function App() {
               </button>
               <button className="log-entry" onClick={() => setShowAlerts(true)}>
                 <BellIcon size={15} /> {t('app.notifications')}
+              </button>
+              <button className="log-entry" onClick={() => setShowGuard(true)}>
+                <RadarIcon size={15} /> {t('app.guard')}
               </button>
               <button
                 className="log-entry"
@@ -1783,6 +1795,9 @@ function App() {
               case 'alerts':
                 setShowAlerts(true);
                 break;
+              case 'watch':
+                setShowGuard(true);
+                break;
             }
           }}
           onClose={() => setPaletteOpen(false)}
@@ -1790,6 +1805,8 @@ function App() {
       )}
 
       {showAlerts && <AlertModal onClose={() => setShowAlerts(false)} />}
+
+      {showGuard && <GuardModal onClose={() => setShowGuard(false)} />}
 
       {showMcp && (
         <McpServiceModal hosts={hosts} onClose={() => setShowMcp(false)} />
