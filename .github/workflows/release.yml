@@ -76,7 +76,9 @@ jobs:
           fi
           {
             echo "RELEASE_BODY<<__BUFFTERM_NOTES_EOF__"
-            cat "$notes"
+            # 去掉 CR；并确保正文末尾有换行，否则结束分隔符会和最后一行粘在一起
+            sed -e 's/\r$//' "$notes"
+            echo
             echo "__BUFFTERM_NOTES_EOF__"
           } >> "$GITHUB_ENV"
 
