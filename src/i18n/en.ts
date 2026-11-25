@@ -587,8 +587,12 @@ export const en: Dict = {
   'monitor.kernel': 'Kernel {v}',
   'monitor.copyIp': 'Copy public IP',
   'monitor.coresThreads': '{cores} cores / {threads} threads',
+  'monitor.cpuActual': '≈ {cores} cores / {threads} threads',
+  'monitor.memActual': '{used} / {total}',
   'monitor.net': 'Traffic',
-  'monitor.netTotal': 'Total ↓ {rx} ↑ {tx}',
+  'monitor.netWindow': 'Window total ↓ {rx} ↑ {tx}',
+  'monitor.netWindowHint':
+    'Sampled total for the visible chart window; shown as approximate after a server reboot, counter reset or sampling gap.',
   'monitor.now': 'now',
   'monitor.agoWithinMinute': '<1 min',
   'monitor.agoMinutes': '{n} min ago',

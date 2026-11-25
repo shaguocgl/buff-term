@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { baseName, formatBytes, joinPath, parentPath, shellQuote } from './remote';
+import { baseName, formatBytes, joinPath, netWindowTotal, parentPath, shellQuote } from './remote';
 
 describe('remote path helpers', () => {
   it('joins paths without duplicate separators', () => {
@@ -31,5 +31,52 @@ describe('remote path helpers', () => {
   it('quotes paths for the remote shell, escaping embedded single quotes', () => {
     expect(shellQuote('/var/log')).toBe("'/var/log'");
     expect(shellQuote("/srv/it's here")).toBe("'/srv/it'\\''s here'");
+  });
+});
+
+describe('monitor traffic window totals', () => {
+  it('sums counter deltas only inside the visible window', () => {
+    const points = [
+      { ts: 90, rx: 900, tx: 400 },
+      { ts: 100, rx: 1000, tx: 500 },
+      { ts: 130, rx: 1100, tx: 550 },
+      { ts: 160, rx: 1200, tx: 600 },
+      { ts: 170, rx: 1300, tx: 650 },
+    ];
+    expect(netWindowTotal(points, 100, 160)).toEqual({
+      rx: 200,
+      tx: 100,
+      partial: false,
+    });
+  });
+
+  it('marks counter resets partial and keeps post-reset traffic', () => {
+    const points = [
+      { ts: 1000, rx: 1000, tx: 500 },
+      { ts: 1030, rx: 100, tx: 50 },
+      { ts: 1060, rx: 160, tx: 80 },
+    ];
+    expect(netWindowTotal(points, 1000, 1060)).toEqual({
+      rx: 160,
+      tx: 80,
+      partial: true,
+    });
+  });
+
+  it('marks long sampling gaps partial but keeps the counter delta', () => {
+    const points = [
+      { ts: 1000, rx: 100, tx: 50 },
+      { ts: 5000, rx: 1100, tx: 550 },
+    ];
+    expect(netWindowTotal(points, 1000, 5000)).toEqual({
+      rx: 1000,
+      tx: 500,
+      partial: true,
+    });
+  });
+
+  it('returns null until two samples are visible', () => {
+    expect(netWindowTotal([], 1000, 1060)).toBeNull();
+    expect(netWindowTotal([{ ts: 1030, rx: 100, tx: 50 }], 1000, 1060)).toBeNull();
   });
 });

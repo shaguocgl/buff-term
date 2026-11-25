@@ -2642,6 +2642,12 @@ button.sftp-chevron:hover {
   color: var(--text);
 }
 
+.monitor-chart-tooltip .tooltip-sub {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
 .monitor-chart-axis {
   display: flex;
   justify-content: space-between;

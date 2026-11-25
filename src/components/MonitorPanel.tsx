@@ -13,10 +13,10 @@ import {
   monitorSnapshot,
   monitorState,
 } from '../api';
-import type { Host, HostInfo, MonitorPoint, MonitorSnapshot } from '../types';
+import type { Host, HostInfo, MonitorSnapshot } from '../types';
 import { useI18n, useT, type TFunc } from '../i18n';
 import { fmtError } from '../utils/errors';
-import { formatBytes } from '../utils/remote';
+import { formatBytes, netWindowTotal, type NetCounterPoint } from '../utils/remote';
 import {
   ActivityIcon,
   CheckIcon,
@@ -55,6 +55,7 @@ interface PanelCache {
   snap: MonitorSnapshot | null;
   history: HistoryPoint[];
   netHistory: NetPoint[];
+  netCounters: NetCounterPoint[];
   prevNet: { ts: number; rx: number; tx: number } | null;
 }
 const panelCache = new Map<string, PanelCache>();
@@ -63,14 +64,14 @@ const panelCache = new Map<string, PanelCache>();
 const NET_DIFF_MAX_GAP = 60;
 
 /** 由后台采集的累计计数器历史点差分出实时速率；断档（无数据 / 间隔过长）不产出假速率 */
-function netFromPoints(points: MonitorPoint[]): {
+function netFromCounters(counters: NetCounterPoint[]): {
   history: NetPoint[];
   prev: { ts: number; rx: number; tx: number } | null;
 } {
   const history: NetPoint[] = [];
-  for (let i = 1; i < points.length; i += 1) {
-    const before = points[i - 1];
-    const cur = points[i];
+  for (let i = 1; i < counters.length; i += 1) {
+    const before = counters[i - 1];
+    const cur = counters[i];
     const dt = cur.ts - before.ts;
     if (dt <= 0 || dt > NET_DIFF_MAX_GAP) continue;
     history.push({
@@ -79,8 +80,19 @@ function netFromPoints(points: MonitorPoint[]): {
       tx: cur.tx >= before.tx ? (cur.tx - before.tx) / dt : 0,
     });
   }
-  const last = points[points.length - 1];
+  const last = counters[counters.length - 1];
   return { history, prev: last ? { ts: last.ts, rx: last.rx, tx: last.tx } : null };
+}
+
+/** 合并两段网卡计数器：按 ts 去重升序，避免回填响应晚于轮询响应时冲掉更新点 */
+function mergeNetCounters(
+  base: NetCounterPoint[],
+  extra: NetCounterPoint[],
+): NetCounterPoint[] {
+  const byTs = new Map<number, NetCounterPoint>();
+  for (const p of extra) byTs.set(p.ts, p);
+  for (const p of base) byTs.set(p.ts, p);
+  return [...byTs.values()].sort((a, b) => a.ts - b.ts);
 }
 
 /** 合并两段历史点：按 ts 去重升序（同 ts 保留后台回填点），
@@ -163,11 +175,17 @@ function HistoryChart({
   points,
   value,
   color,
+  threads,
+  totalMb,
 }: {
   label: string;
   points: { ts: number; value: number }[];
   value: number;
   color: 'cpu' | 'mem';
+  /** CPU 逻辑线程数：用于把百分比折算成核心当量 */
+  threads: number;
+  /** 内存总容量（MB）：用于把百分比折算成实际占用 */
+  totalMb: number;
 }) {
   const { t, lang } = useI18n();
   const locale = lang === 'en' ? 'en-US' : 'zh-CN';
@@ -195,6 +213,18 @@ function HistoryChart({
       : '';
   const dot = last ? `${x(last.ts).toFixed(1)},${y(last.value).toFixed(1)}` : '';
   const hovered = hover ? visible[hover.idx] : null;
+  const hoverActual =
+    hovered && color === 'cpu' && threads > 0
+      ? t('monitor.cpuActual', {
+          cores: fmtCores(hovered.value, threads),
+          threads,
+        })
+      : hovered && color === 'mem' && totalMb > 0
+        ? t('monitor.memActual', {
+            used: formatBytes((hovered.value / 100) * totalMb * 1048576),
+            total: formatBytes(totalMb * 1048576),
+          })
+        : null;
 
   const handleMove = (e: MouseEvent<SVGSVGElement>) => {
     const svg = svgRef.current;
@@ -280,6 +310,7 @@ function HistoryChart({
               {new Date(hovered.ts * 1000).toLocaleTimeString(locale, { hour12: false })}
             </span>
             <span className="tooltip-value">{hovered.value.toFixed(1)}%</span>
+            {hoverActual && <span className="tooltip-sub">{hoverActual}</span>}
           </div>
         )}
       </div>
@@ -304,6 +335,11 @@ function fmtRate(bps: number): string {
   if (bps >= 1024 * 1024) return `${(bps / 1048576).toFixed(1)} MB/s`;
   if (bps >= 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
   return `${bps.toFixed(0)} B/s`;
+}
+
+/** CPU 百分比 → 核心当量（保留最多两位小数，去掉尾随零） */
+function fmtCores(percent: number, threads: number): string {
+  return String(Number(((percent * threads) / 100).toFixed(2)));
 }
 
 /** 运行时长：3天 5小时 / 2小时 10分 / 30分 */
@@ -411,15 +447,13 @@ function HostInfoCard({ info }: { info: HostInfo }) {
   );
 }
 
-/** 流量卡：↓rx / ↑tx 双折线，Y 轴自适应峰值；头部实时速率，底部累计流量 */
+/** 流量卡：↓rx / ↑tx 双折线，Y 轴自适应峰值；头部实时速率，底部当前窗口累计 */
 function NetChart({
   points,
-  totalRx,
-  totalTx,
+  counters,
 }: {
   points: NetPoint[];
-  totalRx: number;
-  totalTx: number;
+  counters: NetCounterPoint[];
 }) {
   const { t, lang } = useI18n();
   const locale = lang === 'en' ? 'en-US' : 'zh-CN';
@@ -435,6 +469,13 @@ function NetChart({
   const earliest = visible.length > 0 ? visible[0].ts : now;
   const start = Math.min(now - MIN_WINDOW, Math.max(now - MAX_WINDOW, earliest));
   const window = Math.max(MIN_WINDOW, now - start);
+  const windowTotal = netWindowTotal(counters, start, now, NET_DIFF_MAX_GAP);
+  const windowRx = windowTotal
+    ? `${windowTotal.partial ? '≈ ' : ''}${formatBytes(windowTotal.rx)}`
+    : '—';
+  const windowTx = windowTotal
+    ? `${windowTotal.partial ? '≈ ' : ''}${formatBytes(windowTotal.tx)}`
+    : '—';
   const last = visible.length > 0 ? visible[visible.length - 1] : null;
   // 至少 1KB/s 量程，避免全 0 时除零 / 空白
   const maxV = niceCeil(
@@ -545,11 +586,8 @@ function NetChart({
       </div>
       <div className="monitor-chart-axis">
         <span>{formatAgo(window, t)}</span>
-        <span className="monitor-net-total">
-          {t('monitor.netTotal', {
-            rx: formatBytes(totalRx),
-            tx: formatBytes(totalTx),
-          })}
+        <span className="monitor-net-total" title={t('monitor.netWindowHint')}>
+          {t('monitor.netWindow', { rx: windowRx, tx: windowTx })}
         </span>
         <span>{t('monitor.now')}</span>
       </div>
@@ -569,6 +607,9 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
   const [netHistory, setNetHistory] = useState<NetPoint[]>(
     () => panelCache.get(host.id)?.netHistory ?? [],
   );
+  const [netCounters, setNetCounters] = useState<NetCounterPoint[]>(
+    () => panelCache.get(host.id)?.netCounters ?? [],
+  );
   const [info, setInfo] = useState<HostInfo | null>(
     () => infoCache.get(host.id) ?? null,
   );
@@ -585,6 +626,7 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
   // 趋势数据的 ref 镜像：load 里需要基于上一次的值计算新数组并回写缓存
   const historyRef = useRef(history);
   const netRef = useRef(netHistory);
+  const netCountersRef = useRef(netCounters);
   // 最近快照的 ref 镜像：回填与轮询响应乱序返回时，避免用较旧的一份覆盖新快照
   const snapRef = useRef<MonitorSnapshot | null>(snap);
   snapRef.current = snap;
@@ -627,9 +669,11 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
     snapRef.current = cached?.snap ?? null;
     historyRef.current = cached?.history ?? [];
     netRef.current = cached?.netHistory ?? [];
+    netCountersRef.current = cached?.netCounters ?? [];
     prevNet.current = cached?.prevNet ?? null;
     setHistory(historyRef.current);
     setNetHistory(netRef.current);
+    setNetCounters(netCountersRef.current);
     setLoading(!cached);
     fetchInfo();
   }, [fetchInfo, host.id]);
@@ -672,16 +716,25 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
             st.points.map((p) => ({ ts: p.ts, cpu: p.cpu, mem: p.mem })),
             historyRef.current,
           );
-          const net = netFromPoints(st.points);
+          const incomingCounters = st.points.map((p) => ({
+            ts: p.ts,
+            rx: p.rx,
+            tx: p.tx,
+          }));
+          const counters = mergeNetCounters(incomingCounters, netCountersRef.current);
+          const net = netFromCounters(counters);
           historyRef.current = points;
           netRef.current = net.history;
+          netCountersRef.current = counters;
           prevNet.current = net.prev;
           setHistory(points);
           setNetHistory(net.history);
+          setNetCounters(counters);
           panelCache.set(hostId, {
             snap: snapRef.current ?? st.latest,
             history: points,
             netHistory: net.history,
+            netCounters: counters,
             prevNet: net.prev,
           });
           return;
@@ -721,10 +774,22 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
           historyRef.current = nextHist;
           setHistory(nextHist);
         }
+        // 原始计数器只保留在内存中，供当前曲线窗口累计使用，不写入数据库。
+        const lastCounter = netCountersRef.current[netCountersRef.current.length - 1];
+        if (!lastCounter || lastCounter.ts < s.ts) {
+          const nextCounters = [
+            ...netCountersRef.current,
+            { ts: s.ts, rx: s.net.rx_bytes, tx: s.net.tx_bytes },
+          ].filter((p) => p.ts >= s.ts - 1800);
+          netCountersRef.current = nextCounters;
+          setNetCounters(nextCounters);
+        }
         // 与上一快照差分网卡计数器 → B/s 速率；计数器回退（网卡重建等）取 0；
         // 间隔过长（面板切走暂停轮询后回来）说明计数器断档，不产出被稀释的假速率
         const prev = prevNet.current;
-        prevNet.current = { ts: s.ts, rx: s.net.rx_bytes, tx: s.net.tx_bytes };
+        if (!prev || s.ts >= prev.ts) {
+          prevNet.current = { ts: s.ts, rx: s.net.rx_bytes, tx: s.net.tx_bytes };
+        }
         if (prev && s.ts > prev.ts && s.ts - prev.ts <= NET_DIFF_MAX_GAP) {
           const dt = s.ts - prev.ts;
           const rx =
@@ -742,6 +807,7 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
           snap: s,
           history: historyRef.current,
           netHistory: netRef.current,
+          netCounters: netCountersRef.current,
           prevNet: prevNet.current,
         });
       } catch (e) {
@@ -821,18 +887,18 @@ function MonitorPanel({ host, hidden = false, onClose }: Props) {
                 points={history.map((p) => ({ ts: p.ts, value: p.cpu }))}
                 value={snap.cpu_percent}
                 color="cpu"
+                threads={info?.threads || info?.cores || 0}
+                totalMb={snap.mem.total_mb}
               />
               <HistoryChart
                 label={t('monitor.memory')}
                 points={history.map((p) => ({ ts: p.ts, value: p.mem }))}
                 value={snap.mem.percent}
                 color="mem"
+                threads={0}
+                totalMb={snap.mem.total_mb}
               />
-              <NetChart
-                points={netHistory}
-                totalRx={snap.net.rx_bytes}
-                totalTx={snap.net.tx_bytes}
-              />
+              <NetChart points={netHistory} counters={netCounters} />
             </div>
 
             {(snap.disks.length > 0 || snap.swap.total_mb > 0) && (
