@@ -897,6 +897,8 @@ button {
 .terminal-body .xterm {
   height: 100%;
   width: 100%;
+  /* FitAddon 会减去 xterm 自身 padding；预留约一行半，窗口缩放后也不会把底部安全区吃掉。 */
+  padding-bottom: calc(var(--terminal-font-size, 14px) * 1.5);
 }
 
 .terminal-overlay {
@@ -5308,8 +5310,8 @@ button.sftp-chevron:hover {
 }
 
 .mcp-card-list {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   max-height: 260px;
   overflow-y: auto;
@@ -5319,8 +5321,9 @@ button.sftp-chevron:hover {
 .mcp-card {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 11px 14px;
+  gap: 10px;
+  min-width: 0;
+  padding: 11px 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--panel-2);
@@ -5441,6 +5444,13 @@ button.sftp-chevron:hover {
   color: var(--muted);
   line-height: 1.55;
   margin: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 620px) {
+  .mcp-card-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .mcp-footer {

@@ -88,17 +88,67 @@ fn write_sftp_audit(
 /// 校验本地路径：必须为绝对路径，且拒绝凭据类敏感目录，
 /// 防止恶意前端/注入把私钥、云凭据等本地文件上传到远端，
 /// 或覆盖下载到敏感位置。
-fn validate_local_path(local: &str) -> Result<(), String> {
-    if !std::path::Path::new(local).is_absolute() {
+pub(crate) fn validate_local_path(local: &str) -> Result<(), String> {
+    let path = std::path::Path::new(local);
+    if !path.is_absolute() {
         return Err(crate::i18n::t("本地路径必须是绝对路径", "The local path must be absolute").to_string());
     }
-    // 与远端敏感路径共用规则，额外挡住 .ssh/.gnupg/.aws/.azure 等本地凭据目录。
-    if crate::safety::is_sensitive_path(local) {
+    // 同时检查原始路径和符号链接真实目标，避免 /tmp/key -> ~/.ssh/id_rsa 绕过限制。
+    let resolves_sensitive = path
+        .canonicalize()
+        .map(|real| crate::safety::is_sensitive_path(&real.to_string_lossy()))
+        .unwrap_or(false);
+    if crate::safety::is_sensitive_path(local) || resolves_sensitive {
         return Err(if crate::i18n::is_en() {
             "The local path is a sensitive credential/system location; the operation was rejected"
                 .to_string()
         } else {
             "本地路径属于敏感凭据/系统位置，已拒绝该操作".to_string()
+        });
+    }
+    Ok(())
+}
+
+/// 校验本地下载目标：在路径校验基础上检查父目录真实位置，防止不存在的新文件
+/// 通过 `link -> ~/.ssh` 这类父目录符号链接绕过敏感路径限制。
+pub(crate) fn validate_local_output_path(local: &str) -> Result<(), String> {
+    validate_local_path(local)?;
+    let path = std::path::Path::new(local);
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let real_parent = parent
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("解析本地目标目录失败", "Failed to resolve the local destination directory")))?;
+    if !real_parent.is_dir() {
+        return Err(crate::i18n::t("本地目标目录不存在或不是目录", "The local destination directory does not exist or is not a directory").to_string());
+    }
+    if crate::safety::is_sensitive_path(&real_parent.to_string_lossy()) {
+        return Err(if crate::i18n::is_en() {
+            "The local destination resolves to a sensitive credential/system directory; the operation was rejected".to_string()
+        } else {
+            "本地目标目录解析到敏感凭据/系统位置，已拒绝该操作".to_string()
+        });
+    }
+    if path.metadata().is_ok_and(|meta| meta.is_dir()) {
+        return Err(crate::i18n::t("本地目标必须是文件，不能是目录", "The local destination must be a file, not a directory").to_string());
+    }
+    Ok(())
+}
+
+/// 覆盖策略：默认不允许替换已存在目标，调用方可在明确授权后传 true。
+pub(crate) fn ensure_overwrite_allowed(existing: bool, overwrite: bool) -> Result<(), String> {
+    if existing && !overwrite {
+        return Err(crate::i18n::t("目标文件已存在；如需覆盖请显式设置 overwrite=true", "The target file already exists; set overwrite=true explicitly to replace it").to_string());
+    }
+    Ok(())
+}
+
+/// 下载完整性：已知远端大小时，实际读取更少视为截断；动态增长文件允许实际值更大。
+pub(crate) fn ensure_download_complete(total: u64, count: u64) -> Result<(), String> {
+    if total > 0 && count < total {
+        return Err(if crate::i18n::is_en() {
+            format!("Incomplete download: expected {total} bytes, received {count}")
+        } else {
+            format!("下载不完整：预期 {total} 字节，实际 {count} 字节")
         });
     }
     Ok(())
@@ -210,6 +260,20 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 /// 实际中断由连接层 keepalive 与取消标志负责。
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(7200);
 
+/// 校验本次分块不会让传输超过上限；MCP 传输在预检之外再逐块兜底。
+fn ensure_transfer_chunk_limit(transferred: u64, chunk: usize, max: Option<u64>) -> Result<(), String> {
+    if let Some(max) = max {
+        if transferred.saturating_add(chunk as u64) > max {
+            return Err(if crate::i18n::is_en() {
+                format!("Transfer exceeds the maximum allowed size of {max} bytes")
+            } else {
+                format!("传输超过允许的最大字节数 {max}")
+            });
+        }
+    }
+    Ok(())
+}
+
 /// 分块读写循环：每块后检查取消标志，按节流间隔 emit `sftp:progress`。
 /// `progress_base` 是同一 transfer 内已完成部分的字节数：目录上传时多个文件
 /// 共用一条进度条，按「已完成 + 当前文件」累计；单文件传输传 0。
@@ -219,6 +283,7 @@ async fn copy_with_progress<R, W>(
     src: &mut R,
     dst: &mut W,
     total: u64,
+    max_bytes: Option<u64>,
     progress_base: u64,
     transfer_id: &str,
     kind: &'static str,
@@ -255,6 +320,7 @@ where
         if n == 0 {
             break;
         }
+        ensure_transfer_chunk_limit(transferred, n, max_bytes)?;
         dst.write_all(&buf[..n])
             .await
             .map_err(|e| format!("{}: {e}", crate::i18n::t("写入数据失败", "Failed to write data")))?;
@@ -594,55 +660,165 @@ pub async fn sftp_download(
     let host = crate::hosts::load_host(&db, &host_id)?;
     validate_local_path(&local)?;
     let cancelled = registry.register(&transfer_id, &host_id);
-    let result = with_sftp(&russh, &host, TRANSFER_TIMEOUT, |sftp| {
+    let result = download_local_file(
+        app.clone(),
+        &russh,
+        &host,
+        remote,
+        local,
+        true,
+        None,
+        transfer_id.clone(),
+        cancelled.clone(),
+    )
+    .await;
+    registry.remove(&transfer_id);
+    let (count, _) = result?;
+    Ok(success(if crate::i18n::is_en() {
+            format!("Downloaded {count} bytes")
+        } else {
+            format!("已下载 {count} 字节")
+        }))
+}
+
+/// 远端路径存在性预检：NoSuchFile 返回 false，其他 SFTP 错误原样返回。
+pub(crate) async fn remote_path_exists(
+    russh: &RusshManager,
+    host: &Host,
+    remote: &str,
+) -> Result<bool, String> {
+    with_sftp(russh, host, Duration::from_secs(20), |sftp| {
+        let remote = remote.to_string();
+        Box::pin(async move {
+            sftp.try_exists(remote)
+                .await
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("检查远端路径失败", "Failed to check the remote path")))
+        })
+    })
+    .await
+}
+
+/// 远端文件大小预检：canonical 后检查敏感真实目标，并拒绝目录。
+pub(crate) async fn remote_file_size(
+    russh: &RusshManager,
+    host: &Host,
+    remote: &str,
+) -> Result<u64, String> {
+    with_sftp(russh, host, Duration::from_secs(20), |sftp| {
+        let remote = remote.to_string();
+        Box::pin(async move {
+            let real = sftp
+                .canonicalize(&remote)
+                .await
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("读取远程文件信息失败", "Failed to read remote file info")))?;
+            if resolved_target_is_sensitive(&remote, &real) {
+                return Err(if crate::i18n::is_en() {
+                    format!("{remote} resolves to a sensitive path ({real}); download rejected")
+                } else {
+                    format!("{remote} 解析到敏感路径（{real}），已拒绝下载")
+                });
+            }
+            let meta = sftp
+                .metadata(real.as_str())
+                .await
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("读取远程文件信息失败", "Failed to read remote file info")))?;
+            if meta.file_type().is_dir() {
+                return Err(crate::i18n::t("远端路径是目录，无法下载文件", "The remote path is a directory; cannot download a file").to_string());
+            }
+            Ok(meta.len())
+        })
+    })
+    .await
+}
+
+/// MCP 等内部调用复用的单文件下载内核：不含 Tauri State / 审计，
+/// 由调用方负责权限、审批和审计；本地侧使用临时文件 + rename 原子上替换。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn download_local_file(
+    app: AppHandle,
+    russh: &RusshManager,
+    host: &Host,
+    remote: String,
+    local: String,
+    overwrite: bool,
+    max_bytes: Option<u64>,
+    transfer_id: String,
+    cancelled: Arc<AtomicBool>,
+) -> Result<(u64, bool), String> {
+    validate_local_output_path(&local)?;
+    with_sftp(russh, host, TRANSFER_TIMEOUT, |sftp| {
         let remote = remote.clone();
         let local = local.clone();
         let transfer_id = transfer_id.clone();
         let app = app.clone();
         let cancelled = cancelled.clone();
         Box::pin(async move {
-            let meta = sftp
-                .metadata(remote.as_str())
+            // 先由服务端 canonical 成真实路径，再打开该路径；原路径即使被替换成符号链接，
+            // 也不会改变本次打开的目标。真实目标命中敏感规则时直接拒绝。
+            let real = sftp
+                .canonicalize(remote.as_str())
                 .await
                 .map_err(|e| format!("{}: {e}", crate::i18n::t("读取远程文件信息失败", "Failed to read remote file info")))?;
-            let total = meta.len();
+            if resolved_target_is_sensitive(&remote, &real) {
+                return Err(if crate::i18n::is_en() {
+                    format!("{remote} resolves to a sensitive path ({real}); download rejected")
+                } else {
+                    format!("{remote} 解析到敏感路径（{real}），已拒绝下载")
+                });
+            }
+            ensure_remote_target_stable(sftp, &real, true).await?;
             let mut src = sftp
-                .open(remote)
+                .open(real.clone())
                 .await
                 .map_err(|e| format!("{}: {e}", crate::i18n::t("打开远程文件失败", "Failed to open the remote file")))?;
-            // 先写同目录临时文件，成功后再 rename 覆盖目标：
-            // 下载失败/取消绝不能截断或删除用户已有的本地文件。
-            let existing_perms = tokio::fs::metadata(&local)
+            // 用已打开句柄的 fstat 作为大小依据，避免路径元数据与实际读取文件不一致。
+            let meta = src
+                .metadata()
                 .await
-                .ok()
-                .map(|meta| meta.permissions());
-            let temp = format!(
-                "{local}.buffterm-{}.part",
-                uuid::Uuid::new_v4().simple()
-            );
+                .map_err(|e| format!("{}: {e}", crate::i18n::t("读取远程文件信息失败", "Failed to read remote file info")))?;
+            if meta.file_type().is_dir() {
+                return Err(crate::i18n::t("远端路径是目录，无法下载文件", "The remote path is a directory; cannot download a file").to_string());
+            }
+            let total = meta.len();
+            let existing = tokio::fs::metadata(&local).await.ok();
+            let overwritten = existing.is_some();
+            ensure_overwrite_allowed(overwritten, overwrite)?;
+            let existing_perms = existing.map(|meta| meta.permissions());
+            let temp = format!("{local}.buffterm-{}.part", uuid::Uuid::new_v4().simple());
             let mut dst = tokio::fs::File::create(&temp)
                 .await
                 .map_err(|e| format!("{}: {e}", crate::i18n::t("创建本地临时文件失败", "Failed to create the local temporary file")))?;
-            let count = copy_with_progress(
+            let count = match copy_with_progress(
                 &mut src,
                 &mut dst,
                 total,
+                max_bytes,
                 0,
                 &transfer_id,
                 "download",
                 &app,
                 &cancelled,
             )
-            .await;
-            if count.is_err() {
+            .await
+            {
+                Ok(count) => count,
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&temp).await;
+                    return Err(e);
+                }
+            };
+            if let Err(message) = ensure_download_complete(total, count) {
                 let _ = tokio::fs::remove_file(&temp).await;
-                return count;
+                return Err(message);
             }
             if let Err(e) = dst.flush().await {
                 let _ = tokio::fs::remove_file(&temp).await;
                 return Err(format!("{}: {e}", crate::i18n::t("刷新本地文件失败", "Failed to flush the local file")));
             }
-            let _ = dst.sync_all().await;
+            if let Err(e) = dst.sync_all().await {
+                let _ = tokio::fs::remove_file(&temp).await;
+                return Err(format!("{}: {e}", crate::i18n::t("同步本地文件失败", "Failed to sync the local file")));
+            }
             drop(dst);
             let _ = src.close().await;
             if let Err(e) = tokio::fs::rename(&temp, &local).await {
@@ -652,23 +828,68 @@ pub async fn sftp_download(
             if let Some(perms) = existing_perms {
                 let _ = tokio::fs::set_permissions(&local, perms).await;
             }
-            count
+            Ok((count, overwritten))
         })
     })
-    .await;
-    registry.remove(&transfer_id);
-    let count = result?;
-    Ok(success(if crate::i18n::is_en() {
-            format!("Downloaded {count} bytes")
-        } else {
-            format!("已下载 {count} 字节")
-        }))
+    .await
 }
 
 /// 请求路径本身未被标记为敏感、但解析后的真实目标命中敏感规则：
 /// 用户从未看到过该目标的确认提示，必须直接拒绝（防远端预置符号链接）。
 fn resolved_target_is_sensitive(requested: &str, real: &str) -> bool {
     real != requested && is_sensitive_remote_path(real)
+}
+
+/// 取远端文件名；拒绝目录路径、`.`、`..` 和空名。
+fn remote_file_name(path: &str) -> Option<&str> {
+    let name = path.rsplit('/').next().unwrap_or("");
+    if name.is_empty() || name == "." || name == ".." {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// 解析上传真实目标：已存在路径使用服务端 canonical；新文件则 canonical 父目录后拼接文件名。
+/// 这样原路径或父目录之后被替换成符号链接，也不会改变本次写入目标。
+async fn resolve_remote_write_target(sftp: &SftpSession, remote: &str) -> Result<String, String> {
+    if sftp.symlink_metadata(remote).await.is_ok() {
+        return sftp
+            .canonicalize(remote)
+            .await
+            .map_err(|e| format!("{}: {e}", crate::i18n::t("解析远端目标失败", "Failed to resolve the remote target")));
+    }
+    let name = remote_file_name(remote)
+        .ok_or_else(|| crate::i18n::t("远端目标必须是具体文件路径", "The remote target must be a concrete file path").to_string())?;
+    let parent = remote_parent(remote);
+    let parent_path = if parent.is_empty() { "." } else { parent };
+    let real_parent = sftp
+        .canonicalize(parent_path)
+        .await
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("解析远端目标目录失败", "Failed to resolve the remote target directory")))?;
+    Ok(join_remote(&real_parent, name))
+}
+
+/// 打开/创建前立即复核 canonical 目标；若路径在检查窗口内被替换成链接，拒绝本次操作。
+/// SFTP API 不提供 O_NOFOLLOW，因此仍存在 canonical 目标自身被替换的极小竞态窗口。
+async fn ensure_remote_target_stable(
+    sftp: &SftpSession,
+    real: &str,
+    exists: bool,
+) -> Result<(), String> {
+    let probe = if exists { real } else { remote_parent(real) };
+    let current = sftp
+        .canonicalize(probe)
+        .await
+        .map_err(|e| format!("{}: {e}", crate::i18n::t("复核远端目标失败", "Failed to re-check the remote target")))?;
+    if current != probe {
+        return Err(if crate::i18n::is_en() {
+            format!("Remote target changed during validation: {probe} -> {current}")
+        } else {
+            format!("远端目标在校验期间发生变化：{probe} -> {current}")
+        });
+    }
+    Ok(())
 }
 
 /// 单文件上传结果：写入字节数与是否覆盖了已有文件（审计/汇总用）。
@@ -687,6 +908,8 @@ async fn upload_file_atomic(
     local: &Path,
     remote: &str,
     confirmed: bool,
+    overwrite: bool,
+    max_bytes: Option<u64>,
     transfer_id: &str,
     app: &AppHandle,
     cancelled: &AtomicBool,
@@ -699,18 +922,8 @@ async fn upload_file_atomic(
     let mut src = tokio::fs::File::open(local)
         .await
         .map_err(|e| format!("{}: {e}", crate::i18n::t("打开本地文件失败", "Failed to open the local file")))?;
-    // 与 write_atomic 一致：符号链接写到真实目标（rename 到链接路径会把链接替换成普通文件），
-    // 目标是目录直接拒绝，覆盖已有文件时沿用其权限。
-    // 先 lstat 一次：非链接的常见情况直接复用结果，批量上传少一个 RTT。
-    let initial = sftp.symlink_metadata(remote).await.ok();
-    let real = if initial
-        .as_ref()
-        .is_some_and(|m| m.file_type().is_symlink())
-    {
-        resolve_link(sftp, remote).await
-    } else {
-        remote.to_string()
-    };
+    // canonical 真实目标后再写，原路径/父目录被替换成符号链接也不会改变写入位置。
+    let real = resolve_remote_write_target(sftp, remote).await?;
     if resolved_target_is_sensitive(remote, &real) {
         return Err(if crate::i18n::is_en() {
             format!("{remote} resolves to a sensitive path ({real}); upload rejected")
@@ -725,11 +938,9 @@ async fn upload_file_atomic(
             format!("{remote} 属于敏感路径，上传需要确认")
         });
     }
-    let existing = if real == remote {
-        initial
-    } else {
-        sftp.symlink_metadata(real.as_str()).await.ok()
-    };
+    let existing = sftp.symlink_metadata(real.as_str()).await.ok();
+    ensure_remote_target_stable(sftp, &real, existing.is_some()).await?;
+    ensure_overwrite_allowed(existing.is_some(), overwrite)?;
     if existing.as_ref().is_some_and(|m| m.file_type().is_dir()) {
         return Err(crate::i18n::t("目标是目录，无法写入文件", "The target is a directory; cannot write a file").to_string());
     }
@@ -746,6 +957,7 @@ async fn upload_file_atomic(
         &mut src,
         &mut dst,
         progress_total,
+        max_bytes,
         progress_base,
         transfer_id,
         "upload",
@@ -807,34 +1019,26 @@ pub async fn sftp_upload(
     }
     let started = Instant::now();
     let cancelled = registry.register(&transfer_id, &host_id);
-    let result = with_sftp(&russh, &host, TRANSFER_TIMEOUT, |sftp| {
-        let local = PathBuf::from(&local);
-        let remote = remote.clone();
-        let transfer_id = transfer_id.clone();
-        let app = app.clone();
-        let cancelled = cancelled.clone();
-        Box::pin(async move {
-            upload_file_atomic(
-                sftp,
-                &local,
-                &remote,
-                confirmed,
-                &transfer_id,
-                &app,
-                &cancelled,
-                None,
-            )
-            .await
-        })
-    })
+    let result = upload_local_file(
+        app.clone(),
+        &russh,
+        &host,
+        local,
+        remote.clone(),
+        confirmed,
+        true,
+        None,
+        transfer_id.clone(),
+        cancelled.clone(),
+    )
     .await;
     registry.remove(&transfer_id);
     let audit_result = match &result {
-        Ok(info) => {
+        Ok((bytes, _)) => {
             if crate::i18n::is_en() {
-                format!("Uploaded {} bytes", info.bytes)
+                format!("Uploaded {bytes} bytes")
             } else {
-                format!("已上传 {} 字节", info.bytes)
+                format!("已上传 {bytes} 字节")
             }
         }
         Err(e) => e.clone(),
@@ -849,12 +1053,53 @@ pub async fn sftp_upload(
         Some(&audit_result),
         started.elapsed().as_millis() as u64,
     );
-    let info = result?;
+    let (bytes, _) = result?;
     Ok(success(if crate::i18n::is_en() {
-            format!("Uploaded {} bytes", info.bytes)
+            format!("Uploaded {bytes} bytes")
         } else {
-            format!("已上传 {} 字节", info.bytes)
+            format!("已上传 {bytes} 字节")
         }))
+}
+
+/// MCP 等内部调用复用的单文件上传内核：不含 Tauri State / 审计，
+/// 由调用方负责权限、审批和审计；仍使用 SFTP 临时文件 + rename 原子上传。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn upload_local_file(
+    app: AppHandle,
+    russh: &RusshManager,
+    host: &Host,
+    local: String,
+    remote: String,
+    confirmed: bool,
+    overwrite: bool,
+    max_bytes: Option<u64>,
+    transfer_id: String,
+    cancelled: Arc<AtomicBool>,
+) -> Result<(u64, bool), String> {
+    with_sftp(russh, host, TRANSFER_TIMEOUT, |sftp| {
+        let local = PathBuf::from(local.clone());
+        let remote = remote.clone();
+        let transfer_id = transfer_id.clone();
+        let app = app.clone();
+        let cancelled = cancelled.clone();
+        Box::pin(async move {
+            let info = upload_file_atomic(
+                sftp,
+                &local,
+                &remote,
+                confirmed,
+                overwrite,
+                max_bytes,
+                &transfer_id,
+                &app,
+                &cancelled,
+                None,
+            )
+            .await?;
+            Ok((info.bytes, info.overwritten))
+        })
+    })
+    .await
 }
 
 /// 目录上传预检结果：数量/大小统计 + 敏感目标与远端占用情况，
@@ -1439,6 +1684,8 @@ pub async fn sftp_upload_dir(
                     &file.abs,
                     &target,
                     confirmed,
+                    true,
+                    None,
                     &transfer_id,
                     &app,
                     &cancelled,
@@ -2123,6 +2370,53 @@ fn attr_value(value: Option<&str>, id: Option<u32>) -> String {
 mod tests {
     use super::*;
     use crate::models::AuthType;
+
+    #[test]
+    fn validate_local_path_rejects_relative_and_sensitive_paths() {
+        assert!(validate_local_path("relative.txt").is_err());
+        assert!(validate_local_path("/home/me/.ssh/id_rsa").is_err());
+        assert!(validate_local_path(r"C:\Users\me\.aws\credentials").is_err());
+    }
+
+    #[test]
+    fn validate_local_output_path_checks_destination_and_parent() {
+        assert!(validate_local_output_path("relative.txt").is_err());
+        assert!(validate_local_output_path("/home/me/.ssh/config").is_err());
+
+        let dir = std::env::temp_dir().join(format!("buffterm-output-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("download.bin");
+        assert!(validate_local_output_path(&file.to_string_lossy()).is_ok());
+        assert!(validate_local_output_path(&dir.to_string_lossy()).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn overwrite_and_download_integrity_guards() {
+        assert!(ensure_overwrite_allowed(true, false).is_err());
+        assert!(ensure_overwrite_allowed(true, true).is_ok());
+        assert!(ensure_overwrite_allowed(false, false).is_ok());
+        assert!(ensure_download_complete(100, 99).is_err());
+        assert!(ensure_download_complete(100, 100).is_ok());
+        assert!(ensure_download_complete(100, 120).is_ok());
+        assert!(ensure_download_complete(0, 0).is_ok());
+        assert_eq!(remote_file_name("/tmp/a.txt"), Some("a.txt"));
+        assert_eq!(remote_file_name("/tmp/"), None);
+        assert_eq!(remote_file_name("/tmp/.."), None);
+        assert!(ensure_transfer_chunk_limit(90, 10, Some(100)).is_ok());
+        assert!(ensure_transfer_chunk_limit(90, 11, Some(100)).is_err());
+        assert!(ensure_transfer_chunk_limit(90, 11, None).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_local_output_path_rejects_sensitive_parent_symlink() {
+        let root = std::env::temp_dir().join(format!("buffterm-link-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".ssh")).unwrap();
+        std::os::unix::fs::symlink(root.join(".ssh"), root.join("link")).unwrap();
+        assert!(validate_local_output_path(&root.join("link/config").to_string_lossy()).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn transfer_cancel_for_host_sets_flag() {

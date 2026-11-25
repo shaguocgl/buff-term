@@ -114,6 +114,7 @@ pub fn run() {
             app.manage(remediation::RemediationManager::default());
             app.manage(mcp::McpServiceManager::default());
             app.manage(mcp::ApprovalRegistry::default());
+            app.manage(mcp::McpCancelRegistry::default());
             app.manage(sftp::SftpTransferRegistry::default());
             app.manage(sftp::SftpSessionManager::default());
             app.manage(watch::GuardManager::default());

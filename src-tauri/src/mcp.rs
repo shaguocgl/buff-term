@@ -11,6 +11,10 @@
 use crate::db::Db;
 use crate::models::{Host, McpPermissionMode, McpRule, McpService};
 use crate::russh::{ExecResult, RusshManager};
+use crate::sftp::{
+    download_local_file, ensure_overwrite_allowed, remote_file_size, remote_path_exists,
+    upload_local_file, validate_local_output_path, validate_local_path,
+};
 use crate::safety::{
     command_has_sensitive_path, is_safe_readonly_command, is_sensitive_path, sanitize,
 };
@@ -27,6 +31,8 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 const DEFAULT_PORT: u16 = 48123;
 const PROTOCOL_VERSION: &str = "2025-03-26";
+/// MCP 单文件传输上限（2 GiB）。JSON 请求体限制之外，避免本地/远端磁盘被无界占满。
+const MCP_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 // ---------- 配置 ----------
 
@@ -127,6 +133,73 @@ impl ApprovalRegistry {
     fn pending_len(&self) -> usize {
         self.pending.lock().unwrap().len()
     }
+}
+
+// ---------- MCP 取消注册表 ----------
+
+#[derive(Default)]
+pub struct McpCancelRegistry {
+    flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+impl McpCancelRegistry {
+    fn register(&self, id: &serde_json::Value) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        self.flags
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), flag.clone());
+        flag
+    }
+
+    fn remove(&self, id: &serde_json::Value) {
+        self.flags.lock().unwrap().remove(&id.to_string());
+    }
+
+    fn cancel(&self, id: &serde_json::Value) -> bool {
+        match self.flags.lock().unwrap().get(&id.to_string()) {
+            Some(flag) => {
+                flag.store(true, Ordering::SeqCst);
+                true
+            }
+            None => false,
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.flags.lock().unwrap().len()
+    }
+}
+
+fn bool_arg(args: &serde_json::Value, key: &str) -> Result<bool, String> {
+    match args.get(key) {
+        None => Ok(false),
+        Some(serde_json::Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(if crate::i18n::is_en() {
+            format!("{key} must be a boolean")
+        } else {
+            format!("{key} 必须是布尔值")
+        }),
+    }
+}
+
+fn ensure_transfer_permission(mode: McpPermissionMode) -> Result<(), String> {
+    if mode == McpPermissionMode::Readonly {
+        return Err(crate::i18n::t("只读模式不允许上传或下载文件", "File upload and download are not allowed in read-only mode").to_string());
+    }
+    Ok(())
+}
+
+fn check_mcp_file_size(size: u64) -> Result<(), String> {
+    if size > MCP_MAX_FILE_BYTES {
+        return Err(if crate::i18n::is_en() {
+            format!("File size {size} bytes exceeds the MCP transfer limit of {MCP_MAX_FILE_BYTES} bytes")
+        } else {
+            format!("文件大小 {size} 字节超过 MCP 传输上限 {MCP_MAX_FILE_BYTES} 字节")
+        });
+    }
+    Ok(())
 }
 
 // ---------- Tauri 命令 ----------
@@ -672,6 +745,14 @@ async fn handle_jsonrpc(app: &AppHandle, body: &str) -> String {
             }),
         ),
         "notifications/initialized" => String::new(),
+        "notifications/cancelled" => {
+            if let Some(request_id) = value["params"].get("requestId") {
+                if let Some(registry) = app.try_state::<McpCancelRegistry>() {
+                    registry.cancel(request_id);
+                }
+            }
+            String::new()
+        }
         "ping" => respond(id, serde_json::json!({})),
         "tools/list" => {
             respond(id, serde_json::json!({ "tools": tools_schema() }))
@@ -684,7 +765,16 @@ async fn handle_jsonrpc(app: &AppHandle, body: &str) -> String {
             } else {
                 serde_json::json!({})
             };
-            match call_tool(app, &name, &args).await {
+            let cancel_flag = id
+                .as_ref()
+                .and_then(|id| app.try_state::<McpCancelRegistry>().map(|registry| registry.register(id)));
+            let result = call_tool(app, &name, &args, cancel_flag.clone()).await;
+            if let Some(id) = id.as_ref() {
+                if let Some(registry) = app.try_state::<McpCancelRegistry>() {
+                    registry.remove(id);
+                }
+            }
+            match result {
                 Ok(text) => respond(
                     id,
                     serde_json::json!({
@@ -769,6 +859,34 @@ fn tools_schema() -> Vec<serde_json::Value> {
             }
         }),
         serde_json::json!({
+            "name": "upload_file",
+            "description": crate::i18n::t("将运行 buffTerm 的电脑上的本地文件通过 SFTP 原子上传到指定服务器。local_path 必须是本机绝对路径，remote_path 必须是服务器绝对路径；已有目标默认拒绝覆盖，overwrite=true 时才原子替换。单文件上限 2 GiB。只读模式拒绝，管控模式每次都需要用户确认，敏感本地路径（含符号链接真实目标）始终拒绝", "Upload a local file from the computer running buffTerm to the given server over SFTP. local_path must be an absolute local path and remote_path an absolute server path; existing targets are rejected unless overwrite=true, which enables atomic replacement. Maximum file size is 2 GiB. Read-only mode rejects, guarded mode always requires user approval, and sensitive local paths (including symlink targets) are always rejected"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "host": { "type": "string", "description": crate::i18n::t("主机 id / name / address", "host id / name / address") },
+                    "local_path": { "type": "string", "description": crate::i18n::t("运行 buffTerm 的电脑上的本地文件绝对路径", "absolute path of the local file on the computer running buffTerm") },
+                    "remote_path": { "type": "string", "description": crate::i18n::t("服务器上的目标文件绝对路径", "absolute target file path on the server") },
+                    "overwrite": { "type": "boolean", "default": false, "description": crate::i18n::t("是否允许覆盖已存在的远端文件，默认 false", "whether an existing remote file may be replaced; defaults to false") }
+                },
+                "required": ["host", "local_path", "remote_path"]
+            }
+        }),
+        serde_json::json!({
+            "name": "download_file",
+            "description": crate::i18n::t("将指定服务器上的远端文件通过 SFTP 原子下载到运行 buffTerm 的电脑。remote_path 必须是服务器绝对路径，local_path 必须是本机绝对目标路径；已有本地文件默认拒绝覆盖，overwrite=true 时才原子替换。单文件上限 2 GiB。只读模式拒绝，管控模式每次都需要用户确认，敏感本地目标（含父目录符号链接）始终拒绝，远端符号链接解析到敏感路径时拒绝", "Download a remote file from the given server to the computer running buffTerm over SFTP. remote_path must be an absolute server path and local_path an absolute local destination; existing local files are rejected unless overwrite=true, which enables atomic replacement. Maximum file size is 2 GiB. Read-only mode rejects, guarded mode always requires user approval, sensitive local destinations (including parent-directory symlinks) are always rejected, and remote symlinks resolving to sensitive paths are rejected"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "host": { "type": "string", "description": crate::i18n::t("主机 id / name / address", "host id / name / address") },
+                    "remote_path": { "type": "string", "description": crate::i18n::t("服务器上的源文件绝对路径", "absolute source file path on the server") },
+                    "local_path": { "type": "string", "description": crate::i18n::t("运行 buffTerm 的电脑上的本地目标绝对路径", "absolute local destination path on the computer running buffTerm") },
+                    "overwrite": { "type": "boolean", "default": false, "description": crate::i18n::t("是否允许覆盖已存在的本地文件，默认 false", "whether an existing local file may be replaced; defaults to false") }
+                },
+                "required": ["host", "remote_path", "local_path"]
+            }
+        }),
+        serde_json::json!({
             "name": "exec_command",
             "description": crate::i18n::t("在指定服务器上执行一条 shell 命令并返回输出。只读模式只允许可证明安全的简单只读命令；管控模式下非安全只读命令、敏感路径或命中自定义规则都需要用户确认。host 建议使用 list_hosts 返回的 id", "Run a shell command on the given server and return its output. Read-only mode only allows proven safe simple read-only commands; in guarded mode non-safe commands, sensitive paths, or custom-rule matches require user approval. Prefer the id returned by list_hosts for host"),
             "inputSchema": {
@@ -787,7 +905,12 @@ fn tools_schema() -> Vec<serde_json::Value> {
 
 // ---------- 工具执行 ----------
 
-async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Result<String, String> {
+async fn call_tool(
+    app: &AppHandle,
+    name: &str,
+    args: &serde_json::Value,
+    cancelled: Option<Arc<AtomicBool>>,
+) -> Result<String, String> {
     let db = app
         .try_state::<Arc<Db>>()
         .ok_or_else(|| crate::i18n::t("数据库不可用", "The database is unavailable").to_string())?;
@@ -885,6 +1008,314 @@ async fn call_tool(app: &AppHandle, name: &str, args: &serde_json::Value) -> Res
             let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
             let script = format!("ls -lah -- {}", shq(path));
             run_and_log(app, host, name, &script, 15, None).await
+        }
+        "upload_file" => {
+            let local = args
+                .get("local_path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| crate::i18n::t("缺少 local_path 参数", "Missing local_path parameter").to_string())?;
+            let remote = args
+                .get("remote_path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| crate::i18n::t("缺少 remote_path 参数", "Missing remote_path parameter").to_string())?;
+            let path_summary = format!("{local} -> {remote}");
+            let audit_denied = |message: &str| {
+                let _ = write_audit(app, host, "mcp:upload_file", &path_summary, "denied", "denied", Some(message), None);
+            };
+            let audit_error = |message: &str| {
+                let _ = write_audit(app, host, "mcp:upload_file", &path_summary, "auto", "error", Some(message), None);
+            };
+            let overwrite = match bool_arg(args, "overwrite") {
+                Ok(value) => value,
+                Err(message) => {
+                    audit_denied(&message);
+                    return Err(message);
+                }
+            };
+            if local.chars().any(char::is_control) {
+                let message = crate::i18n::t("local_path 不能包含控制字符", "local_path must not contain control characters").to_string();
+                audit_denied(&message);
+                return Err(message);
+            }
+            if !remote.starts_with('/') || remote.chars().any(char::is_control) {
+                let message = crate::i18n::t("remote_path 必须是服务器上的绝对路径且不能包含控制字符", "remote_path must be an absolute path on the server without control characters").to_string();
+                audit_denied(&message);
+                return Err(message);
+            }
+            if let Err(message) = ensure_transfer_permission(config.permission_mode) {
+                audit_denied(&message);
+                return Err(message);
+            }
+            // 本地路径与符号链接真实目标都要校验，防止借上传外传私钥/云凭据。
+            if let Err(message) = validate_local_path(local) {
+                audit_denied(&message);
+                return Err(message);
+            }
+            // 实际传输使用 canonical 路径，避免校验后通过替换符号链接把文件重定向到敏感位置。
+            let resolved_local = match std::path::Path::new(local).canonicalize() {
+                Ok(path) => path,
+                Err(e) => {
+                    let message = format!("{}: {e}", crate::i18n::t("解析本地文件路径失败", "Failed to resolve the local file path"));
+                    audit_error(&message);
+                    return Err(message);
+                }
+            };
+            let local_actual = resolved_local.to_string_lossy();
+            if let Err(message) = validate_local_path(local_actual.as_ref()) {
+                audit_denied(&message);
+                return Err(message);
+            }
+            let metadata = match tokio::fs::metadata(&resolved_local).await {
+                Ok(metadata) => metadata,
+                Err(e) => {
+                    let message = format!("{}: {e}", crate::i18n::t("读取本地文件信息失败", "Failed to read local file info"));
+                    audit_error(&message);
+                    return Err(message);
+                }
+            };
+            if !metadata.is_file() {
+                let message = crate::i18n::t("local_path 必须是文件，不能是目录", "local_path must be a file, not a directory").to_string();
+                audit_denied(&message);
+                return Err(message);
+            }
+            let size = metadata.len();
+            if let Err(message) = check_mcp_file_size(size) {
+                audit_denied(&message);
+                return Err(message);
+            }
+            let russh = match app.try_state::<RusshManager>() {
+                Some(russh) => russh,
+                None => {
+                    let message = crate::i18n::t("SSH 管理器不可用", "The SSH manager is unavailable").to_string();
+                    audit_error(&message);
+                    return Err(message);
+                }
+            };
+            let remote_exists = match remote_path_exists(&russh, host, remote).await {
+                Ok(exists) => exists,
+                Err(message) => {
+                    audit_error(&message);
+                    return Err(message);
+                }
+            };
+            if let Err(message) = ensure_overwrite_allowed(remote_exists, overwrite) {
+                audit_denied(&message);
+                return Err(message);
+            }
+            let mut approval: Option<bool> = None;
+            if config.permission_mode == McpPermissionMode::Confirm {
+                let summary = format!("upload_file {local} -> {remote} ({size} bytes, overwrite={remote_exists})");
+                let allowed = request_approval(app, host, &summary).await?;
+                if !allowed {
+                    let message = crate::i18n::t("用户拒绝上传文件", "The user denied the file upload").to_string();
+                    let _ = write_audit(app, host, "mcp:upload_file", &summary, "denied", "denied", Some(&message), None);
+                    return Err(message);
+                }
+                approval = Some(true);
+            }
+            let confirmed = approval == Some(true) || config.permission_mode == McpPermissionMode::Allow;
+            let cancelled = cancelled.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+            if cancelled.load(Ordering::SeqCst) {
+                let message = crate::i18n::t("上传已取消", "Upload cancelled").to_string();
+                audit_error(&message);
+                return Err(message);
+            }
+            let started = Instant::now();
+            let result = upload_local_file(
+                app.clone(),
+                &russh,
+                host,
+                local_actual.to_string(),
+                remote.to_string(),
+                confirmed,
+                overwrite,
+                Some(MCP_MAX_FILE_BYTES),
+                format!("mcp-{}", uuid::Uuid::new_v4()),
+                cancelled,
+            )
+            .await;
+            let approval_label = if approval == Some(true) { "approved" } else { "auto" };
+            let (status, audit_result) = match &result {
+                Ok((bytes, overwritten)) => (
+                    "ok",
+                    if crate::i18n::is_en() {
+                        format!("Uploaded {bytes} bytes; overwritten={overwritten}")
+                    } else {
+                        format!("已上传 {bytes} 字节；覆盖={overwritten}")
+                    },
+                ),
+                Err(e) => ("error", e.clone()),
+            };
+            let _ = write_audit(
+                app,
+                host,
+                "mcp:upload_file",
+                &path_summary,
+                approval_label,
+                status,
+                Some(&audit_result),
+                Some(started.elapsed().as_millis() as u64),
+            );
+            let (bytes, overwritten) = result?;
+            Ok(if crate::i18n::is_en() {
+                format!("Uploaded {local} to {remote} ({bytes} bytes, overwritten={overwritten})")
+            } else {
+                format!("已将 {local} 上传到 {remote}（{bytes} 字节，覆盖={overwritten}）")
+            })
+        }
+        "download_file" => {
+            let remote = args
+                .get("remote_path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| crate::i18n::t("缺少 remote_path 参数", "Missing remote_path parameter").to_string())?;
+            let local = args
+                .get("local_path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| crate::i18n::t("缺少 local_path 参数", "Missing local_path parameter").to_string())?;
+            let path_summary = format!("{remote} -> {local}");
+            let audit_denied = |message: &str| {
+                let _ = write_audit(app, host, "mcp:download_file", &path_summary, "denied", "denied", Some(message), None);
+            };
+            let audit_error = |message: &str| {
+                let _ = write_audit(app, host, "mcp:download_file", &path_summary, "auto", "error", Some(message), None);
+            };
+            let overwrite = match bool_arg(args, "overwrite") {
+                Ok(value) => value,
+                Err(message) => {
+                    audit_denied(&message);
+                    return Err(message);
+                }
+            };
+            if remote.chars().any(char::is_control) || local.chars().any(char::is_control) {
+                let message = crate::i18n::t("文件路径不能包含控制字符", "File paths must not contain control characters").to_string();
+                audit_denied(&message);
+                return Err(message);
+            }
+            if !remote.starts_with('/') {
+                let message = crate::i18n::t("remote_path 必须是服务器上的绝对路径", "remote_path must be an absolute path on the server").to_string();
+                audit_denied(&message);
+                return Err(message);
+            }
+            if let Err(message) = ensure_transfer_permission(config.permission_mode) {
+                audit_denied(&message);
+                return Err(message);
+            }
+            if let Err(message) = validate_local_output_path(local) {
+                audit_denied(&message);
+                return Err(message);
+            }
+            // 父目录 canonical 后再拼接文件名，避免校验后替换父目录符号链接重定向本地写入。
+            let local_path = std::path::Path::new(local);
+            let file_name = match local_path.file_name().and_then(|name| name.to_str()) {
+                Some(name) => name,
+                None => {
+                    let message = crate::i18n::t("local_path 必须指向具体文件", "local_path must point to a file").to_string();
+                    audit_denied(&message);
+                    return Err(message);
+                }
+            };
+            let parent = match local_path.parent() {
+                Some(parent) => match parent.canonicalize() {
+                    Ok(parent) => parent,
+                    Err(e) => {
+                        let message = format!("{}: {e}", crate::i18n::t("解析本地目标目录失败", "Failed to resolve the local destination directory"));
+                        audit_error(&message);
+                        return Err(message);
+                    }
+                },
+                None => {
+                    let message = crate::i18n::t("local_path 必须指向具体文件", "local_path must point to a file").to_string();
+                    audit_denied(&message);
+                    return Err(message);
+                }
+            };
+            let resolved_local = parent.join(file_name);
+            if let Err(message) = validate_local_output_path(&resolved_local.to_string_lossy()) {
+                audit_denied(&message);
+                return Err(message);
+            }
+            let local_exists = resolved_local.exists();
+            if let Err(message) = ensure_overwrite_allowed(local_exists, overwrite) {
+                audit_denied(&message);
+                return Err(message);
+            }
+            let russh = match app.try_state::<RusshManager>() {
+                Some(russh) => russh,
+                None => {
+                    let message = crate::i18n::t("SSH 管理器不可用", "The SSH manager is unavailable").to_string();
+                    audit_error(&message);
+                    return Err(message);
+                }
+            };
+            let size = match remote_file_size(&russh, host, remote).await {
+                Ok(size) => size,
+                Err(message) => {
+                    audit_error(&message);
+                    return Err(message);
+                }
+            };
+            if let Err(message) = check_mcp_file_size(size) {
+                audit_denied(&message);
+                return Err(message);
+            }
+            let mut approval: Option<bool> = None;
+            if config.permission_mode == McpPermissionMode::Confirm {
+                let summary = format!("download_file {remote} -> {local} ({size} bytes, overwrite={local_exists})");
+                let allowed = request_approval(app, host, &summary).await?;
+                if !allowed {
+                    let message = crate::i18n::t("用户拒绝下载文件", "The user denied the file download").to_string();
+                    let _ = write_audit(app, host, "mcp:download_file", &summary, "denied", "denied", Some(&message), None);
+                    return Err(message);
+                }
+                approval = Some(true);
+            }
+            let cancelled = cancelled.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+            if cancelled.load(Ordering::SeqCst) {
+                let message = crate::i18n::t("下载已取消", "Download cancelled").to_string();
+                audit_error(&message);
+                return Err(message);
+            }
+            let started = Instant::now();
+            let result = download_local_file(
+                app.clone(),
+                &russh,
+                host,
+                remote.to_string(),
+                resolved_local.to_string_lossy().to_string(),
+                overwrite,
+                Some(MCP_MAX_FILE_BYTES),
+                format!("mcp-{}", uuid::Uuid::new_v4()),
+                cancelled,
+            )
+            .await;
+            let approval_label = if approval == Some(true) { "approved" } else { "auto" };
+            let (status, audit_result) = match &result {
+                Ok((bytes, overwritten)) => (
+                    "ok",
+                    if crate::i18n::is_en() {
+                        format!("Downloaded {bytes} bytes; overwritten={overwritten}")
+                    } else {
+                        format!("已下载 {bytes} 字节；覆盖={overwritten}")
+                    },
+                ),
+                Err(e) => ("error", e.clone()),
+            };
+            let _ = write_audit(
+                app,
+                host,
+                "mcp:download_file",
+                &path_summary,
+                approval_label,
+                status,
+                Some(&audit_result),
+                Some(started.elapsed().as_millis() as u64),
+            );
+            let (bytes, overwritten) = result?;
+            Ok(if crate::i18n::is_en() {
+                format!("Downloaded {remote} to {local} ({bytes} bytes, overwritten={overwritten})")
+            } else {
+                format!("已将 {remote} 下载到 {local}（{bytes} 字节，覆盖={overwritten}）")
+            })
         }
         "exec_command" => {
             let command = args
@@ -1127,6 +1558,60 @@ mod tests {
             exit_code,
             timed_out,
         }
+    }
+
+    #[test]
+    fn transfer_helpers_enforce_permission_size_and_cancel() {
+        assert!(ensure_transfer_permission(McpPermissionMode::Readonly).is_err());
+        assert!(ensure_transfer_permission(McpPermissionMode::Confirm).is_ok());
+        assert!(ensure_transfer_permission(McpPermissionMode::Allow).is_ok());
+        assert!(check_mcp_file_size(MCP_MAX_FILE_BYTES).is_ok());
+        assert!(check_mcp_file_size(MCP_MAX_FILE_BYTES + 1).is_err());
+        assert!(!bool_arg(&serde_json::json!({}), "overwrite").unwrap());
+        assert!(bool_arg(&serde_json::json!({ "overwrite": true }), "overwrite").unwrap());
+        assert!(bool_arg(&serde_json::json!({ "overwrite": "yes" }), "overwrite").is_err());
+
+        let registry = McpCancelRegistry::default();
+        let id = serde_json::json!(7);
+        let flag = registry.register(&id);
+        assert_eq!(registry.len(), 1);
+        assert!(registry.cancel(&id));
+        assert!(flag.load(Ordering::SeqCst));
+        registry.remove(&id);
+        assert_eq!(registry.len(), 0);
+        assert!(!registry.cancel(&id));
+    }
+
+    #[test]
+    fn tools_schema_includes_upload_file() {
+        let tools = tools_schema();
+        let upload = tools
+            .iter()
+            .find(|tool| tool["name"] == "upload_file")
+            .expect("upload_file must be advertised");
+        let required = upload["inputSchema"]["required"].as_array().unwrap();
+        for key in ["host", "local_path", "remote_path"] {
+            assert!(required.iter().any(|value| value == key));
+        }
+        assert_eq!(upload["inputSchema"]["properties"]["local_path"]["type"], "string");
+        assert_eq!(upload["inputSchema"]["properties"]["remote_path"]["type"], "string");
+        assert_eq!(upload["inputSchema"]["properties"]["overwrite"]["default"], false);
+    }
+
+    #[test]
+    fn tools_schema_includes_download_file() {
+        let tools = tools_schema();
+        let download = tools
+            .iter()
+            .find(|tool| tool["name"] == "download_file")
+            .expect("download_file must be advertised");
+        let required = download["inputSchema"]["required"].as_array().unwrap();
+        for key in ["host", "remote_path", "local_path"] {
+            assert!(required.iter().any(|value| value == key));
+        }
+        assert_eq!(download["inputSchema"]["properties"]["remote_path"]["type"], "string");
+        assert_eq!(download["inputSchema"]["properties"]["local_path"]["type"], "string");
+        assert_eq!(download["inputSchema"]["properties"]["overwrite"]["default"], false);
     }
 
     #[test]

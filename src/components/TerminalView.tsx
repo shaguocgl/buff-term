@@ -3,6 +3,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type CSSProperties,
   type MouseEvent as ReactMouseEvent,
 } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -927,7 +928,11 @@ export default function TerminalView({
           </button>
         </div>
       </div>
-      <div className="terminal-body" ref={containerRef}>
+      <div
+        className="terminal-body"
+        ref={containerRef}
+        style={{ '--terminal-font-size': `${fontSize}px` } as CSSProperties}
+      >
         {connecting && (
           <div className="terminal-overlay">
             <div className="spinner" />

@@ -63,6 +63,7 @@ Credentials are encrypted with AES-256-GCM and stored in a local SQLite database
 ### MCP service
 
 - **buffTerm as an MCP server**: Streamable HTTP + JSON-RPC + token authentication, exposing the servers you select to external AI tools such as Codex and Claude Desktop
+- **File transfer**: `upload_file(local_path, remote_path, overwrite?)` uploads a local file and `download_file(remote_path, local_path, overwrite?)` downloads a remote file, both with atomic SFTP replacement. Existing files are protected unless `overwrite=true`, each file is limited to 2 GiB, and MCP cancellation is supported. Read-only mode rejects transfers, guarded mode confirms each one, and sensitive local paths/directories and remote sensitive symlinks are rejected
 - Three permission modes: read-only (only proven safe read-only commands; other commands and sensitive paths are rejected) / guarded (non-safe commands, sensitive paths or custom rules need confirmation) / allow all
 - Generates the external AI's MCP configuration JSON on start, with token rotation and revocation
 

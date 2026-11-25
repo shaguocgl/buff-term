@@ -62,6 +62,7 @@ buffTerm 是一款**面向 AI 的 SSH 工具与 MCP 服务器**，内置**自研
 ### MCP 服务
 
 - **buffTerm 作为 MCP 服务器**：基于 Streamable HTTP + JSON-RPC + token 认证，把勾选的服务器能力开放给 Codex、Claude Desktop 等外部 AI 工具
+- **文件传输**：`upload_file(local_path, remote_path, overwrite?)` 上传本地文件，`download_file(remote_path, local_path, overwrite?)` 下载远端文件；均复用 SFTP 原子替换，默认拒绝覆盖已存在文件，单文件上限 2 GiB，支持 MCP 取消。只读模式拒绝，管控模式每次确认，敏感本地路径/目录与远端敏感符号链接拒绝
 - 三种权限模式：只读（仅安全只读命令，其余与敏感路径拒绝）/ 管控（非安全只读、敏感路径或自定义规则需确认）/ 全部放行
 - 启动后自动生成外部 AI 的 MCP 配置 JSON，支持 token 轮换与吊销
 
