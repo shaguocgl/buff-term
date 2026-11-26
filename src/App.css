@@ -901,6 +901,11 @@ button {
   padding-bottom: calc(var(--terminal-font-size, 14px) * 1.5);
 }
 
+/* xterm 默认把 viewport 背景写死为黑色；底部安全区也在 viewport 内，必须跟随主题。 */
+.terminal-body .xterm .xterm-viewport {
+  background-color: var(--terminal-bg);
+}
+
 .terminal-overlay {
   position: absolute;
   inset: 0;
